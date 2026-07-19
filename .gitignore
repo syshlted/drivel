@@ -1,0 +1,17 @@
+# Binaries
+/dedupfs
+/bin/
+*.exe
+
+# Local runtime data / mounts
+/data/
+/mnt/
+*.db
+
+# Secrets / OAuth
+credentials.json
+token.json
+*.local.json
+
+# Go
+/vendor/
