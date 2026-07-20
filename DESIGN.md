@@ -61,7 +61,12 @@ provider. First (and currently only) provider: **Google Drive**.
                           ┌──────▼───────┐
                           │  Provider    │  Google Drive API v3
                           │  (Drive)     │  - files.* (CRUD)
-                          └──────────────┘  - changes.list (pull cursor)
+                          └──────┬───────┘  - changes.list (pull cursor)
+                                 │ injected *http.Client
+                          ┌──────▼───────────────────┐
+                          │  Transport (§2.6)         │  HTTP/3 (QUIC) preferred,
+                          │  HTTP/3 → HTTP/2 fallback  │  HTTP/2 fallback if UDP
+                          └───────────────────────────┘  blocked; OAuth wraps it
 ```
 
 ### 2.1 FUSE layer
@@ -109,6 +114,45 @@ type Provider interface {
     Download(ctx context.Context, fileID string) (io.ReadCloser, error)
 }
 ```
+
+The Drive implementation is constructed with an injected `*http.Client` (see §2.6),
+so the transport is chosen independently of provider logic.
+
+### 2.6 Transport — HTTP/3 (QUIC) with HTTP/2 fallback
+All Drive API traffic goes over **HTTP/3**. Rationale: QUIC's connection reuse and
+0-RTT resumption suit our access pattern (a frequent `changes.list` poll loop plus
+bursty uploads) — repeated TLS/TCP handshakes are avoided, and head-of-line blocking
+across concurrent transfers is eliminated.
+
+Implementation facts that shape the design:
+- **Go 1.26's `net/http` has no HTTP/3 client** (HTTP/1.1 + HTTP/2 only). HTTP/3 comes
+  from [`github.com/quic-go/quic-go`](https://github.com/quic-go/quic-go) (`http3.Transport`,
+  which implements `http.RoundTripper`). Pure Go, no CGO.
+- Google's `googleapis.com` endpoints advertise `h3` via Alt-Svc, so the server side
+  needs no special handling.
+
+**QUIC is UDP/443, and quic-go does not auto-fall back to TCP.** So a small
+`internal/transport` package builds a **composite `RoundTripper`**: it prefers HTTP/3
+and transparently falls back to a standard HTTP/2 client when the QUIC dial fails or
+times out (UDP blocked, restrictive networks). The fallback decision is cached per
+host so we don't re-probe UDP on every request. This is HTTP/3-*preferred*, not
+HTTP/3-*only*.
+
+**Composition with OAuth (§ auth, M2).** The transport sits *below* auth. Passing
+`option.WithHTTPClient` to the Drive service means we must **not** also pass
+`WithTokenSource` — they conflict — so the token source is folded into the client:
+
+```
+composite RoundTripper (HTTP/3 → HTTP/2)   // internal/transport
+        └─ wrapped by oauth2.Transport{Base: ...}
+                └─ &http.Client{Transport: ...}
+                        └─ drive.NewService(ctx, option.WithHTTPClient(client))
+```
+
+This ordering is why transport is settled before the OAuth work in M2.
+
+Ops note: quic-go wants a larger UDP receive buffer on Linux (`sysctl
+net.core.rmem_max`); otherwise it logs a warning. Documented in CLAUDE.md.
 
 ---
 
@@ -208,7 +252,8 @@ are both lossy and racy.
 
 ## 9. Milestones
 1. **M1 — Passthrough mount.** go-fuse loopback proxying to underlying dir. No cloud.
-2. **M2 — Drive auth + one-shot push.** OAuth, upload a file on close.
+2. **M2 — Transport + Drive auth + one-shot push.** `internal/transport` HTTP/3→HTTP/2
+   client (§2.6), OAuth folded on top, upload a file on close.
 3. **M3 — Pull loop.** `changes.list` cursor loop → underlying dir, with §4 echo
    suppression.
 4. **M4 — Full bidirectional** with debounce, retries, conflict copies, clean shutdown.

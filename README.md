@@ -13,14 +13,17 @@ echo/loop-suppression strategy.
 
 ## Status
 
-Milestone **M1 — passthrough mount** is scaffolded:
+Milestones **M1 (passthrough mount)** and **M2 (transport + Drive push)** are done:
 
 - `internal/vfs` — go-fuse loopback that proxies to the underlying dir and emits a
-  change `Event` for each node-level mutation (create/mkdir/rmdir/unlink/rename/setattr).
-- `internal/provider` — the cloud-backend interface (Drive impl lands in M2).
-- `internal/syncengine` — consumes change events (currently logs; uploader/downloader in M2–M4).
+  change `Event` per mutation, including `OpWrite` on close (file-handle capture).
+- `internal/transport` — HTTP/3 (QUIC) client with HTTP/2 fallback (unit-tested).
+- `internal/provider` + `internal/provider/gdrive` — the cloud interface and its
+  Google Drive implementation (OAuth desktop flow, transport folded under auth).
+- `internal/syncengine` — pushes local changes to the provider (event→API mapping
+  unit-tested); log-only when no credentials are given.
 
-Roadmap: M2 Drive auth + push · M3 `changes.list` pull loop + echo suppression ·
+Roadmap: M3 `changes.list` pull loop + persistent state store + echo suppression ·
 M4 full bidirectional (debounce, retries, conflict copies, clean shutdown).
 
 ## Build
@@ -30,13 +33,40 @@ go build ./...
 go build -o ./bin/dedupfs ./cmd/dedupfs
 ```
 
+## Authenticate (rclone-style wizard)
+
+```sh
+./bin/dedupfs login
+```
+
+The wizard prompts for your OAuth **client ID/secret** (from a Google Cloud
+*Desktop app* credential with the Drive API enabled), a **scope** (full / readonly /
+drive.file), and an optional **root folder ID**. It writes `credentials.json`, prints
+an authorization URL to open in your browser, and captures the result two ways:
+
+- **Auto-capture** — a loopback server on port **53682** receives the browser
+  redirect. In a container, forward the port: `docker run -p 127.0.0.1:53682:53682 …`.
+- **Paste fallback** — if the browser can't reach that address, paste the full
+  redirect URL (or just the code) from the address bar into the prompt.
+
+It then saves `token.json` and confirms the signed-in account. Non-interactive flags
+(`-client-id`, `-client-secret`, `-scope`, `-port`, `-open`) are available too.
+
 ## Run
 
 ```sh
-./bin/dedupfs -mount ./mnt -data ./data
-# operate on ./mnt; changes land in ./data and are logged as sync events.
+# Log-only (no cloud): operate on ./mnt; changes land in ./data and log as events.
+./bin/dedupfs mount -mount ./mnt -data ./data
+
+# With Google Drive sync (push), after `dedupfs login`:
+./bin/dedupfs mount -mount ./mnt -data ./data \
+  -credentials credentials.json -token token.json -drive-root <folderID>
 # Ctrl-C to unmount.
 ```
+
+`-drive-root` is the Drive folder ID the mount root maps to (`root` for My Drive).
+The `mount` subcommand is the default, so the older `dedupfs -mount … -data …` form
+still works.
 
 **Requires the FUSE mount helper** (`fusermount3`), which ships with the system
 `fuse3` package. If you see `exec: "/bin/fusermount": no such file`, install it:

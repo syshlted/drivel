@@ -1,75 +1,49 @@
-// Command dedupfs mounts a loopback FUSE filesystem that proxies operations to
-// an underlying directory and (from M2 onward) syncs that directory with a
-// cloud-storage provider. See DESIGN.md for the architecture.
+// Command dedupfs mounts a loopback FUSE filesystem that proxies operations to an
+// underlying directory and syncs that directory with Google Drive.
+//
+// Subcommands:
+//
+//	dedupfs login  [flags]   # interactive OAuth setup (writes credentials.json + token.json)
+//	dedupfs mount  [flags]   # mount and sync (default if no subcommand given)
+//
+// See DESIGN.md for the architecture.
 package main
 
 import (
-	"context"
-	"flag"
-	"log"
+	"fmt"
 	"os"
-	"os/signal"
-	"syscall"
-
-	"github.com/hanwen/go-fuse/v2/fs"
-	"github.com/hanwen/go-fuse/v2/fuse"
-
-	"github.com/zishmusic/dedupfs/internal/syncengine"
-	"github.com/zishmusic/dedupfs/internal/vfs"
+	"strings"
 )
 
 func main() {
-	mountpoint := flag.String("mount", "", "path to mount the filesystem (required)")
-	dataDir := flag.String("data", "", "underlying directory: source of truth / cache (required)")
-	debug := flag.Bool("debug", false, "enable FUSE debug logging")
-	flag.Parse()
-
-	if *mountpoint == "" || *dataDir == "" {
-		flag.Usage()
-		log.Fatal("both -mount and -data are required")
+	args := os.Args[1:]
+	cmd := ""
+	// Accept a leading subcommand; anything starting with '-' means the default
+	// (mount) command with flags, preserving `dedupfs -mount ... -data ...`.
+	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
+		cmd, args = args[0], args[1:]
 	}
-	for _, d := range []string{*dataDir, *mountpoint} {
-		if err := os.MkdirAll(d, 0o755); err != nil {
-			log.Fatalf("creating %s: %v", d, err)
-		}
+	switch cmd {
+	case "", "mount":
+		runMount(args)
+	case "login":
+		runLogin(args)
+	case "help", "-h", "--help":
+		usage(os.Stdout)
+	default:
+		fmt.Fprintf(os.Stderr, "unknown command %q\n\n", cmd)
+		usage(os.Stderr)
+		os.Exit(2)
 	}
+}
 
-	// Mutations observed at the mount flow through this channel to the sync
-	// engine. Buffered so brief FS bursts don't stall on the consumer.
-	events := make(chan vfs.Event, 1024)
+func usage(w *os.File) {
+	fmt.Fprint(w, `dedupfs - a Drive-backed FUSE interceptor filesystem
 
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
+Usage:
+  dedupfs login [flags]   Interactive Google OAuth setup (credentials.json + token.json)
+  dedupfs mount [flags]   Mount a directory and sync it with Google Drive
 
-	engine := syncengine.New()
-	go engine.Run(ctx, events)
-
-	root, err := vfs.NewRoot(*dataDir, events)
-	if err != nil {
-		log.Fatalf("building root: %v", err)
-	}
-
-	server, err := fs.Mount(*mountpoint, root, &fs.Options{
-		MountOptions: fuse.MountOptions{
-			Debug:  *debug,
-			FsName: *dataDir,
-			Name:   "dedupfs",
-		},
-	})
-	if err != nil {
-		log.Fatalf("mount %s: %v", *mountpoint, err)
-	}
-	log.Printf("mounted %s -> %s (Ctrl-C to unmount)", *mountpoint, *dataDir)
-
-	// Unmount cleanly on signal, which makes server.Wait() return.
-	go func() {
-		<-ctx.Done()
-		log.Println("unmounting...")
-		if err := server.Unmount(); err != nil {
-			log.Printf("unmount failed: %v (try: fusermount -u %s)", err, *mountpoint)
-		}
-	}()
-
-	server.Wait()
-	close(events)
+Run 'dedupfs login -h' or 'dedupfs mount -h' for command flags.
+`)
 }

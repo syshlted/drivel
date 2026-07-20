@@ -24,13 +24,37 @@ bidirectional sync — don't regress it.
 - `internal/vfs` — go-fuse loopback; proxies to the `-data` dir and emits a
   change `Event` per mutation. Reads/lookups/attrs pass straight through.
 - `internal/provider` — cloud-backend interface (the seam). Drive impl is M2.
+- `internal/provider/gdrive` — Google Drive impl of the interface.
+- `internal/gauth` — Google OAuth: credentials.json/token.json I/O and the
+  interactive login flow (loopback redirect + manual paste, rclone-style).
+- `internal/transport` — HTTP/3 (QUIC) client with HTTP/2 fallback, injected into the
+  Drive provider (M2). See DESIGN.md §2.6.
 - `internal/syncengine` — consumes change events; uploader/downloader land in M2–M4.
+
+## CLI
+
+`dedupfs` has two subcommands (`mount` is the default, so `dedupfs -mount … -data …`
+still works): `dedupfs login` (interactive OAuth wizard → credentials.json +
+token.json) and `dedupfs mount`. `mount` is **non-interactive**: it requires a
+token from `login` and never prompts on stdin. The login loopback server uses
+rclone's port **53682**; forward it into the container for auto-capture, else use
+the paste fallback. When adding stdin prompts, share ONE bufio reader — multiple
+readers on os.Stdin race and swallow buffered lines.
 
 ## Milestones
 
-M1 passthrough mount (done) · M2 Drive auth + push-on-close (incl. file-handle
-write capture for `OpWrite`) · M3 `changes.list` pull loop + echo suppression ·
-M4 full bidirectional (debounce, retries, conflict copies, clean shutdown).
+M1 passthrough mount (done) · M2 transport (HTTP/3→HTTP/2) + Drive auth + push-on-close
+(incl. file-handle write capture for `OpWrite`) · M3 `changes.list` pull loop + echo
+suppression · M4 full bidirectional (debounce, retries, conflict copies, clean shutdown).
+
+## Transport
+
+All Drive traffic goes over **HTTP/3** (QUIC), required by project decision. Go 1.26
+stdlib has no HTTP/3 client — use `github.com/quic-go/quic-go` (`http3.Transport`).
+It's HTTP/3-*preferred*: fall back to HTTP/2 when the QUIC/UDP dial fails. The
+transport sits **below** OAuth — pass the client via `option.WithHTTPClient` and fold
+the token source into `oauth2.Transport{Base: ...}`; do **not** also pass
+`WithTokenSource` (conflicts). See DESIGN.md §2.6.
 
 ## Build / test / run
 
@@ -52,6 +76,8 @@ events. Ctrl-C unmounts.
 - This runs in a **privileged Docker container** with passwordless `sudo` and
   `/dev/fuse` present, so unprivileged FUSE mounts work once `fuse3` is installed.
 - If a run leaves a stale mount: `fusermount3 -u ./mnt`.
+- HTTP/3/QUIC wants a larger UDP receive buffer or quic-go logs a warning; raise it
+  with `sudo sysctl -w net.core.rmem_max=7500000` (and `wmem_max`) when testing sync.
 
 ## Conventions
 

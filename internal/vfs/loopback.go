@@ -52,11 +52,12 @@ type node struct {
 // go-fuse API change drops one of these, the build breaks here rather than
 // silently losing interception.
 var (
-	_ fs.NodeCreater  = (*node)(nil)
-	_ fs.NodeMkdirer  = (*node)(nil)
-	_ fs.NodeRmdirer  = (*node)(nil)
-	_ fs.NodeUnlinker = (*node)(nil)
-	_ fs.NodeRenamer  = (*node)(nil)
+	_ fs.NodeCreater   = (*node)(nil)
+	_ fs.NodeOpener    = (*node)(nil)
+	_ fs.NodeMkdirer   = (*node)(nil)
+	_ fs.NodeRmdirer   = (*node)(nil)
+	_ fs.NodeUnlinker  = (*node)(nil)
+	_ fs.NodeRenamer   = (*node)(nil)
 	_ fs.NodeSetattrer = (*node)(nil)
 )
 
@@ -100,9 +101,21 @@ func (n *node) emit(ev Event) {
 func (n *node) Create(ctx context.Context, name string, flags, mode uint32, out *fuse.EntryOut) (*fs.Inode, fs.FileHandle, uint32, syscall.Errno) {
 	inode, fh, ff, errno := n.LoopbackNode.Create(ctx, name, flags, mode, out)
 	if errno == 0 {
-		n.emit(Event{Op: OpCreate, Path: n.childPath(name)})
+		path := n.childPath(name)
+		n.emit(Event{Op: OpCreate, Path: path})
+		fh = &fileHandle{wrapped: fh, path: path, events: n.events}
 	}
 	return inode, fh, ff, errno
+}
+
+// Open wraps the loopback handle so content writes to an existing file surface as
+// an OpWrite on close (see file.go). Reads pass straight through.
+func (n *node) Open(ctx context.Context, flags uint32) (fs.FileHandle, uint32, syscall.Errno) {
+	fh, fuseFlags, errno := n.LoopbackNode.Open(ctx, flags)
+	if errno == 0 {
+		fh = &fileHandle{wrapped: fh, path: n.Path(nil), events: n.events}
+	}
+	return fh, fuseFlags, errno
 }
 
 func (n *node) Mkdir(ctx context.Context, name string, mode uint32, out *fuse.EntryOut) (*fs.Inode, syscall.Errno) {
