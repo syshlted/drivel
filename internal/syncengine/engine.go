@@ -16,8 +16,8 @@ import (
 	"path/filepath"
 	"sync"
 
-	"github.com/zishmusic/dedupfs/internal/provider"
-	"github.com/zishmusic/dedupfs/internal/vfs"
+	"github.com/zishmusic/drivel/internal/provider"
+	"github.com/zishmusic/drivel/internal/fsevent"
 )
 
 // Engine applies local change events to a provider.
@@ -48,7 +48,7 @@ func New(cfg Config) *Engine {
 }
 
 // Run consumes events until events is closed or ctx is cancelled.
-func (e *Engine) Run(ctx context.Context, events <-chan vfs.Event) {
+func (e *Engine) Run(ctx context.Context, events <-chan fsevent.Event) {
 	for {
 		select {
 		case <-ctx.Done():
@@ -62,10 +62,10 @@ func (e *Engine) Run(ctx context.Context, events <-chan vfs.Event) {
 	}
 }
 
-func (e *Engine) handle(ctx context.Context, ev vfs.Event) {
+func (e *Engine) handle(ctx context.Context, ev fsevent.Event) {
 	if e.prov == nil {
 		// Log-only mode: no provider wired (e.g. no credentials).
-		if ev.Op == vfs.OpRename {
+		if ev.Op == fsevent.OpRename {
 			log.Printf("[sync] %-7s %s -> %s", ev.Op, ev.Path, ev.NewPath)
 		} else {
 			log.Printf("[sync] %-7s %s", ev.Op, ev.Path)
@@ -80,9 +80,9 @@ func (e *Engine) handle(ctx context.Context, ev vfs.Event) {
 
 // push maps one event to provider calls. Retries/debounce/echo-suppression are
 // deliberately out of scope until M3–M4.
-func (e *Engine) push(ctx context.Context, ev vfs.Event) error {
+func (e *Engine) push(ctx context.Context, ev fsevent.Event) error {
 	switch ev.Op {
-	case vfs.OpMkdir:
+	case fsevent.OpMkdir:
 		parentID, err := e.ensureParent(ctx, ev.Path)
 		if err != nil {
 			return err
@@ -93,10 +93,10 @@ func (e *Engine) push(ctx context.Context, ev vfs.Event) error {
 		}
 		e.setID(ev.Path, rf.ID)
 
-	case vfs.OpCreate, vfs.OpWrite:
+	case fsevent.OpCreate, fsevent.OpWrite:
 		return e.pushContent(ctx, ev.Path)
 
-	case vfs.OpUnlink, vfs.OpRmdir:
+	case fsevent.OpUnlink, fsevent.OpRmdir:
 		if id, ok := e.getID(ev.Path); ok {
 			if err := e.prov.Delete(ctx, id); err != nil {
 				return err
@@ -104,7 +104,7 @@ func (e *Engine) push(ctx context.Context, ev vfs.Event) error {
 			e.delID(ev.Path)
 		}
 
-	case vfs.OpRename:
+	case fsevent.OpRename:
 		id, ok := e.getID(ev.Path)
 		if !ok {
 			// Unknown source (e.g. never uploaded); treat destination as new content.
@@ -120,7 +120,7 @@ func (e *Engine) push(ctx context.Context, ev vfs.Event) error {
 		e.delID(ev.Path)
 		e.setID(ev.NewPath, id)
 
-	case vfs.OpSetattr:
+	case fsevent.OpSetattr:
 		// Metadata-only change; no content push in M2.
 	}
 	return nil

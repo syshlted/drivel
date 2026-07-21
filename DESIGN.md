@@ -1,4 +1,4 @@
-# dedupfs — Design
+# Drivel — Design
 
 A Go FUSE filesystem that mounts a local directory as an **interceptor**, proxies
 all operations to an underlying directory (the source of truth / local cache), and
@@ -153,6 +153,40 @@ This ordering is why transport is settled before the OAuth work in M2.
 
 Ops note: quic-go wants a larger UDP receive buffer on Linux (`sysctl
 net.core.rmem_max`); otherwise it logs a warning. Documented in CLAUDE.md.
+
+### 2.7 Mount frontend (backend seam) & in-place mode
+The FUSE code is quarantined behind a small **mount-backend seam**
+(`internal/mount`): a `Backend` interface (`Serve(ctx, Options)`) plus the
+backend-neutral change-event type in `internal/fsevent`. The go-fuse backend
+(`internal/vfs`, Linux/macOS/FreeBSD) is the only implementation today, but the
+seam lets others slot in without touching the sync core — cgofuse for Windows, or
+an NFS-loopback backend for platforms with no Go FUSE binding (OpenBSD/NetBSD).
+Everything below the seam (transport, provider, syncengine, gauth) is pure Go that
+cross-compiles anywhere Go runs.
+
+**Backing store — two modes** (`mount.ResolveBacking`):
+- **Separate directory** (`-data DIR`): the mount and the backing dir are distinct.
+  Portable; the only mode off Linux.
+- **In-place** (`-data` omitted): the mount directory *is* its own backing store, so
+  when Drivel exits the files simply remain in that directory — no separate copy.
+
+In-place works because a FUSE mount *overlays* its mountpoint: once mounted, access
+to the mountpoint **by path** is routed to our handler, shadowing the original
+contents. So before mounting we open a **directory fd** to the mountpoint and route
+all backing I/O through `/proc/self/fd/N`, which resolves via the fd to the original
+underlying directory rather than through the overlay. (Verified: writes through the
+preserved fd land in the real directory and survive unmount.)
+
+> **Cardinal rule (load-bearing, like §4):** in-place mode must **never** touch the
+> backing store by the mountpoint *path* — only via the preserved fd
+> (`/proc/self/fd/N`). A path access to the mountpoint re-enters our own FUSE handler
+> → recursion/deadlock. This is why the sync engine is handed `backing.Path`
+> (the `/proc/self/fd/N` path), not the mountpoint.
+
+Platform note: `/proc/self/fd` is the Linux shortcut that lets the path-based
+go-fuse loopback work unchanged. macOS/FreeBSD have no procfs, so in-place there
+would need a fd-relative loopback using the `*at` syscall family (`openat`,
+`renameat`, …) — future work; in-place is Linux-only for now.
 
 ---
 

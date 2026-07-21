@@ -29,7 +29,7 @@ type LoginOptions struct {
 // Login runs the OAuth authorization-code flow with PKCE-less loopback redirect,
 // exactly like rclone's auto config: it starts a local server on 127.0.0.1:<port>,
 // prints the authorization URL, and waits for Google to redirect back with the
-// code. Because dedupfs commonly runs in a container whose port may not be
+// code. Because Drivel commonly runs in a container whose port may not be
 // reachable from the host browser, it ALSO accepts the redirect URL (or bare code)
 // pasted on stdin — whichever arrives first wins.
 func Login(ctx context.Context, c Credentials, scopes []string, opts LoginOptions) (*oauth2.Token, error) {
@@ -65,7 +65,7 @@ func Login(ctx context.Context, c Credentials, scopes []string, opts LoginOption
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		q := r.URL.Query()
 		if e := q.Get("error"); e != "" {
-			fmt.Fprintf(w, "dedupfs: authorization failed (%s). You can close this tab.", e)
+			fmt.Fprintf(w, "Drivel: authorization failed (%s). You can close this tab.", e)
 			trySend(errCh, fmt.Errorf("authorization denied: %s", e))
 			return
 		}
@@ -75,11 +75,11 @@ func Login(ctx context.Context, c Credentials, scopes []string, opts LoginOption
 			return
 		}
 		if q.Get("state") != state {
-			fmt.Fprint(w, "dedupfs: state mismatch. You can close this tab.")
+			fmt.Fprint(w, "Drivel: state mismatch. You can close this tab.")
 			trySend(errCh, fmt.Errorf("state parameter mismatch (possible CSRF)"))
 			return
 		}
-		fmt.Fprint(w, "dedupfs: authorization received — you can close this tab and return to the terminal.")
+		fmt.Fprint(w, "Drivel: authorization received — you can close this tab and return to the terminal.")
 		select {
 		case codeCh <- code:
 		default:
@@ -89,7 +89,7 @@ func Login(ctx context.Context, c Credentials, scopes []string, opts LoginOption
 	go srv.Serve(ln)
 	defer srv.Close()
 
-	fmt.Fprintf(out, "\nOpen this URL in your browser to authorize dedupfs:\n\n  %s\n\n", authURL)
+	fmt.Fprintf(out, "\nOpen this URL in your browser to authorize Drivel:\n\n  %s\n\n", authURL)
 	if opts.OpenBrowser {
 		if err := openBrowser(authURL); err != nil {
 			fmt.Fprintf(out, "(could not open a browser automatically: %v)\n", err)

@@ -9,8 +9,8 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/zishmusic/dedupfs/internal/provider"
-	"github.com/zishmusic/dedupfs/internal/vfs"
+	"github.com/zishmusic/drivel/internal/provider"
+	"github.com/zishmusic/drivel/internal/fsevent"
 )
 
 // fakeProvider records calls and hands out deterministic IDs.
@@ -82,21 +82,21 @@ func TestPushMapsEventsToProviderCalls(t *testing.T) {
 
 	// New top-level file: content exists on disk, so Create should Upload it.
 	writeFile(t, dataDir, "a.txt", "hello")
-	e.handle(ctx, vfs.Event{Op: vfs.OpCreate, Path: "a.txt"})
+	e.handle(ctx, fsevent.Event{Op: fsevent.OpCreate, Path: "a.txt"})
 
 	// A subsequent write to the now-known file should Update, not Upload again.
-	e.handle(ctx, vfs.Event{Op: vfs.OpWrite, Path: "a.txt"})
+	e.handle(ctx, fsevent.Event{Op: fsevent.OpWrite, Path: "a.txt"})
 
 	// Directory then a nested file: nested Upload must use the dir's new ID as parent.
-	e.handle(ctx, vfs.Event{Op: vfs.OpMkdir, Path: "sub"})
+	e.handle(ctx, fsevent.Event{Op: fsevent.OpMkdir, Path: "sub"})
 	writeFile(t, dataDir, "sub/b.txt", "nested")
-	e.handle(ctx, vfs.Event{Op: vfs.OpCreate, Path: "sub/b.txt"})
+	e.handle(ctx, fsevent.Event{Op: fsevent.OpCreate, Path: "sub/b.txt"})
 
 	// Rename the known top-level file.
-	e.handle(ctx, vfs.Event{Op: vfs.OpRename, Path: "a.txt", NewPath: "renamed.txt"})
+	e.handle(ctx, fsevent.Event{Op: fsevent.OpRename, Path: "a.txt", NewPath: "renamed.txt"})
 
 	// Delete the nested file.
-	e.handle(ctx, vfs.Event{Op: vfs.OpUnlink, Path: "sub/b.txt"})
+	e.handle(ctx, fsevent.Event{Op: fsevent.OpUnlink, Path: "sub/b.txt"})
 
 	want := []string{
 		"Upload(parent=root,name=a.txt,bytes=5)",
@@ -126,8 +126,8 @@ func TestEnsureParentCreatesAncestorsOnce(t *testing.T) {
 	// must create x then x/y, and reuse them for the second file.
 	writeFile(t, dataDir, "x/y/one.txt", "1")
 	writeFile(t, dataDir, "x/y/two.txt", "22")
-	e.handle(ctx, vfs.Event{Op: vfs.OpCreate, Path: "x/y/one.txt"})
-	e.handle(ctx, vfs.Event{Op: vfs.OpCreate, Path: "x/y/two.txt"})
+	e.handle(ctx, fsevent.Event{Op: fsevent.OpCreate, Path: "x/y/one.txt"})
+	e.handle(ctx, fsevent.Event{Op: fsevent.OpCreate, Path: "x/y/two.txt"})
 
 	want := []string{
 		"Mkdir(parent=root,name=x)",

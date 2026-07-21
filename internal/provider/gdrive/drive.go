@@ -11,7 +11,7 @@ import (
 	"google.golang.org/api/googleapi"
 	"google.golang.org/api/option"
 
-	"github.com/zishmusic/dedupfs/internal/provider"
+	"github.com/zishmusic/drivel/internal/provider"
 )
 
 const folderMIME = "application/vnd.google-apps.folder"

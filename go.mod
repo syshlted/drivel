@@ -1,4 +1,4 @@
-module github.com/zishmusic/dedupfs
+module github.com/zishmusic/drivel
 
 go 1.26.1
 

@@ -1,4 +1,4 @@
-# dedupfs
+# Drivel
 
 A Go FUSE filesystem that mounts a local directory as an **interceptor**: every
 operation is proxied to an underlying directory (the source of truth / local cache)
@@ -10,6 +10,13 @@ echo/loop-suppression strategy.
 
 > The `-gpu` in the repo name is historical; GPU-accelerated deduplication is out
 > of scope for v1.
+
+Drivel is a **client you run yourself**. It has no hosted service, no shared
+application identity, and **no analytics or telemetry** — nothing phones home.
+You bring your own Google Cloud OAuth credentials (see
+[Set up your own Google API credentials](#set-up-your-own-google-api-credentials)),
+so all Drive traffic goes directly between your machine and Google under an app
+identity you control. Licensed under the [GNU AGPLv3](#license).
 
 ## Status
 
@@ -30,17 +37,60 @@ M4 full bidirectional (debounce, retries, conflict copies, clean shutdown).
 
 ```sh
 go build ./...
-go build -o ./bin/dedupfs ./cmd/dedupfs
+go build -o ./bin/drivel ./cmd/drivel
 ```
+
+## Set up your own Google API credentials
+
+Drivel does **not** ship with a shared Google application identity, and there is no
+hosted Drivel service. You create your own OAuth **client ID and secret** in a Google
+Cloud project that you own, and Drivel uses them to talk to your Drive on your behalf.
+You are responsible for these credentials — treat them as secrets, don't commit them
+(they are gitignored), and revoke them from the Cloud Console if they leak.
+
+This is a one-time setup (~5 minutes). It's free; the Drive API has generous
+per-project quotas for personal use.
+
+1. **Create (or pick) a Google Cloud project.**
+   Go to the [Cloud Console](https://console.cloud.google.com/), open the project
+   picker in the top bar, and click **New Project**. Name it anything (e.g. `drivel`)
+   and create it, then make sure it's the selected project.
+
+2. **Enable the Drive API.**
+   In [APIs & Services → Library](https://console.cloud.google.com/apis/library),
+   search for **Google Drive API** and click **Enable**.
+
+3. **Configure the OAuth consent screen.**
+   Under [APIs & Services → OAuth consent screen](https://console.cloud.google.com/apis/credentials/consent):
+   - Choose **External** user type (unless you have a Workspace org, in which case
+     **Internal** avoids the verification prompts below).
+   - Fill in the required app name and your own email for the support/developer
+     contact fields. You do **not** need a homepage, privacy policy, or an app domain
+     — leave those blank. Nobody but you uses this app.
+   - On the **Scopes** step you can skip adding scopes here; Drivel requests them at
+     login time.
+   - On **Test users**, add the Google account(s) you'll sync. Keeping the app in
+     **Testing** status is fine for personal use — you never have to submit it for
+     Google verification. (Refresh tokens for unverified test apps can expire after
+     ~7 days; just re-run `drivel login` if that happens.)
+
+4. **Create an OAuth client ID.**
+   Under [APIs & Services → Credentials](https://console.cloud.google.com/apis/credentials),
+   click **Create Credentials → OAuth client ID**, choose application type
+   **Desktop app**, name it, and create. Copy the **Client ID** and **Client secret**
+   from the dialog (or download the JSON) — you'll paste them into `drivel login`.
+
+That's it. The client ID/secret identify *your* project to Google; the login wizard
+below exchanges them for a token scoped to your account.
 
 ## Authenticate (rclone-style wizard)
 
 ```sh
-./bin/dedupfs login
+./bin/drivel login
 ```
 
-The wizard prompts for your OAuth **client ID/secret** (from a Google Cloud
-*Desktop app* credential with the Drive API enabled), a **scope** (full / readonly /
+The wizard prompts for the OAuth **client ID/secret** you created
+[above](#set-up-your-own-google-api-credentials), a **scope** (full / readonly /
 drive.file), and an optional **root folder ID**. It writes `credentials.json`, prints
 an authorization URL to open in your browser, and captures the result two ways:
 
@@ -55,17 +105,26 @@ It then saves `token.json` and confirms the signed-in account. Non-interactive f
 ## Run
 
 ```sh
-# Log-only (no cloud): operate on ./mnt; changes land in ./data and log as events.
-./bin/dedupfs mount -mount ./mnt -data ./data
+# Separate backing dir: operate on ./mnt; changes land in ./data and log as events.
+./bin/drivel mount -mount ./mnt -data ./data
 
-# With Google Drive sync (push), after `dedupfs login`:
-./bin/dedupfs mount -mount ./mnt -data ./data \
+# In-place (Linux): the directory is its own backing store, so files just stay put
+# in ./dir when Drivel exits — no separate data dir. Omit -data to select it.
+./bin/drivel mount -mount ./dir
+
+# With Google Drive sync (push), after `drivel login`:
+./bin/drivel mount -mount ./mnt -data ./data \
   -credentials credentials.json -token token.json -drive-root <folderID>
 # Ctrl-C to unmount.
 ```
 
+**In-place mode** mounts a directory onto itself: a directory handle opened before
+mounting lets Drivel reach the underlying files (via `/proc/self/fd/N`) while the
+FUSE overlay is active, so nothing is copied and the files remain in place after
+unmount. Linux-only for now; elsewhere use a separate `-data` dir.
+
 `-drive-root` is the Drive folder ID the mount root maps to (`root` for My Drive).
-The `mount` subcommand is the default, so the older `dedupfs -mount … -data …` form
+The `mount` subcommand is the default, so the older `drivel -mount … -data …` form
 still works.
 
 **Requires the FUSE mount helper** (`fusermount3`), which ships with the system
@@ -77,3 +136,15 @@ sudo dnf install fuse3
 # Debian/Ubuntu
 sudo apt install fuse3
 ```
+
+## License
+
+Drivel is free software licensed under the **GNU Affero General Public License,
+version 3** — see [LICENSE](LICENSE). In short: you may use, modify, and redistribute
+it, but derivative works — **including software you offer to others over a network** —
+must be made available under the same license. There is no CLA and no separate
+proprietary/commercial edition.
+
+Drivel bundles no application secrets and collects **no analytics or telemetry**. The
+Google API credentials you supply are yours; how you use Google Drive through them is
+governed by Google's own terms, not by this project.

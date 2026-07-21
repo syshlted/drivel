@@ -1,4 +1,4 @@
-// Package gauth handles Google OAuth for dedupfs: reading/writing the client
+// Package gauth handles Google OAuth for Drivel: reading/writing the client
 // secret (credentials.json), the interactive login flow (loopback redirect with a
 // manual paste fallback, à la rclone), and token persistence. It is transport-
 // agnostic — internal/provider/gdrive composes it with the HTTP/3 transport.

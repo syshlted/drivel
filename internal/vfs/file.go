@@ -7,6 +7,8 @@ import (
 
 	"github.com/hanwen/go-fuse/v2/fs"
 	"github.com/hanwen/go-fuse/v2/fuse"
+
+	"github.com/zishmusic/drivel/internal/fsevent"
 )
 
 // fileHandle wraps a loopback file handle to capture content writes. All ops are
@@ -17,7 +19,7 @@ import (
 type fileHandle struct {
 	wrapped fs.FileHandle
 	path    string
-	events  chan<- Event
+	events  chan<- fsevent.Event
 	dirty   atomic.Bool
 }
 
@@ -69,7 +71,7 @@ func (f *fileHandle) Release(ctx context.Context) syscall.Errno {
 	// Emit the content-change event only after a successful close of a handle we
 	// actually wrote to. Coalesces a burst of Writes into one upload trigger.
 	if errno == 0 && f.dirty.Load() && f.events != nil {
-		f.events <- Event{Op: OpWrite, Path: f.path}
+		f.events <- fsevent.Event{Op: fsevent.OpWrite, Path: f.path}
 	}
 	return errno
 }

@@ -11,7 +11,7 @@ import (
 	"strings"
 	"syscall"
 
-	"github.com/zishmusic/dedupfs/internal/gauth"
+	"github.com/zishmusic/drivel/internal/gauth"
 )
 
 // runLogin is an rclone-style interactive OAuth wizard: it collects the client
@@ -71,7 +71,7 @@ func runLogin(args []string) {
 	if driveRoot == "" {
 		driveRoot = "root"
 	}
-	fmt.Printf("\nDone. Mount with:\n\n  dedupfs mount -mount ./mnt -data ./data \\\n    -credentials %s -token %s -drive-root %s\n\n",
+	fmt.Printf("\nDone. Mount with:\n\n  drivel mount -mount ./mnt -data ./data \\\n    -credentials %s -token %s -drive-root %s\n\n",
 		*credPath, *tokenPath, driveRoot)
 }
 
@@ -124,7 +124,7 @@ func resolveScope(in *bufio.Reader, name string) string {
 Choose a scope:
   1 / Full access to all files (recommended for a sync mount)   "drive"
   2 / Read-only access to file metadata and contents            "drive.readonly"
-  3 / Access to files created by dedupfs only                   "drive.file"
+  3 / Access to files created by Drivel only                   "drive.file"
 scope [1]> `)
 		name = prompt(in, "")
 		if name == "" {

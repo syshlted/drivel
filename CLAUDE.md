@@ -20,9 +20,13 @@ bidirectional sync — don't regress it.
 
 ## Layout
 
-- `cmd/dedupfs` — entrypoint; flag parsing, mount, signal-based unmount.
-- `internal/vfs` — go-fuse loopback; proxies to the `-data` dir and emits a
-  change `Event` per mutation. Reads/lookups/attrs pass straight through.
+- `cmd/drivel` — entrypoint; flag parsing, mount, signal-based unmount.
+- `internal/fsevent` — backend-neutral change `Event`/`Op` types (shared by any
+  mount backend and the sync engine).
+- `internal/mount` — the mount-backend seam: `Backend` interface + `Options`, and
+  `ResolveBacking` (separate-dir vs in-place). Platform bits in `backing_*.go`.
+- `internal/vfs` — the go-fuse mount backend: loopback that proxies to the backing
+  store and emits an `fsevent.Event` per mutation. Reads/lookups/attrs pass through.
 - `internal/provider` — cloud-backend interface (the seam). Drive impl is M2.
 - `internal/provider/gdrive` — Google Drive impl of the interface.
 - `internal/gauth` — Google OAuth: credentials.json/token.json I/O and the
@@ -33,9 +37,9 @@ bidirectional sync — don't regress it.
 
 ## CLI
 
-`dedupfs` has two subcommands (`mount` is the default, so `dedupfs -mount … -data …`
-still works): `dedupfs login` (interactive OAuth wizard → credentials.json +
-token.json) and `dedupfs mount`. `mount` is **non-interactive**: it requires a
+`drivel` has two subcommands (`mount` is the default, so `drivel -mount … -data …`
+still works): `drivel login` (interactive OAuth wizard → credentials.json +
+token.json) and `drivel mount`. `mount` is **non-interactive**: it requires a
 token from `login` and never prompts on stdin. The login loopback server uses
 rclone's port **53682**; forward it into the container for auto-capture, else use
 the paste fallback. When adding stdin prompts, share ONE bufio reader — multiple
@@ -56,13 +60,26 @@ transport sits **below** OAuth — pass the client via `option.WithHTTPClient` a
 the token source into `oauth2.Transport{Base: ...}`; do **not** also pass
 `WithTokenSource` (conflicts). See DESIGN.md §2.6.
 
+## Mount modes
+
+`drivel mount -mount DIR -data BACKING` uses a separate backing directory
+(portable; required off Linux). Omitting `-data` selects **in-place mode**: the
+mount dir is its own backing store, so files remain in it after Drivel exits. It
+works by opening a dirfd to the mountpoint *before* mounting and routing backing
+I/O through `/proc/self/fd/N` (Linux-only). **Cardinal rule:** in in-place mode,
+never access the backing store by the mountpoint path — only via `backing.Path`
+(the `/proc/self/fd/N` handle) — or reads/writes recurse into our FUSE handler and
+deadlock. See DESIGN.md §2.7. New mount backends implement `mount.Backend`; keep
+everything below the seam provider- and FUSE-agnostic.
+
 ## Build / test / run
 
 ```sh
 go build ./...
 go vet ./...
-go build -o ./bin/dedupfs ./cmd/dedupfs
-./bin/dedupfs -mount ./mnt -data ./data   # -debug for FUSE tracing
+go build -o ./bin/drivel ./cmd/drivel
+./bin/drivel mount -mount ./mnt -data ./data   # separate backing dir; -debug for FUSE tracing
+./bin/drivel mount -mount ./dir                # in-place: ./dir is its own backing (Linux)
 ```
 
 `./mnt` and `./data` are gitignored scratch dirs; create them (the binary

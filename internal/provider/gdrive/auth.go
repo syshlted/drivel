@@ -12,15 +12,15 @@ import (
 
 	"golang.org/x/oauth2"
 
-	"github.com/zishmusic/dedupfs/internal/gauth"
-	"github.com/zishmusic/dedupfs/internal/transport"
+	"github.com/zishmusic/drivel/internal/gauth"
+	"github.com/zishmusic/drivel/internal/transport"
 )
 
 // buildHTTPClient constructs the OAuth-authenticated *http.Client whose transport
 // is the HTTP/3→HTTP/2 fallback client. The returned func shuts down QUIC conns.
 //
 // It is non-interactive: it requires an already-cached token (created by
-// `dedupfs login`). This keeps `dedupfs mount` from unexpectedly blocking on stdin.
+// `drivel login`). This keeps `drivel mount` from unexpectedly blocking on stdin.
 func buildHTTPClient(ctx context.Context, credentialsPath, tokenPath string) (*http.Client, func() error, error) {
 	creds, err := gauth.LoadCredentials(credentialsPath)
 	if err != nil {
@@ -28,7 +28,7 @@ func buildHTTPClient(ctx context.Context, credentialsPath, tokenPath string) (*h
 	}
 	tok, err := gauth.LoadToken(tokenPath)
 	if err != nil {
-		return nil, nil, fmt.Errorf("no cached OAuth token at %s — run 'dedupfs login' first: %w", tokenPath, err)
+		return nil, nil, fmt.Errorf("no cached OAuth token at %s — run 'drivel login' first: %w", tokenPath, err)
 	}
 
 	// The HTTP/3 transport is the base for BOTH API calls and token refreshes:
