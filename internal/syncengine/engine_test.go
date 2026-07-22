@@ -1,6 +1,7 @@
 package syncengine
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -9,58 +10,83 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/zishmusic/drivel/internal/provider"
 	"github.com/zishmusic/drivel/internal/fsevent"
+	"github.com/zishmusic/drivel/internal/provider"
 )
 
-// fakeProvider records calls and hands out deterministic IDs.
-type fakeProvider struct {
-	mu    sync.Mutex
-	calls []string
-	seq   int
+// fakeStore records path-addressed calls. It tracks which paths it has "seen" so
+// Put can report create-vs-replace, mirroring a real provider's internal index.
+type fakeStore struct {
+	mu      sync.Mutex
+	calls   []string
+	seen    map[string]bool
+	content map[string][]byte // path -> bytes served by Get (downloader tests)
 }
 
-func (f *fakeProvider) record(format string, a ...any) { f.calls = append(f.calls, fmt.Sprintf(format, a...)) }
-func (f *fakeProvider) nextID() string                 { f.seq++; return fmt.Sprintf("id%d", f.seq) }
+func newFakeStore() *fakeStore {
+	return &fakeStore{seen: map[string]bool{}, content: map[string][]byte{}}
+}
 
-func (f *fakeProvider) StartCursor(context.Context) (string, error) { return "c0", nil }
-func (f *fakeProvider) Changes(context.Context, string) ([]provider.RemoteChange, string, error) {
-	return nil, "c0", nil
+func (f *fakeStore) record(format string, a ...any) {
+	f.calls = append(f.calls, fmt.Sprintf(format, a...))
 }
-func (f *fakeProvider) Mkdir(_ context.Context, parentID, name string) (provider.RemoteFile, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.record("Mkdir(parent=%s,name=%s)", parentID, name)
-	return provider.RemoteFile{ID: f.nextID(), Name: name, ParentID: parentID, IsDir: true}, nil
-}
-func (f *fakeProvider) Upload(_ context.Context, parentID, name string, r io.Reader) (provider.RemoteFile, error) {
+
+func (f *fakeStore) Put(_ context.Context, p string, r io.Reader) (provider.RemoteFile, error) {
 	b, _ := io.ReadAll(r)
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.record("Upload(parent=%s,name=%s,bytes=%d)", parentID, name, len(b))
-	return provider.RemoteFile{ID: f.nextID(), Name: name, ParentID: parentID}, nil
+	verb := "create"
+	if f.seen[p] {
+		verb = "replace"
+	}
+	f.seen[p] = true
+	f.record("Put(%s,%s,bytes=%d)", verb, p, len(b))
+	return provider.RemoteFile{Path: p, Size: int64(len(b))}, nil
 }
-func (f *fakeProvider) Update(_ context.Context, fileID string, r io.Reader) (provider.RemoteFile, error) {
-	b, _ := io.ReadAll(r)
+
+func (f *fakeStore) Mkdir(_ context.Context, p string) (provider.RemoteFile, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.record("Update(id=%s,bytes=%d)", fileID, len(b))
-	return provider.RemoteFile{ID: fileID}, nil
+	f.seen[p] = true
+	f.record("Mkdir(%s)", p)
+	return provider.RemoteFile{Path: p, IsDir: true}, nil
 }
-func (f *fakeProvider) Move(_ context.Context, fileID, newParentID, newName string) (provider.RemoteFile, error) {
+
+func (f *fakeStore) Move(_ context.Context, oldPath, newPath string) (provider.RemoteFile, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.record("Move(id=%s,parent=%s,name=%s)", fileID, newParentID, newName)
-	return provider.RemoteFile{ID: fileID, Name: newName, ParentID: newParentID}, nil
+	if !f.seen[oldPath] {
+		return provider.RemoteFile{}, provider.ErrNotExist
+	}
+	delete(f.seen, oldPath)
+	f.seen[newPath] = true
+	f.record("Move(%s->%s)", oldPath, newPath)
+	return provider.RemoteFile{Path: newPath}, nil
 }
-func (f *fakeProvider) Delete(_ context.Context, fileID string) error {
+
+func (f *fakeStore) Remove(_ context.Context, p string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.record("Delete(id=%s)", fileID)
+	delete(f.seen, p)
+	f.record("Remove(%s)", p)
 	return nil
 }
-func (f *fakeProvider) Download(context.Context, string) (io.ReadCloser, error) {
-	return io.NopCloser(nil), nil
+
+func (f *fakeStore) Get(_ context.Context, p string) (io.ReadCloser, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	b, ok := f.content[p]
+	if !ok {
+		return nil, fmt.Errorf("get: unknown path %q", p)
+	}
+	f.record("Get(%s)", p)
+	return io.NopCloser(bytes.NewReader(b)), nil
+}
+
+func (f *fakeStore) Stat(_ context.Context, p string) (provider.RemoteFile, bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return provider.RemoteFile{Path: p}, f.seen[p], nil
 }
 
 func writeFile(t *testing.T, dir, rel, content string) {
@@ -74,20 +100,20 @@ func writeFile(t *testing.T, dir, rel, content string) {
 	}
 }
 
-func TestPushMapsEventsToProviderCalls(t *testing.T) {
+func TestPushMapsEventsToStoreCalls(t *testing.T) {
 	dataDir := t.TempDir()
-	fp := &fakeProvider{}
-	e := New(Config{Provider: fp, DataDir: dataDir, RootID: "root"})
+	fs := newFakeStore()
+	e := New(Config{Store: fs, DataDir: dataDir})
 	ctx := context.Background()
 
-	// New top-level file: content exists on disk, so Create should Upload it.
+	// New top-level file: content exists on disk, so Create should Put(create).
 	writeFile(t, dataDir, "a.txt", "hello")
 	e.handle(ctx, fsevent.Event{Op: fsevent.OpCreate, Path: "a.txt"})
 
-	// A subsequent write to the now-known file should Update, not Upload again.
+	// A subsequent write to the now-known file should Put(replace).
 	e.handle(ctx, fsevent.Event{Op: fsevent.OpWrite, Path: "a.txt"})
 
-	// Directory then a nested file: nested Upload must use the dir's new ID as parent.
+	// Directory then a nested file: both are path-addressed, no IDs threaded.
 	e.handle(ctx, fsevent.Event{Op: fsevent.OpMkdir, Path: "sub"})
 	writeFile(t, dataDir, "sub/b.txt", "nested")
 	e.handle(ctx, fsevent.Event{Op: fsevent.OpCreate, Path: "sub/b.txt"})
@@ -99,43 +125,38 @@ func TestPushMapsEventsToProviderCalls(t *testing.T) {
 	e.handle(ctx, fsevent.Event{Op: fsevent.OpUnlink, Path: "sub/b.txt"})
 
 	want := []string{
-		"Upload(parent=root,name=a.txt,bytes=5)",
-		"Update(id=id1,bytes=5)",
-		"Mkdir(parent=root,name=sub)",
-		"Upload(parent=id2,name=b.txt,bytes=6)", // parent is the mkdir'd folder (id2)
-		"Move(id=id1,parent=root,name=renamed.txt)",
-		"Delete(id=id3)",
+		"Put(create,a.txt,bytes=5)",
+		"Put(replace,a.txt,bytes=5)",
+		"Mkdir(sub)",
+		"Put(create,sub/b.txt,bytes=6)",
+		"Move(a.txt->renamed.txt)",
+		"Remove(sub/b.txt)",
 	}
-	if len(fp.calls) != len(want) {
-		t.Fatalf("call count = %d, want %d\ngot:  %v\nwant: %v", len(fp.calls), len(want), fp.calls, want)
-	}
-	for i := range want {
-		if fp.calls[i] != want[i] {
-			t.Errorf("call[%d] = %q, want %q", i, fp.calls[i], want[i])
-		}
-	}
+	assertCalls(t, fs.calls, want)
 }
 
-func TestEnsureParentCreatesAncestorsOnce(t *testing.T) {
+// Renaming a file the store never received falls back to uploading the
+// destination as fresh content (ErrNotExist path).
+func TestRenameUnknownSourceFallsBackToPut(t *testing.T) {
 	dataDir := t.TempDir()
-	fp := &fakeProvider{}
-	e := New(Config{Provider: fp, DataDir: dataDir, RootID: "root"})
+	fs := newFakeStore()
+	e := New(Config{Store: fs, DataDir: dataDir})
 	ctx := context.Background()
 
-	// Deep path whose ancestors were never announced via mkdir events: ensureParent
-	// must create x then x/y, and reuse them for the second file.
-	writeFile(t, dataDir, "x/y/one.txt", "1")
-	writeFile(t, dataDir, "x/y/two.txt", "22")
-	e.handle(ctx, fsevent.Event{Op: fsevent.OpCreate, Path: "x/y/one.txt"})
-	e.handle(ctx, fsevent.Event{Op: fsevent.OpCreate, Path: "x/y/two.txt"})
+	writeFile(t, dataDir, "moved.txt", "content")
+	e.handle(ctx, fsevent.Event{Op: fsevent.OpRename, Path: "orphan.txt", NewPath: "moved.txt"})
 
-	want := []string{
-		"Mkdir(parent=root,name=x)",
-		"Mkdir(parent=id1,name=y)",
-		"Upload(parent=id2,name=one.txt,bytes=1)",
-		"Upload(parent=id2,name=two.txt,bytes=2)", // reuses id2, no new Mkdir
+	assertCalls(t, fs.calls, []string{"Put(create,moved.txt,bytes=7)"})
+}
+
+func assertCalls(t *testing.T, got, want []string) {
+	t.Helper()
+	if len(got) != len(want) {
+		t.Fatalf("call count = %d, want %d\ngot:  %v\nwant: %v", len(got), len(want), got, want)
 	}
-	if fmt.Sprint(fp.calls) != fmt.Sprint(want) {
-		t.Fatalf("calls =\n  %v\nwant\n  %v", fp.calls, want)
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("call[%d] = %q, want %q", i, got[i], want[i])
+		}
 	}
 }

@@ -33,7 +33,13 @@ bidirectional sync — don't regress it.
   interactive login flow (loopback redirect + manual paste, rclone-style).
 - `internal/transport` — HTTP/3 (QUIC) client with HTTP/2 fallback, injected into the
   Drive provider (M2). See DESIGN.md §2.6.
-- `internal/syncengine` — consumes change events; uploader/downloader land in M2–M4.
+- `internal/syncengine` — outbound push (`Engine`) + inbound pull loop
+  (`Downloader`): `changes.list` cursor feed → backing dir, with §4 echo
+  suppression and adaptive cadence. M4 adds per-path debounce + a path-hashed
+  worker pool with retry/backoff on the push side, §6 conflict copies on the pull
+  side, and a bounded drain on shutdown.
+- `internal/state` — engine-level bbolt sync state: the change-feed cursor and the
+  echo-suppression records shared by the up/down paths (DESIGN.md §2.4, §4).
 
 ## CLI
 
@@ -48,8 +54,10 @@ readers on os.Stdin race and swallow buffered lines.
 ## Milestones
 
 M1 passthrough mount (done) · M2 transport (HTTP/3→HTTP/2) + Drive auth + push-on-close
-(incl. file-handle write capture for `OpWrite`) · M3 `changes.list` pull loop + echo
-suppression · M4 full bidirectional (debounce, retries, conflict copies, clean shutdown).
+(incl. file-handle write capture for `OpWrite`) (done) · M3 `changes.list` pull loop +
+echo suppression + `internal/state` bbolt cursor/echo store (done) · M4 full
+bidirectional: per-path debounce + worker pool, retries/backoff, §6 conflict
+copies, bounded drain on shutdown (done).
 
 ## Transport
 

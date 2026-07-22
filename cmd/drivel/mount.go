@@ -12,6 +12,7 @@ import (
 	"github.com/zishmusic/drivel/internal/mount"
 	"github.com/zishmusic/drivel/internal/provider"
 	"github.com/zishmusic/drivel/internal/provider/gdrive"
+	"github.com/zishmusic/drivel/internal/state"
 	"github.com/zishmusic/drivel/internal/syncengine"
 	"github.com/zishmusic/drivel/internal/vfs"
 )
@@ -22,6 +23,7 @@ func runMount(args []string) {
 	dataDir := fset.String("data", "", "backing directory (source of truth). If omitted, in-place mode uses the mount dir as its own backing (Linux only)")
 	credentials := fset.String("credentials", "", "OAuth client secret JSON; enables Drive sync (else log-only)")
 	token := fset.String("token", "token.json", "path to the cached OAuth token (from 'drivel login')")
+	stateDB := fset.String("state", "drivel-state.db", "path to the sync-state DB (cursor + echo records); kept outside the backing tree")
 	driveRoot := fset.String("drive-root", "root", "Drive folder ID mapped to the mount root")
 	debug := fset.Bool("debug", false, "enable FUSE debug logging")
 	_ = fset.Parse(args)
@@ -63,25 +65,52 @@ func runMount(args []string) {
 
 	// Wire the Drive provider if credentials were supplied; otherwise run
 	// log-only (M1 behaviour), which needs no network or auth.
-	var prov provider.Provider
+	var (
+		store provider.Store
+		st    *state.Store
+	)
 	if *credentials != "" {
-		d, err := gdrive.Open(ctx, *credentials, *token)
+		d, err := gdrive.Open(ctx, *credentials, *token, *driveRoot)
 		if err != nil {
 			log.Fatalf("google drive auth: %v", err)
 		}
 		defer d.Close()
-		prov = d
+		store = d
 		log.Printf("google drive sync enabled (root folder %s)", *driveRoot)
+
+		// Engine-level sync state (cursor + echo records) lives in a control-plane
+		// DB outside the backing tree so it isn't itself synced to Drive.
+		st, err = state.Open(*stateDB)
+		if err != nil {
+			log.Fatalf("open state db: %v", err)
+		}
+		defer st.Close()
 	} else {
 		log.Print("no -credentials: running in log-only mode (no cloud sync)")
 	}
 
 	engine := syncengine.New(syncengine.Config{
-		Provider: prov,
-		DataDir:  backing.Path,
-		RootID:   *driveRoot,
+		Store:   store,
+		DataDir: backing.Path,
+		State:   st,
 	})
-	go engine.Run(ctx, events)
+	// The engine's lifecycle is bounded by close(events), NOT by ctx: on SIGINT the
+	// mount unmounts first (below), which flushes every pending FUSE event, and only
+	// then do we close(events). Running the engine on a background context lets it
+	// drain those buffered writes and its in-flight uploads (bounded internally)
+	// instead of aborting the moment Ctrl-C cancels ctx. A second Ctrl-C hard-exits.
+	engineDone := make(chan struct{})
+	go func() {
+		engine.Run(context.Background(), events)
+		close(engineDone)
+	}()
+
+	// Inbound pull loop (M3), only if the store offers a change feed.
+	if src, ok := store.(provider.ChangeSource); ok {
+		dl := syncengine.NewDownloader(src, store, backing.Path, st, syncengine.DefaultCadence)
+		log.Print("inbound sync enabled (changes.list pull loop)")
+		go dl.Run(ctx)
+	}
 
 	backend := vfs.NewBackend()
 	log.Printf("mounting %s (%s backend, Ctrl-C to unmount)", *mountpoint, backend.Name())
@@ -95,5 +124,10 @@ func runMount(args []string) {
 	if err != nil {
 		log.Fatalf("serve: %v", err)
 	}
+	// Unmount has returned, so no more events will be emitted; closing the channel
+	// tells the engine to drain its queue (bounded) and exit. Wait for that drain
+	// so buffered uploads complete before the process exits (DESIGN.md §7).
 	close(events)
+	<-engineDone
+	log.Print("sync engine drained; exiting")
 }

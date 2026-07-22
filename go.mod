@@ -5,6 +5,7 @@ go 1.26.1
 require (
 	github.com/hanwen/go-fuse/v2 v2.10.1
 	github.com/quic-go/quic-go v0.60.0
+	go.etcd.io/bbolt v1.5.0
 	golang.org/x/oauth2 v0.36.0
 	google.golang.org/api v0.289.0
 )

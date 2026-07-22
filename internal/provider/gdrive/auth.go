@@ -1,4 +1,4 @@
-// Package gdrive implements provider.Provider for Google Drive.
+// Package gdrive implements provider.Store (and provider.ChangeSource) for Google Drive.
 //
 // All Drive traffic rides the HTTP/3-preferred transport from internal/transport,
 // with OAuth folded on top: the token source wraps the transport's RoundTripper

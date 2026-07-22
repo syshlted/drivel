@@ -84,39 +84,72 @@ provider. First (and currently only) provider: **Google Drive**.
   here; the Uploader reads from here.
 
 ### 2.3 Sync Engine
-- **Uploader**: consumes local change events, applies them to Drive, records the
-  resulting fileID + version in the state store.
-- **Downloader**: runs a `changes.list` poll loop against Drive, applies remote
-  deltas to the underlying directory, updates the state store.
+- **Uploader**: consumes local change events, applies them to the store by path
+  (Put/Move/Remove/Mkdir), records the resulting content hash + version for echo
+  suppression. Path↔fileID mapping lives inside the provider (§2.5), not here.
+- **Downloader**: runs the change-feed poll loop (a store's optional `ChangeSource`),
+  applies remote deltas to the underlying directory, updates the state store.
 - Both coordinate through the **state store** and the **echo-suppression** logic
   (§4) so neither re-processes the other's writes.
 
 ### 2.4 State store (bbolt)
 Single embedded key/value DB ([`go.etcd.io/bbolt`](https://github.com/etcd-io/bbolt)).
-Buckets:
+Ownership splits along the provider seam (§2.5):
+
+Provider-internal (below the seam — Drive's private path↔ID translation):
 - `pathToID`   : relative path → Drive fileID
 - `idToMeta`   : fileID → {path, driveModifiedTime, driveVersion, localMtime, size, md5}
-- `cursor`     : the Drive `startPageToken` (single key)
-- `pending`    : in-flight/echo-suppression records (see §4)
 
-### 2.5 Provider interface
-Thin seam so the FS/sync layers don't hard-code Drive:
+Engine-level (provider-agnostic sync state):
+- `cursor`     : the change-feed cursor (single key; opaque provider token)
+- `pending`    : in-flight/echo-suppression records, keyed by path + content hash (see §4)
+
+### 2.5 Provider interface — path-addressed store + optional change feed
+Thin seam so the FS/sync layers don't hard-code Drive. The seam is **path-addressed**:
+every method speaks the same root-relative slash paths that `internal/fsevent` emits.
+A provider's native addressing — Drive's opaque fileIDs, S3 keys, WebDAV URLs — is its
+own private concern; the sync engine never sees it. This is deliberately unlike Drive's
+own API (which is ID-addressed): pushing the path↔native-ID translation *below* the seam
+is what lets a path-addressed backend (S3, local FS, WebDAV) slot in without synthesizing
+fake IDs, and it keeps the engine free of provider-shaped state.
+
+The surface is split into a required store and an optional change feed, so a provider
+that has no incremental feed can still be used (outbound-only):
 
 ```go
-type Provider interface {
-    StartCursor(ctx context.Context) (string, error)
-    Changes(ctx context.Context, cursor string) (changes []RemoteChange, next string, err error)
-    Upload(ctx context.Context, parentID, name string, r io.Reader) (RemoteFile, error)
-    Update(ctx context.Context, fileID string, r io.Reader) (RemoteFile, error)
-    Mkdir(ctx context.Context, parentID, name string) (RemoteFile, error)
-    Delete(ctx context.Context, fileID string) error
-    Move(ctx context.Context, fileID, newParentID, newName string) (RemoteFile, error)
-    Download(ctx context.Context, fileID string) (io.ReadCloser, error)
+// Required. Put/Mkdir create missing ancestor dirs; the engine never pre-creates parents.
+type Store interface {
+    Put(ctx, path string, r io.Reader) (RemoteFile, error)       // create-or-replace
+    Mkdir(ctx, path string) (RemoteFile, error)
+    Move(ctx, oldPath, newPath string) (RemoteFile, error)
+    Remove(ctx, path string) error
+    Get(ctx, path string) (io.ReadCloser, error)
+    Stat(ctx, path string) (rf RemoteFile, ok bool, err error)
+}
+
+// Optional capability: an incremental inbound feed (the M3 pull loop). The engine
+// enables inbound sync only for stores that also satisfy this — Drive does
+// (changes.list); an S3/WebDAV store may omit it and run push-only.
+type ChangeSource interface {
+    StartCursor(ctx) (string, error)
+    Changes(ctx, cursor string) (changes []RemoteChange, next string, err error)
 }
 ```
 
-The Drive implementation is constructed with an injected `*http.Client` (see §2.6),
-so the transport is chosen independently of provider logic.
+`RemoteFile`/`RemoteChange` are keyed by `Path`, not fileID. The Drive implementation
+owns a path↔fileID index (in-memory for M2; the bbolt buckets of §2.4 in M3) and is
+constructed with the **root folder ID** it maps the mount root to, plus an injected
+`*http.Client` (see §2.6) so transport is chosen independently of provider logic.
+
+**Move semantics — a real capability difference, documented not abstracted.** Drive's
+`Move` preserves object identity (a cheap metadata reparent), so history/permissions
+survive a rename. A store with no server-side move (S3, plain HTTP) implements `Move` as
+**copy + delete**, which *resets* identity. For a tool that mirrors a path-unique local
+tree this is fine — the local FS is the source of truth and paths are unique — but it
+means "rename" is not universally atomic or identity-preserving. Providers document their
+behaviour; the engine does not branch on it. (`Move` on an unknown source returns
+`provider.ErrNotExist`, which the engine recovers by uploading the destination as fresh
+content — the one place only the engine has the bytes.)
 
 ### 2.6 Transport — HTTP/3 (QUIC) with HTTP/2 fallback
 All Drive API traffic goes over **HTTP/3**. Rationale: QUIC's connection reuse and
@@ -207,6 +240,27 @@ and lighter than the Workspace Events API, and no webhook endpoint required.
    webhooks. (Optional future: `changes.watch` push as a latency optimization, but it
    needs a public HTTPS endpoint + channel renewal — impractical for a laptop mount.)
 
+**Downloads are applied atomically — no read-through streaming here (deliberate).**
+Each downloaded file is written to a hidden temp in the destination dir and
+`rename`d into place only when complete, so a reader on the mount always sees either
+the old complete version or the new complete version — never a partial file, and a
+mid-download failure leaves nothing half-written. We *considered* serving a file to
+the mount while it downloads (populate the real path progressively, teeing bytes to
+readers). For the **proactive pull** case this is a net loss, not a win: the reader
+never blocks today (it reads the old inode at local speed until the atomic flip),
+whereas streaming would force reads to either block until the stream reaches their
+offset — worse, since FUSE readahead issues parallel reads ahead of the cursor — or
+expose inconsistent half-old/half-new content and forfeit the crash-safe guarantee.
+It also breaks the provider-agnostic FS layer (§2.7, CLAUDE.md), since the read path
+would have to call the provider on a cache miss. Freshness lag (how soon a remote
+edit becomes visible) is bounded by download time and is addressed by download
+*scheduling* (start-on-event, prioritization, parallel pulls), not by read-through.
+
+Read-through streaming pays off only for **lazy hydration** (download-on-open with
+placeholder/sparse files) — a different feature with its own machinery (a range
+cache: per-file present-ranges bitmap + ranged `GET`s for correct random access).
+That is deliberately out of scope for v1; see §8.
+
 ---
 
 ## 4. Echo / loop suppression  ← the critical correctness concern
@@ -275,7 +329,9 @@ are both lossy and racy.
 
 ## 8. Open questions / future
 - **Lazy hydration**: v1 assumes underlying dir has full content. A cache-on-demand
-  mode (download-on-open, placeholder files) is a natural v2.
+  mode (download-on-open, placeholder files) is a natural v2. This is the one place
+  read-through streaming earns its keep (range cache: present-ranges bitmap + ranged
+  `GET`s); the proactive pull loop deliberately does *not* stream — see §3.
 - **Deduplication / GPU**: content-defined chunking + hashing; shelved.
 - **`changes.watch` push** as a latency optimization behind an optional relay.
 - **Multi-account / multiple provider mounts.**
@@ -285,9 +341,20 @@ are both lossy and racy.
 ---
 
 ## 9. Milestones
-1. **M1 — Passthrough mount.** go-fuse loopback proxying to underlying dir. No cloud.
+1. **M1 — Passthrough mount.** go-fuse loopback proxying to underlying dir. No cloud. ✅
 2. **M2 — Transport + Drive auth + one-shot push.** `internal/transport` HTTP/3→HTTP/2
-   client (§2.6), OAuth folded on top, upload a file on close.
-3. **M3 — Pull loop.** `changes.list` cursor loop → underlying dir, with §4 echo
-   suppression.
-4. **M4 — Full bidirectional** with debounce, retries, conflict copies, clean shutdown.
+   client (§2.6), OAuth folded on top, upload a file on close. ✅
+3. **M3 — Pull loop.** `changes.list` cursor loop (`internal/syncengine.Downloader`) →
+   underlying dir, with §4 echo suppression and adaptive cadence (§3.4). Engine-level
+   state (cursor + echo records) persisted in `internal/state` (bbolt). ✅ The
+   provider-internal path↔ID index stays in-memory (self-rebuilding, §2.5); its bbolt
+   persistence is a latency optimization deferred to a later milestone.
+4. **M4 — Full bidirectional** with debounce, retries, conflict copies (§6), clean
+   shutdown (drain the uploader queue; the downloader stops on ctx cancel). ✅
+   Outbound: events are coalesced per path behind a debounce window and dispatched
+   to a bounded pool of path-hashed workers, each op retried with exponential
+   backoff on transient provider errors (`provider.IsRetryable`, classified below
+   the seam). Inbound: a remote edit that collides with a divergent local edit
+   triggers the §6 last-writer-wins policy with a local-only conflict copy. On
+   unmount the engine runs on a background context so `close(events)` (post-unmount)
+   drives a bounded drain of pending + in-flight uploads before exit.
