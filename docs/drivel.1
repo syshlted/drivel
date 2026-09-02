@@ -1,0 +1,290 @@
+.\" Manpage for drivel.
+.\" Render with:  man ./docs/drivel.1     or     mandoc -a docs/drivel.1
+.TH DRIVEL 1 "2026-07-22" "drivel" "User Commands"
+.SH NAME
+drivel \- Drive-backed FUSE interceptor filesystem
+.SH SYNOPSIS
+.B drivel
+.RI [ command ]
+.RI [ flags ]
+.br
+.B drivel login
+.RB [ -credentials
+.IR file ]
+.RB [ -token
+.IR file ]
+.RB [ -client-id
+.IR id ]
+.RB [ -client-secret
+.IR secret ]
+.RB [ -project-id
+.IR id ]
+.RB [ -scope
+.IR name ]
+.RB [ -port
+.IR n ]
+.RB [ -open ]
+.br
+.B drivel mount
+.B -mount
+.I dir
+.RB [ -data
+.IR dir ]
+.RB [ -credentials
+.IR file ]
+.RB [ -token
+.IR file ]
+.RB [ -state
+.IR file ]
+.RB [ -drive-root
+.IR id ]
+.RB [ -lazy ]
+.RB [ -debug ]
+.SH DESCRIPTION
+.B drivel
+mounts a local directory as a loopback FUSE filesystem that acts as an
+.IR interceptor :
+every operation is proxied to an underlying backing directory (the source of
+truth / local cache) and, asynchronously and bidirectionally, synced with a
+cloud-storage provider. The first and currently only provider is
+.BR "Google Drive" ,
+driven by the Drive API v3
+.I changes.list
+cursor feed \(em not webhooks and not the Workspace Events API.
+.PP
+Filesystem operations never block on the network: reads, lookups, and attribute
+calls pass straight through to the backing directory, while each mutation is
+emitted as a change event and handled off the FUSE path by the sync engine.
+Inbound changes from the provider are pulled into the backing directory by a
+cursor-driven poll loop, with echo/loop suppression so a change that originated
+locally is not re-applied when it echoes back from the cloud.
+.PP
+.B drivel
+is a client you run yourself. It ships no application identity and collects no
+analytics or telemetry; you supply your own Google Cloud OAuth credentials, so
+all Drive traffic is directly between your machine and Google under an app
+identity you control. All Drive traffic uses HTTP/3 (QUIC) with an automatic
+fallback to HTTP/2.
+.SH COMMANDS
+.TP
+.B login
+Interactive, rclone-style OAuth wizard. Collects the client ID/secret (from
+flags, an existing
+.IR credentials.json ,
+or prompts), writes
+.IR credentials.json ,
+runs the loopback/paste login flow, and caches the resulting token to
+.IR token.json .
+This is the only interactive subcommand.
+.TP
+.B mount
+Mount a directory and sync it. Non-interactive: it requires a token produced by
+.B login
+and never prompts on stdin. This is the default command, so
+.B drivel -mount \fIdir\fB ...
+(with a leading flag and no subcommand word) also selects it.
+.TP
+.B help
+Print top-level usage.
+.SH MOUNT OPTIONS
+.TP
+.BI -mount " dir"
+Path to mount the filesystem. Required. Created if missing.
+.TP
+.BI -data " dir"
+Backing directory used as the source of truth. If omitted,
+.B drivel
+uses
+.I in-place mode
+(Linux only): the mountpoint is its own backing store, so files remain in it
+after
+.B drivel
+exits. See
+.BR "IN-PLACE MODE" .
+.TP
+.BI -credentials " file"
+OAuth client-secret JSON. Supplying it enables Drive sync; without it,
+.B drivel
+runs in log-only mode (no network, no auth) and merely reports the change events
+it would sync.
+.TP
+.BI -token " file"
+Path to the cached OAuth token written by
+.BR "drivel login" .
+Default:
+.IR token.json .
+.TP
+.BI -state " file"
+Path to the sync-state database (the change-feed cursor and echo-suppression
+records). Kept outside the backing tree so it is not itself synced. Default:
+.IR drivel-state.db .
+.TP
+.BI -drive-root " id"
+Drive folder ID mapped to the mount root. Use
+.B root
+for the My Drive root. Default:
+.BR root .
+.TP
+.B -lazy
+Enable lazy hydration. Remote files are materialised in the backing directory as
+.IR placeholders :
+they carry the real name, size and modification time but occupy no space, and
+their content is fetched the first time something reads (or partially writes)
+them. A directory listing therefore costs no downloads. Requires
+.BR -credentials ,
+since a placeholder is a promise that the content can be fetched later.
+.IP
+Without this flag the backing directory holds full content, which is the default.
+.IP
+Placeholder state is recorded in a
+.B user.drivel.placeholder
+extended attribute on each backing file, which is what stops the sync engine from
+uploading a placeholder's zero bytes over the real remote file. If the backing
+filesystem cannot store user extended attributes,
+.B drivel
+warns at startup and falls back to the state database alone; in that case do not
+delete the state database while placeholders exist.
+.TP
+.B -debug
+Enable FUSE debug logging.
+.SH LOGIN OPTIONS
+.TP
+.BI -credentials " file"
+Path to read/write the OAuth client-secret JSON. Default:
+.IR credentials.json .
+.TP
+.BI -token " file"
+Path to write the OAuth token. Default:
+.IR token.json .
+.TP
+.BI -client-id " id"
+OAuth client ID. If omitted, it is read from
+.I -credentials
+or prompted for.
+.TP
+.BI -client-secret " secret"
+OAuth client secret. If omitted, it is read from
+.I -credentials
+or prompted for.
+.TP
+.BI -project-id " id"
+GCP project ID (optional).
+.TP
+.BI -scope " name"
+Drive scope: one of
+.BR drive ", " drive.readonly ", or " drive.file .
+If omitted, the wizard shows a menu.
+.TP
+.BI -port " n"
+Loopback port for the OAuth redirect;
+.B 0
+picks a free port automatically. Default:
+.B 53682
+(rclone's port).
+.TP
+.B -open
+Attempt to open the authorization URL with the operating system's browser
+handler.
+.SH IN-PLACE MODE
+Omitting
+.I -data
+selects in-place mode, in which the mount directory is its own backing store.
+.B drivel
+opens a directory handle to the mountpoint
+.I before
+mounting over it and routes all backing I/O through
+.RI ( /proc/self/fd/N )
+so it bypasses the FUSE overlay instead of recursing into it. Nothing is copied,
+and the files remain in place after unmount. In-place mode is Linux-only; on
+other platforms supply a separate
+.I -data
+directory.
+.SH ENVIRONMENT AND REQUIREMENTS
+.B drivel
+requires the FUSE mount helper
+.RB ( fusermount3 ),
+which ships with the system
+.B fuse3
+package (install with
+.B "dnf install fuse3"
+or
+.BR "apt install fuse3" ).
+HTTP/3/QUIC benefits from a larger UDP receive buffer; if
+.B quic-go
+warns about the buffer size, raise it with
+.BR "sysctl -w net.core.rmem_max=7500000" .
+.SH SIGNALS
+.B drivel mount
+unmounts cleanly on
+.B SIGINT
+.RB ( Ctrl-C )
+or
+.BR SIGTERM :
+the mount is unmounted first (flushing pending FUSE events), then the sync engine
+drains its bounded queue of in-flight uploads before the process exits. A second
+.B Ctrl-C
+forces an immediate exit.
+.SH FILES
+.TP
+.I credentials.json
+OAuth client secret (client ID/secret). Treat as a secret; do not commit.
+.TP
+.I token.json
+Cached OAuth token from
+.BR "drivel login" .
+.TP
+.I drivel-state.db
+bbolt sync-state database (change-feed cursor + echo records).
+.SH EXAMPLES
+.PP
+Authenticate:
+.PP
+.RS
+.EX
+drivel login
+.EE
+.RE
+.PP
+Mount with a separate backing directory (log-only, no cloud):
+.PP
+.RS
+.EX
+drivel mount -mount ./mnt -data ./data
+.EE
+.RE
+.PP
+Mount in-place on Linux (the directory is its own backing store):
+.PP
+.RS
+.EX
+drivel mount -mount ./dir
+.EE
+.RE
+.PP
+Mount with Google Drive sync:
+.PP
+.RS
+.EX
+drivel mount -mount ./mnt -data ./data \e
+    -credentials credentials.json -token token.json -drive-root <folderID>
+.EE
+.RE
+.SH EXIT STATUS
+.B drivel
+exits
+.B 0
+on a clean unmount,
+.B 2
+on an unknown command or flag-parse error, and non-zero on a fatal mount, auth,
+or sync-setup error.
+.SH SEE ALSO
+Project design notes in
+.IR DESIGN.md ,
+setup guide in
+.IR README.md ,
+and Google credential setup in
+.IR docs/google-cloud-setup.md .
+.SH LICENSE
+GNU Affero General Public License, version 3 (AGPLv3).
+.SH AUTHORS
+The Drivel authors.

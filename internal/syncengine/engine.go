@@ -20,7 +20,9 @@ package syncengine
 import (
 	"context"
 	"errors"
+	"fmt"
 	"hash/fnv"
+	"io"
 	"log"
 	"math/rand"
 	"os"
@@ -30,6 +32,7 @@ import (
 
 	"github.com/zishmusic/drivel/internal/fsevent"
 	"github.com/zishmusic/drivel/internal/provider"
+	"github.com/zishmusic/drivel/internal/ranges"
 	"github.com/zishmusic/drivel/internal/state"
 )
 
@@ -49,11 +52,23 @@ type retryPolicy struct {
 
 var defaultRetry = retryPolicy{max: 5, base: 500 * time.Millisecond, cap: 30 * time.Second}
 
+// Placeholders is the OPTIONAL lazy-hydration guard (M5), satisfied by
+// *hydrate.Hydrator. The uploader consults it before pushing content: an
+// unhydrated placeholder holds no bytes, so uploading it would replace real
+// remote content with zeros. Nil means eager mode, where every local file is
+// assumed to hold its content (M1–M4 behaviour).
+type Placeholders interface {
+	// IsPlaceholder reports whether the backing file at rel lacks its content.
+	// Implementations must fail safe by reporting true when unsure.
+	IsPlaceholder(rel string) bool
+}
+
 // Engine applies local change events to a store.
 type Engine struct {
 	store   provider.Store // nil => log-only mode
 	dataDir string         // underlying dir; content is read from here
 	state   *state.Store   // echo-suppression store; nil => don't record
+	holes   Placeholders   // nil => eager mode; see Placeholders
 
 	debounce     time.Duration
 	workers      int
@@ -67,6 +82,7 @@ type Config struct {
 	Store   provider.Store // nil for log-only mode
 	DataDir string         // underlying directory (source of truth)
 	State   *state.Store   // engine-level sync state; nil to skip echo recording
+	Holes   Placeholders   // lazy-hydration guard (M5); nil for eager mode
 
 	Debounce     time.Duration // per-path coalescing window
 	Workers      int           // size of the path-hashed worker pool
@@ -79,6 +95,7 @@ func New(cfg Config) *Engine {
 		store:        cfg.Store,
 		dataDir:      cfg.DataDir,
 		state:        cfg.State,
+		holes:        cfg.Holes,
 		debounce:     cfg.Debounce,
 		workers:      cfg.Workers,
 		drainTimeout: cfg.DrainTimeout,
@@ -125,7 +142,7 @@ func (e *Engine) Run(ctx context.Context, events <-chan fsevent.Event) {
 
 	// Debounce state: coalesce content writes per path behind a trailing timer.
 	// Structural ops flush the affected path(s) first so per-path order is kept.
-	c := coalescer{pending: map[string]struct{}{}}
+	c := coalescer{pending: map[string]*ranges.Set{}}
 	timers := map[string]*time.Timer{}
 	flushCh := make(chan string, 64)
 	stopTimer := func(p string) {
@@ -146,7 +163,7 @@ loop:
 			}
 			switch ev.Op {
 			case fsevent.OpCreate, fsevent.OpWrite:
-				c.markContent(ev.Path)
+				c.markContent(ev.Path, ev.Dirty)
 				stopTimer(ev.Path)
 				p := ev.Path
 				timers[p] = time.AfterFunc(e.debounce, func() {
@@ -214,21 +231,47 @@ func (e *Engine) runLogOnly(ctx context.Context, events <-chan fsevent.Event) {
 // fsevent.Event; a coalesced content push is normalised to OpWrite (the executor
 // re-reads the file from disk, so create-vs-write is irrelevant). It holds no
 // timers — the Run loop owns those and calls flush when a timer fires.
+//
+// A pending entry carries the union of the dirty extents its events reported
+// (M6). A nil value means "extents unknown" — push the whole file — and it is
+// absorbing: once any contributing event is unknown, the coalesced push is too.
+// The map key's presence, not its value, is what marks a path pending.
 type coalescer struct {
-	pending map[string]struct{}
+	pending map[string]*ranges.Set
 }
 
 // markContent records that path has buffered content to push once its debounce
-// window elapses.
-func (c *coalescer) markContent(path string) { c.pending[path] = struct{}{} }
+// window elapses, folding dirty into whatever extents are already pending.
+//
+// The merge is deliberately pessimistic in two places. An unknown set poisons the
+// accumulator, and so does a union across mismatched block grids: both mean we
+// can no longer name every changed byte, and the only safe answer to that is the
+// whole file.
+func (c *coalescer) markContent(path string, dirty *ranges.Set) {
+	cur, pending := c.pending[path]
+	switch {
+	case !pending:
+		if dirty == nil {
+			c.pending[path] = nil
+			return
+		}
+		merged := dirty.Clone()
+		c.pending[path] = &merged
+	case cur == nil || dirty == nil:
+		c.pending[path] = nil // unknown absorbs known
+	case !cur.Union(*dirty):
+		c.pending[path] = nil // incompatible grids; fall back to whole-file
+	}
+}
 
 // flush returns the coalesced content task for path (if any), clearing it.
 func (c *coalescer) flush(path string) []fsevent.Event {
-	if _, ok := c.pending[path]; !ok {
+	dirty, ok := c.pending[path]
+	if !ok {
 		return nil
 	}
 	delete(c.pending, path)
-	return []fsevent.Event{{Op: fsevent.OpWrite, Path: path}}
+	return []fsevent.Event{{Op: fsevent.OpWrite, Path: path, Dirty: dirty}}
 }
 
 // structural flushes any content pending for the path(s) the op names, then
@@ -244,10 +287,10 @@ func (c *coalescer) structural(ev fsevent.Event) []fsevent.Event {
 // flushAll drains every pending content push (used on shutdown).
 func (c *coalescer) flushAll() []fsevent.Event {
 	out := make([]fsevent.Event, 0, len(c.pending))
-	for p := range c.pending {
-		out = append(out, fsevent.Event{Op: fsevent.OpWrite, Path: p})
+	for p, dirty := range c.pending {
+		out = append(out, fsevent.Event{Op: fsevent.OpWrite, Path: p, Dirty: dirty})
 	}
-	c.pending = map[string]struct{}{}
+	c.pending = map[string]*ranges.Set{}
 	return out
 }
 
@@ -312,7 +355,7 @@ func (e *Engine) push(ctx context.Context, ev fsevent.Event) error {
 		return nil
 
 	case fsevent.OpCreate, fsevent.OpWrite:
-		return e.pushContent(ctx, ev.Path)
+		return e.pushContent(ctx, ev.Path, ev.Dirty)
 
 	case fsevent.OpUnlink, fsevent.OpRmdir:
 		if err := e.store.Remove(ctx, ev.Path); err != nil {
@@ -324,8 +367,9 @@ func (e *Engine) push(ctx context.Context, ev fsevent.Event) error {
 	case fsevent.OpRename:
 		rf, err := e.store.Move(ctx, ev.Path, ev.NewPath)
 		if errors.Is(err, provider.ErrNotExist) {
-			// Source was never pushed; treat the destination as new content.
-			return e.pushContent(ctx, ev.NewPath)
+			// Source was never pushed; treat the destination as new content — whole
+			// file, since no handle tracked which of its bytes are new.
+			return e.pushContent(ctx, ev.NewPath, nil)
 		}
 		if err != nil {
 			return err
@@ -340,9 +384,33 @@ func (e *Engine) push(ctx context.Context, ev fsevent.Event) error {
 	return nil
 }
 
-// pushContent uploads (or replaces) the file at virtual path p from the
-// underlying dir. Put decides create-vs-replace, so the engine doesn't track IDs.
-func (e *Engine) pushContent(ctx context.Context, p string) error {
+// hashSkipMinSize is the size below which the unchanged-content gate is not worth
+// running. Both gates below cost a Stat round-trip, and for a small file that is
+// the same order as just uploading it — the gate would spend a request to save a
+// request. The threshold buys back the M1–M5 behaviour for small files (always
+// upload) and reserves the checks for payloads where a wasted transfer actually
+// hurts. One block keeps it coherent with the range granularity.
+const hashSkipMinSize = ranges.DefaultBlockSize
+
+// pushContent uploads the file at virtual path p from the underlying dir, taking
+// the cheapest route that is certainly correct. dirty bounds the byte extents the
+// mount observed changing; nil means "unknown", which is always safe.
+//
+// The placeholder check comes first and nothing may get in front of it. It is
+// load-bearing, not an optimization (DESIGN.md §9, M5): a lazily-hydrated file
+// that has never been read holds zero resident bytes at its full apparent size,
+// so pushing it would overwrite the remote content it stands for with zeros.
+// Placeholders have no local edits by definition — the FUSE layer hydrates before
+// any write — so skipping is the correct answer, not a deferral.
+//
+// After that, pushShortcut may finish the push by a cheaper route. Anything it
+// declines falls through to a whole-file Put, which is the M1–M5 behaviour and is
+// never wrong — only slower.
+func (e *Engine) pushContent(ctx context.Context, p string, dirty *ranges.Set) error {
+	if e.holes != nil && e.holes.IsPlaceholder(p) {
+		log.Printf("[sync] skip %s: unhydrated placeholder (nothing local to push)", p)
+		return nil
+	}
 	f, err := os.Open(filepath.Join(e.dataDir, filepath.FromSlash(p)))
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -352,12 +420,158 @@ func (e *Engine) pushContent(ctx context.Context, p string) error {
 	}
 	defer f.Close()
 
+	fi, err := f.Stat()
+	if err != nil {
+		return err
+	}
+	size := fi.Size()
+
+	done, err := e.pushShortcut(ctx, p, f, size, dirty)
+	if err != nil {
+		return err
+	}
+	if done {
+		return nil
+	}
+
+	// Whole file. Rewind: the gates above may have read from f.
+	if _, err := f.Seek(0, io.SeekStart); err != nil {
+		return err
+	}
 	rf, err := e.store.Put(ctx, p, f)
 	if err != nil {
 		return err
 	}
 	e.recordEcho(rf)
 	return nil
+}
+
+// pushShortcut tries the two M6 routes that avoid re-uploading a whole file,
+// reporting done=true if one of them completed the push. Declining is always an
+// option: every path here has the whole-file Put behind it.
+//
+// Both routes need to know the remote's current state, so they share one Stat —
+// and both are skipped outright for a file too small for that round-trip to pay
+// for itself.
+//
+// The range write is tried BEFORE the unchanged-content hash, which looks
+// backwards for a "cheapest first" ordering and is deliberate: hashing means
+// reading the entire file, so on the case M6 exists for — one block changed in a
+// multi-gigabyte file — checking "did anything change?" first would cost a 4 GB
+// read to avoid a 4 MiB upload. If the content turns out not to have really
+// changed, the range write rewrites identical bytes, which is wasteful but not
+// wrong.
+func (e *Engine) pushShortcut(ctx context.Context, p string, f *os.File, size int64, dirty *ranges.Set) (bool, error) {
+	rp, canPatch := e.store.(provider.RangePutter)
+	patchable := canPatch && rangeWorthIt(dirty, size)
+	hashable := size >= hashSkipMinSize
+	if !patchable && !hashable {
+		return false, nil
+	}
+
+	remote, exists, err := e.store.Stat(ctx, p)
+	if err != nil {
+		log.Printf("[sync] stat %s: %v (uploading whole file)", p, err)
+		return false, nil
+	}
+	if !exists {
+		return false, nil // nothing to patch or compare against; this is a create
+	}
+
+	if patchable && remote.Size == size && e.remoteIsOurs(p, remote) {
+		extents := dirty.Extents()
+		rf, err := rp.PutRange(ctx, p, f, size, extents)
+		if err != nil {
+			log.Printf("[sync] range write %s failed (%d extent(s), %d of %d B): %v (uploading whole file)",
+				p, len(extents), dirty.Bytes(), size, err)
+		} else {
+			log.Printf("[sync] range write %s: %d extent(s), %d of %d B", p, len(extents), dirty.Bytes(), size)
+			e.recordEcho(rf)
+			return true, nil
+		}
+	}
+
+	if hashable {
+		unchanged, err := e.contentMatches(f, remote)
+		if err != nil {
+			return false, err
+		}
+		if unchanged {
+			log.Printf("[sync] skip %s: remote already holds these bytes (%d B not uploaded)", p, size)
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// rangeWorthIt reports whether dirty is a usable, profitable description of the
+// changes to a file of this size.
+//
+// The size equality is the load-bearing half. A set built against a different
+// length describes a file nobody is holding — a truncate or a racing writer moved
+// every offset after the cut — and patching from it would land bytes in the wrong
+// place. Everything else here is economics: nothing marked, or everything marked,
+// means a patch would send as much as a Put.
+func rangeWorthIt(dirty *ranges.Set, size int64) bool {
+	if dirty == nil || dirty.Size != size {
+		return false
+	}
+	return len(dirty.Extents()) > 0 && dirty.Bytes() < size
+}
+
+// remoteIsOurs reports whether the remote object is still exactly the content we
+// last synced at p, per the §4 echo record.
+//
+// This is the check that makes a partial write safe. A whole-file Put over a
+// remote someone else has edited loses their edit, which is the documented §6
+// last-writer-wins policy and is at least recoverable — the loser's bytes existed
+// as one coherent version. Splicing our extents into their file produces a hybrid
+// that never existed anywhere, silently, with no conflict copy, and no version of
+// the file left intact. So a range write may only ever be applied to the exact
+// version we based it on; anything else — a divergent remote, no echo record at
+// all, no state store — falls back to the whole-file path and its normal conflict
+// semantics.
+func (e *Engine) remoteIsOurs(p string, remote provider.RemoteFile) bool {
+	if e.state == nil {
+		return false
+	}
+	echo, ok, err := e.state.GetEcho(p)
+	if err != nil || !ok {
+		return false
+	}
+	return echo.Matches(remote.Hash, remote.Version)
+}
+
+// contentMatches reports whether the remote already holds exactly the bytes in f,
+// by hashing the local content with the provider's own digest and comparing
+// against what Stat just reported.
+//
+// It compares against the REMOTE's hash, not the echo record's. The echo says
+// what we last synced, which is a claim about the past: if the remote has since
+// diverged in a way the change feed never delivered (a cursor expired across a
+// long downtime, a state DB reused against a different -drive-root, a delete we
+// never learned about), a stale echo would match our unchanged local file forever
+// and the push would be skipped every time — the file would silently never be
+// restored. Asking the remote what it currently holds cannot go stale.
+//
+// It is best-effort in one direction only: any doubt (no ContentHasher, no remote
+// checksum, a read error) reports false and the push proceeds. The cost of a
+// wrong "true" is a lost local change, so nothing but a positive hash match may
+// produce one.
+func (e *Engine) contentMatches(f *os.File, remote provider.RemoteFile) (bool, error) {
+	hasher, ok := e.store.(provider.ContentHasher)
+	if !ok || remote.Hash == "" {
+		return false, nil
+	}
+	if _, err := f.Seek(0, io.SeekStart); err != nil {
+		return false, err
+	}
+	local, err := hasher.HashContent(f)
+	if err != nil {
+		log.Printf("[sync] hash %s: %v (uploading anyway)", remote.Path, err)
+		return false, nil
+	}
+	return local != "" && local == remote.Hash, nil
 }
 
 // recordEcho notes the content we just pushed at rf.Path so the change-feed
@@ -383,9 +597,23 @@ func (e *Engine) forgetEcho(p string) {
 func logEvent(ev fsevent.Event) {
 	if ev.Op == fsevent.OpRename {
 		log.Printf("[sync] %-7s %s -> %s", ev.Op, ev.Path, ev.NewPath)
-	} else {
-		log.Printf("[sync] %-7s %s", ev.Op, ev.Path)
+		return
 	}
+	log.Printf("[sync] %-7s %s%s", ev.Op, ev.Path, describeDirty(ev.Dirty))
+}
+
+// describeDirty renders an event's dirty extents for the log. Log-only mode is
+// where a developer watches what the mount actually reports, so it is worth
+// seeing whether a write came through as extents or as "whole file" (M6).
+func describeDirty(d *ranges.Set) string {
+	if d == nil {
+		return ""
+	}
+	extents := d.Extents()
+	if len(extents) == 0 {
+		return ""
+	}
+	return fmt.Sprintf(" (%d extent(s), %d of %d B)", len(extents), d.Bytes(), d.Size)
 }
 
 // jitter returns a duration in [d/2, d) — full jitter around the backoff, so many

@@ -1,0 +1,73 @@
+#compdef drivel
+# zsh completion for drivel
+#
+# Install: place this file (named `_drivel`) in a directory on your $fpath,
+# then restart zsh or run `compinit`. For example:
+#
+#   mkdir -p ~/.zsh/completions
+#   cp completions/_drivel ~/.zsh/completions/_drivel
+#   # in ~/.zshrc, before `compinit`:
+#   fpath=(~/.zsh/completions $fpath)
+#   autoload -Uz compinit && compinit
+
+_drivel() {
+    local curcontext="$curcontext" state line
+    typeset -A opt_args
+
+    local -a subcommands
+    subcommands=(
+        'login:Interactive Google OAuth setup (writes credentials.json + token.json)'
+        'mount:Mount a directory and sync it with Google Drive (default)'
+        'help:Show top-level usage'
+    )
+
+    # First argument may be a subcommand, or a flag (implying the default mount).
+    _arguments -C \
+        '1: :->command' \
+        '*:: :->args' && return 0
+
+    case $state in
+        command)
+            if [[ $words[CURRENT] == -* ]]; then
+                _drivel_mount_args   # `drivel -mount ...` is the default command
+            else
+                _describe -t commands 'drivel command' subcommands
+            fi
+            ;;
+        args)
+            case $line[1] in
+                login) _drivel_login_args ;;
+                mount) _drivel_mount_args ;;
+                *)     _drivel_mount_args ;;
+            esac
+            ;;
+    esac
+}
+
+_drivel_mount_args() {
+    _arguments -s \
+        '-mount=[path to mount the filesystem (required)]:mountpoint:_files -/' \
+        '-data=[backing directory (source of truth); omit for in-place mode]:backing dir:_files -/' \
+        '-credentials=[OAuth client secret JSON; enables Drive sync]:credentials file:_files' \
+        '-token=[cached OAuth token from `drivel login`]:token file:_files' \
+        '-state=[sync-state DB (cursor + echo records)]:state db:_files' \
+        '-drive-root=[Drive folder ID mapped to the mount root]:folder id:' \
+        '-lazy[materialise remote files as placeholders; fetch content on first read]' \
+        '-debug[enable FUSE debug logging]' \
+        '(-h -help)'{-h,-help}'[show mount usage]'
+}
+
+_drivel_login_args() {
+    _arguments -s \
+        '-credentials=[path to read/write the OAuth client secret JSON]:credentials file:_files' \
+        '-token=[path to write the OAuth token]:token file:_files' \
+        '-client-id=[OAuth client ID]:client id:' \
+        '-client-secret=[OAuth client secret]:client secret:' \
+        '-project-id=[GCP project ID (optional)]:project id:' \
+        '-scope=[Drive scope]:scope:(drive drive.readonly drive.file)' \
+        '-port=[loopback port for the OAuth redirect (0 = auto)]:port:' \
+        '-open[attempt to open the auth URL with the OS browser handler]' \
+        '(-h -help)'{-h,-help}'[show login usage]'
+}
+
+_drivel "$@"

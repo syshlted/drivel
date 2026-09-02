@@ -21,9 +21,10 @@ import (
 )
 
 var (
-	bucketCursor = []byte("cursor")
-	bucketEcho   = []byte("echo")
-	keyCursor    = []byte("changefeed")
+	bucketCursor    = []byte("cursor")
+	bucketEcho      = []byte("echo")
+	bucketHydration = []byte("hydration")
+	keyCursor       = []byte("changefeed")
 )
 
 // Echo is what we last synced for a path, from either direction. A remote change
@@ -60,7 +61,7 @@ func Open(path string) (*Store, error) {
 		return nil, fmt.Errorf("open state db %s: %w", path, err)
 	}
 	err = db.Update(func(tx *bolt.Tx) error {
-		for _, b := range [][]byte{bucketCursor, bucketEcho} {
+		for _, b := range [][]byte{bucketCursor, bucketEcho, bucketHydration} {
 			if _, err := tx.CreateBucketIfNotExists(b); err != nil {
 				return err
 			}
@@ -130,5 +131,42 @@ func (s *Store) SetEcho(path string, e Echo) error {
 func (s *Store) DeleteEcho(path string) error {
 	return s.db.Update(func(tx *bolt.Tx) error {
 		return tx.Bucket(bucketEcho).Delete([]byte(path))
+	})
+}
+
+// --- hydration (M5) ---------------------------------------------------------
+//
+// The hydration bucket caches per-path present-ranges bitmaps for lazy hydration.
+// It is deliberately opaque here — the encoding belongs to internal/hydrate, which
+// keeps this package free of any dependency on the hydration model. It is only a
+// CACHE: the authoritative placeholder marker is an xattr on the backing file, so
+// losing this bucket costs a stat, not correctness.
+
+// Hydration returns the cached range bitmap for path, if one is stored.
+func (s *Store) Hydration(path string) (v []byte, ok bool, err error) {
+	err = s.db.View(func(tx *bolt.Tx) error {
+		b := tx.Bucket(bucketHydration).Get([]byte(path))
+		if b == nil {
+			return nil
+		}
+		// bbolt values are only valid inside the transaction; copy before escaping.
+		v = append([]byte(nil), b...)
+		ok = true
+		return nil
+	})
+	return v, ok, err
+}
+
+// SetHydration stores the range bitmap for path.
+func (s *Store) SetHydration(path string, v []byte) error {
+	return s.db.Update(func(tx *bolt.Tx) error {
+		return tx.Bucket(bucketHydration).Put([]byte(path), v)
+	})
+}
+
+// DeleteHydration drops the range bitmap for path (fully hydrated, or removed).
+func (s *Store) DeleteHydration(path string) error {
+	return s.db.Update(func(tx *bolt.Tx) error {
+		return tx.Bucket(bucketHydration).Delete([]byte(path))
 	})
 }

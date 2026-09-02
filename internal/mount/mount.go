@@ -13,6 +13,25 @@ import (
 	"github.com/zishmusic/drivel/internal/fsevent"
 )
 
+// Hydrator is the OPTIONAL lazy-hydration hook (M5). A mount backend consults it
+// before serving a file whose content may not be resident in the backing store.
+// Declaring it here rather than importing internal/hydrate keeps the mount seam —
+// and every backend below it — free of the sync and provider layers.
+//
+// A nil Options.Hydrator selects eager mode: the backing store is assumed to hold
+// full content, which is the M1–M4 behaviour and remains the default.
+type Hydrator interface {
+	// IsPlaceholder reports whether rel (root-relative, slash-separated) exists in
+	// the backing store without its content. It must fail safe — report true when
+	// it cannot tell — because the cost of a wrong "false" is an empty upload.
+	IsPlaceholder(rel string) bool
+	// Hydrate blocks until rel's content is resident, or returns an error.
+	Hydrate(ctx context.Context, rel string) error
+	// Discard drops the placeholder mark without fetching, for a caller that is
+	// about to replace the content wholesale (a truncating open).
+	Discard(rel string) error
+}
+
 // Options configure a single mount.
 type Options struct {
 	Mountpoint string               // where the filesystem is mounted
@@ -20,6 +39,7 @@ type Options struct {
 	Events     chan<- fsevent.Event // change events sink
 	FsName     string               // display name for the mount
 	Debug      bool                 // backend-level tracing
+	Hydrator   Hydrator             // nil => eager mode (content always resident)
 }
 
 // Backend mounts and serves an interceptor filesystem.

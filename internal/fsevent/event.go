@@ -4,6 +4,8 @@
 // sync core stay portable and lets multiple mount backends share one event type.
 package fsevent
 
+import "github.com/zishmusic/drivel/internal/ranges"
+
 // Op identifies the kind of filesystem mutation an Event describes.
 type Op string
 
@@ -24,4 +26,16 @@ type Event struct {
 	Op      Op
 	Path    string
 	NewPath string
+
+	// Dirty bounds the byte extents an OpWrite/OpCreate touched, so the uploader
+	// can ship only those where the provider supports range writes (M6).
+	//
+	// nil means "unknown" and is the fail-safe default: the whole file gets
+	// pushed. Every code path that cannot account for every changed byte —
+	// a truncate or any other size change, an event synthesised without a file
+	// handle behind it, a backend that does not track extents — leaves it nil and
+	// is correct by construction. Only a handle that saw all of a file's writes
+	// may set it. Getting this backwards would upload a stale block over a good
+	// one, so "unsure" must always mean nil.
+	Dirty *ranges.Set
 }

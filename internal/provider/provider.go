@@ -15,6 +15,8 @@ import (
 	"errors"
 	"io"
 	"time"
+
+	"github.com/zishmusic/drivel/internal/ranges"
 )
 
 // ErrNotExist is returned by Move when the source path is not known to the store.
@@ -39,11 +41,11 @@ func IsRetryable(err error) bool {
 
 // RemoteFile is the provider-agnostic view of a stored object.
 type RemoteFile struct {
-	Path     string    // root-relative slash path
+	Path     string // root-relative slash path
 	IsDir    bool
 	Size     int64
-	Hash     string    // content checksum (e.g. Drive md5Checksum), when the provider exposes one
-	Version  string    // opaque provider version/etag
+	Hash     string // content checksum (e.g. Drive md5Checksum), when the provider exposes one
+	Version  string // opaque provider version/etag
 	Modified time.Time
 }
 
@@ -87,4 +89,61 @@ type ChangeSource interface {
 	StartCursor(ctx context.Context) (string, error)
 	// Changes returns changes since cursor and the cursor to use next time.
 	Changes(ctx context.Context, cursor string) (changes []RemoteChange, next string, err error)
+}
+
+// RangeGetter is an OPTIONAL capability: reading a byte range of an object
+// instead of the whole thing. Lazy hydration (M5) uses it to fault in only the
+// blocks a read touches; providers without ranged reads simply omit it and
+// callers fall back to Get.
+//
+// Length <= 0 means "to end of object". Implementations return a reader over
+// exactly the requested extent (clamped to the object's size); a short object is
+// not an error.
+type RangeGetter interface {
+	GetRange(ctx context.Context, path string, off, length int64) (io.ReadCloser, error)
+}
+
+// RangePutter is an OPTIONAL capability and RangeGetter's write-side mirror (M6):
+// replacing byte extents of an existing object in place, leaving every other byte
+// untouched, so editing one block of a 4 GB file costs one block of upload.
+//
+// It is genuinely optional. Google Drive does NOT implement it — files.update
+// replaces content wholesale and its resumable protocol still requires every
+// chunk of the new file — so gdrive omits it and the uploader falls back to
+// whole-file Put. See DESIGN.md §9 (M6).
+//
+// Contract, all of which the engine checks before calling and the implementation
+// must re-check:
+//
+//   - The object must already exist and its size must equal size. A range write
+//     cannot create, extend or truncate; anything that changes the file's length
+//     is a whole-file Put. Implementations MUST fail rather than resize.
+//   - extents are non-overlapping, ascending, and lie within [0, size).
+//   - src reads the complete local file — the implementation seeks into it for
+//     each extent. It is a ReaderAt, not a Reader, precisely so extents can be
+//     sent in whatever order the wire protocol prefers.
+//
+// Returning an error is always safe: the engine logs it and retries the write as
+// a whole-file Put, which is slower but never wrong.
+type RangePutter interface {
+	PutRange(ctx context.Context, path string, src io.ReaderAt, size int64, extents []ranges.Range) (RemoteFile, error)
+}
+
+// ContentHasher is an OPTIONAL capability: computing, over local content, the
+// same checksum the provider reports in RemoteFile.Hash.
+//
+// It exists so the uploader can answer "does the remote already hold exactly
+// these bytes?" without knowing which algorithm the provider uses — Drive's
+// md5Checksum today, something else tomorrow. Comparing a hash we computed
+// ourselves against RemoteFile.Hash would otherwise bake a provider's choice of
+// digest into the engine.
+//
+// The payoff is skipping the upload entirely for a write that did not change the
+// content (a touch, an editor that rewrites an identical buffer, a re-run of a
+// build). On a multi-gigabyte file that trades a local read for a network
+// transfer. Providers with no exposed checksum omit it and every push proceeds.
+type ContentHasher interface {
+	// HashContent returns the checksum of everything readable from r, in the same
+	// encoding the provider populates RemoteFile.Hash with.
+	HashContent(r io.Reader) (string, error)
 }

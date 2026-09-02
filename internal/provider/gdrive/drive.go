@@ -2,6 +2,8 @@ package gdrive
 
 import (
 	"context"
+	"crypto/md5"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -19,6 +21,52 @@ import (
 )
 
 const folderMIME = "application/vnd.google-apps.folder"
+
+// Upload tuning for the resumable sessions the generated client runs whenever a
+// payload exceeds uploadChunkSize (DESIGN.md §9, M6).
+//
+// Chunking is what makes a large upload survivable: each chunk is committed
+// separately and retried on its own, so a dropped connection costs one chunk
+// rather than the file. The session URI is not persisted, so this covers a flaky
+// network, not a drivel restart — resuming across process lifetimes is
+// deliberately out of M6.
+const (
+	// 16 MiB, the client's own default, stated explicitly so a library change
+	// cannot silently move it. Larger chunks mean fewer round-trips; smaller ones
+	// mean less work lost per failure.
+	uploadChunkSize = 16 << 20
+	// How long one chunk may keep failing and retrying before the error reaches
+	// the engine, which then applies its own backoff across the whole operation.
+	// The library's default is 32s — barely one 429 backoff — so a brief rate
+	// limit aborts a chunk that would have succeeded moments later.
+	uploadChunkRetryDeadline = 5 * time.Minute
+)
+
+// mediaOptions are the upload options applied to every content push.
+//
+// EnableAutoChecksum makes Drive verify what it assembled: on a multi-chunk
+// resumable upload the client sends a checksum with the final request and the
+// server rejects a mismatch, so a corrupted chunk fails the upload instead of
+// silently becoming the file's new content.
+//
+// Note what is deliberately NOT set: googleapi.ChunkTransferTimeout. It reads
+// like a stall detector but is a hard per-attempt wall-clock deadline that never
+// resets on progress, so any value for it silently caps the slowest link that can
+// ever finish a chunk (16 MiB in 2 minutes is a ~1.1 Mbps floor). A slow upload
+// would then fail permanently rather than merely take a while. A genuinely dead
+// peer is already caught below us: the QUIC transport runs keepalives and its own
+// idle timeout (see internal/transport), and the engine retries the whole
+// operation on top. Only set this if a stalled-forever upload is ever actually
+// observed, and then pick the value from the slowest link worth supporting —
+// remembering it must stay well under uploadChunkRetryDeadline or the retry it
+// is supposed to trigger can never run.
+func mediaOptions() []googleapi.MediaOption {
+	return []googleapi.MediaOption{
+		googleapi.ChunkSize(uploadChunkSize),
+		googleapi.ChunkRetryDeadline(uploadChunkRetryDeadline),
+		googleapi.EnableAutoChecksum(),
+	}
+}
 
 // fileFields is the projection we request for any File we care about. Keeping it
 // in one place ensures Md5Checksum/Version (needed for echo suppression, §4) are
@@ -44,9 +92,26 @@ type Drive struct {
 }
 
 var (
-	_ provider.Store        = (*Drive)(nil)
-	_ provider.ChangeSource = (*Drive)(nil)
+	_ provider.Store         = (*Drive)(nil)
+	_ provider.ChangeSource  = (*Drive)(nil)
+	_ provider.RangeGetter   = (*Drive)(nil)
+	_ provider.ContentHasher = (*Drive)(nil)
 )
+
+// provider.RangePutter is deliberately NOT implemented, and the absence is the
+// design, not an omission to fill in later.
+//
+// Drive has no partial-content write. files.update replaces an object's content
+// wholesale; its resumable upload protocol chunks the transfer but every chunk
+// still belongs to one complete new body, with no way to say "keep bytes 0..N and
+// replace only these". So editing one byte of a large file costs a full re-upload
+// on this provider no matter how precisely the engine knows what changed.
+//
+// What M6 does buy a Drive user is the other two gates in Engine.pushContent: the
+// unchanged-content hash check below skips the upload entirely when the bytes did
+// not really change, and mediaOptions makes the unavoidable large upload chunked
+// and retryable. The RangePutter path stays exercised by providers that can
+// patch — see the range-write tests in internal/syncengine.
 
 // Open authenticates and returns a Drive provider. credentialsPath is a desktop
 // OAuth client secret; tokenPath caches the user token across runs. rootID is the
@@ -80,7 +145,7 @@ func (d *Drive) Put(ctx context.Context, p string, r io.Reader) (provider.Remote
 	defer d.mu.Unlock()
 
 	if id, ok := d.idByPath[p]; ok {
-		updated, err := d.svc.Files.Update(id, &drive.File{}).Media(r).Fields(fileFields).Context(ctx).Do()
+		updated, err := d.svc.Files.Update(id, &drive.File{}).Media(r, mediaOptions()...).Fields(fileFields).Context(ctx).Do()
 		if err != nil {
 			return provider.RemoteFile{}, classify(err)
 		}
@@ -94,7 +159,7 @@ func (d *Drive) Put(ctx context.Context, p string, r io.Reader) (provider.Remote
 	if parentID != "" {
 		f.Parents = []string{parentID}
 	}
-	created, err := d.svc.Files.Create(f).Media(r).Fields(fileFields).Context(ctx).Do()
+	created, err := d.svc.Files.Create(f).Media(r, mediaOptions()...).Fields(fileFields).Context(ctx).Do()
 	if err != nil {
 		return provider.RemoteFile{}, classify(err)
 	}
@@ -177,6 +242,47 @@ func (d *Drive) Get(ctx context.Context, p string) (io.ReadCloser, error) {
 		return nil, err
 	}
 	return resp.Body, nil
+}
+
+// GetRange implements provider.RangeGetter: a ranged download of p. Drive honours
+// a standard HTTP Range header on an alt=media download and answers 206, which
+// googleapi accepts as success. A server that ignores the header answers 200 with
+// the whole object; callers must therefore treat the reader as "at most what was
+// asked for, starting at off" and stop reading at length themselves.
+func (d *Drive) GetRange(ctx context.Context, p string, off, length int64) (io.ReadCloser, error) {
+	d.mu.Lock()
+	id, ok := d.idByPath[p]
+	d.mu.Unlock()
+	if !ok {
+		return nil, fmt.Errorf("get range: unknown path %q", p)
+	}
+	if off < 0 {
+		off = 0
+	}
+	call := d.svc.Files.Get(id).Context(ctx)
+	if length > 0 {
+		call.Header().Set("Range", fmt.Sprintf("bytes=%d-%d", off, off+length-1))
+	} else {
+		call.Header().Set("Range", fmt.Sprintf("bytes=%d-", off))
+	}
+	// No lock held while the caller streams the body.
+	resp, err := call.Download()
+	if err != nil {
+		return nil, classify(err)
+	}
+	return resp.Body, nil
+}
+
+// HashContent implements provider.ContentHasher: Drive's md5Checksum, which is
+// the MD5 of the file's bytes in lowercase hex. It is used only to compare local
+// content against a checksum Drive already reported, never as a security
+// property, so MD5's collision weakness is not in play here.
+func (d *Drive) HashContent(r io.Reader) (string, error) {
+	h := md5.New()
+	if _, err := io.Copy(h, r); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
 func (d *Drive) Stat(ctx context.Context, p string) (provider.RemoteFile, bool, error) {

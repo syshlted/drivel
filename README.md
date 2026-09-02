@@ -20,18 +20,52 @@ identity you control. Licensed under the [GNU AGPLv3](#license).
 
 ## Status
 
-Milestones **M1 (passthrough mount)** and **M2 (transport + Drive push)** are done:
+**v1 is feature-complete** (M1–M4): Drivel mounts, proxies, and syncs
+bidirectionally with Google Drive. On top of it, **M5 (lazy hydration)** has
+landed as an opt-in mode, and **M6 (smarter uploads)** as always-on behaviour.
 
 - `internal/vfs` — go-fuse loopback that proxies to the underlying dir and emits a
   change `Event` per mutation, including `OpWrite` on close (file-handle capture).
+- `internal/mount` — the mount-backend seam and in-place mode (Linux).
 - `internal/transport` — HTTP/3 (QUIC) client with HTTP/2 fallback (unit-tested).
 - `internal/provider` + `internal/provider/gdrive` — the cloud interface and its
   Google Drive implementation (OAuth desktop flow, transport folded under auth).
-- `internal/syncengine` — pushes local changes to the provider (event→API mapping
-  unit-tested); log-only when no credentials are given.
+- `internal/state` — bbolt store for the change-feed cursor and echo records.
+- `internal/hydrate` — M5 lazy hydration: placeholders and hydrate-on-read.
+- `internal/ranges` — the byte-extent bitmap shared by M5's present-ranges and
+  M6's dirty-ranges.
+- `internal/syncengine` — outbound push (per-path debounce, path-hashed worker
+  pool, retry with backoff) and the inbound `changes.list` pull loop (echo
+  suppression, adaptive cadence, conflict copies); log-only without credentials.
 
-Roadmap: M3 `changes.list` pull loop + persistent state store + echo suppression ·
-M4 full bidirectional (debounce, retries, conflict copies, clean shutdown).
+### Lazy hydration (`-lazy`)
+
+    drivel mount -mount ./mnt -data ./data -credentials creds.json -lazy
+
+Remote files appear immediately with their real name, size, and mtime but occupy
+no space; content is fetched the first time something reads (or partially writes)
+the file. A directory listing costs nothing. Opt-in — without `-lazy` the backing
+directory holds full content, exactly as before.
+
+### Smarter uploads (M6)
+
+Always on, no flag. When a large file changes and the provider supports writing
+byte ranges, only the changed extents go out. Otherwise, before re-uploading,
+Drivel checks whether the bytes actually differ from what the remote holds — if
+not, nothing is sent at all, which covers an editor rewriting an identical buffer
+or a rebuild producing the same artifact. Small files skip both checks and upload
+as they always did, since the round-trip to check costs about what the upload
+would.
+
+Google Drive is not such a provider: its API replaces file content wholesale, with
+no way to patch a range, so on Drive a genuine edit to a large file is still a full
+re-upload. What Drivel does there is make that upload survivable — chunked
+resumable sessions with per-chunk timeouts, retries, and a checksum Drive verifies
+before committing. See [DESIGN.md §9](DESIGN.md) for the full reasoning.
+
+Roadmap (v2), in [DESIGN.md §9](DESIGN.md): **M7** path↔ID index persistence ·
+**M8** multi-account and multi-provider mounts · **M9** plugin architecture for
+third-party providers.
 
 ## Build
 

@@ -1,0 +1,159 @@
+# Architecture diagrams
+
+Two views of Drivel: the **runtime components** (what talks to what while a mount
+is live) and the **code structure** (how the packages depend on each other).
+These complement the prose in [DESIGN.md](../DESIGN.md); the section numbers below
+point back to it.
+
+## Component overview (runtime)
+
+How data flows while a mount is running. The FUSE layer is on the hot path;
+everything to the right of the event channel is off it.
+
+```mermaid
+flowchart LR
+    user([User / apps]) -->|syscalls| fuse
+
+    subgraph host["Local machine"]
+        fuse["FUSE mount backend<br/>internal/vfs (go-fuse loopback)"]
+        backing[("Backing directory<br/>source of truth / local cache")]
+        engine["Sync engine — outbound<br/>internal/syncengine.Engine"]
+        downloader["Sync engine — inbound<br/>internal/syncengine.Downloader"]
+        state[("State store<br/>internal/state (bbolt)<br/>cursor + echo records")]
+        hydrate["Hydrator (M5, opt-in)<br/>internal/hydrate<br/>placeholders + fault-in"]
+        transport["Transport<br/>internal/transport<br/>HTTP/3 → HTTP/2"]
+    end
+
+    subgraph cloud["Provider (Google Drive)"]
+        drive["internal/provider/gdrive<br/>Store + ChangeSource"]
+    end
+
+    fuse <-->|"reads / writes<br/>(pass-through)"| backing
+    fuse -->|"fsevent.Event per mutation<br/>(buffered channel)"| engine
+    fuse -.->|"first read of a placeholder"| hydrate
+
+    engine -->|"Put / Mkdir / Move / Remove"| drive
+    engine -->|"record echo"| state
+    engine -.->|"is this a placeholder?<br/>(skip if yes)"| hydrate
+
+    downloader -->|"changes.list cursor poll"| drive
+    downloader -->|"apply remote edits"| backing
+    downloader <-->|"cursor + echo check (§4)"| state
+    downloader -.->|"write placeholder<br/>instead of content"| hydrate
+
+    hydrate -->|"fetch content on demand"| drive
+    hydrate -->|"fill in place · xattr mark"| backing
+
+    drive <-->|QUIC / TCP| transport
+    transport <--> internet(((Google Drive API)))
+
+    classDef store fill:#e8f0fe,stroke:#4285f4;
+    class backing,state store;
+```
+
+Dotted edges are the M5 lazy-hydration path, active only under `-lazy`.
+
+Key points, mapped to DESIGN.md:
+
+- **Reads and lookups never leave the box** — the FUSE backend proxies straight to
+  the backing directory (§2.1–§2.2). Only *mutations* generate an
+  `fsevent.Event`, pushed onto a buffered channel so the FUSE path never blocks
+  on the network.
+- **Outbound** (`Engine`, §5): debounce per path → path-hashed worker pool →
+  provider `Store` calls, with retry/backoff on retryable errors.
+- **Inbound** (`Downloader`, §3): poll the provider's `changes.list` cursor feed,
+  apply changes to the backing directory.
+- **Echo suppression** (§4): both directions consult the `state` store so a change
+  that originated locally isn't re-applied when it echoes back from Drive. This is
+  the load-bearing correctness concern.
+- **Transport** (§2.6) sits *below* OAuth: HTTP/3 preferred, HTTP/2 fallback.
+- **Smarter uploads** (§9, M6 — always on): before a content push the engine skips
+  the upload entirely if the local bytes hash to what was last synced, and sends
+  only the changed extents when the provider can write byte ranges. Drive cannot,
+  so it falls back to a whole-file (but chunked and resumable) upload. Every gate
+  declines toward the slower, always-correct route: an event that cannot name
+  every changed byte reports `nil` extents, meaning "push everything".
+- **Lazy hydration** (§9, M5 — opt-in via `-lazy`): the downloader writes
+  placeholders instead of content, the FUSE layer faults content in on the first
+  read or partial write, and the uploader asks the hydrator before every push so a
+  placeholder's zero bytes never overwrite the real remote file. That last edge is
+  load-bearing, not an optimization.
+
+## Code structure (package dependencies)
+
+Compile-time dependency direction. Arrows point from a package to what it imports.
+The seams (`mount.Backend`, `provider.Store`) are the interfaces that keep the
+core provider- and FUSE-agnostic.
+
+```mermaid
+flowchart TD
+    main["cmd/drivel<br/>flags · wiring · signals"]
+
+    subgraph seams["Seams (interfaces)"]
+        mount["internal/mount<br/>Backend · ResolveBacking"]
+        provider["internal/provider<br/>Store · ChangeSource<br/>RangeGetter · RangePutter"]
+        fsevent["internal/fsevent<br/>Event · Op"]
+    end
+
+    vfs["internal/vfs<br/>go-fuse loopback backend"]
+    syncengine["internal/syncengine<br/>Engine + Downloader"]
+    state["internal/state<br/>bbolt cursor + echo store"]
+    hydrate["internal/hydrate<br/>placeholders · fault-in"]
+    rangespkg["internal/ranges<br/>extent bitmap (present + dirty)"]
+    gdrive["internal/provider/gdrive<br/>Drive impl"]
+    gauth["internal/gauth<br/>OAuth login + token I/O"]
+    transport["internal/transport<br/>HTTP/3 → HTTP/2"]
+
+    main --> mount
+    main --> provider
+    main --> gdrive
+    main --> syncengine
+    main --> state
+    main --> vfs
+    main --> fsevent
+    main --> hydrate
+
+    vfs --> mount
+    vfs --> fsevent
+    vfs --> rangespkg
+
+    syncengine --> provider
+    syncengine --> fsevent
+    syncengine --> state
+    syncengine --> rangespkg
+
+    hydrate --> provider
+    hydrate --> rangespkg
+
+    fsevent --> rangespkg
+    provider --> rangespkg
+
+    gdrive -.implements.-> provider
+    gdrive --> transport
+    gdrive --> gauth
+
+    vfs -.implements.-> mount
+
+    classDef seam fill:#fef7e0,stroke:#f9ab00;
+    class mount,provider,fsevent seam;
+```
+
+What the graph enforces:
+
+- **The sync engine imports only the seams** — `provider`, `fsevent`, `state` —
+  never a concrete Drive type. Swapping providers means writing a new
+  `provider.Store`, not touching `syncengine`.
+- **`gdrive` is the only package that knows about Drive**, and it is the only one
+  that imports `transport` and `gauth`.
+- **`vfs` implements `mount.Backend`** and speaks `fsevent`, but knows nothing
+  about providers or sync — a mutation just becomes an event.
+- **`cmd/drivel` is the composition root**: it is the one place that wires a
+  concrete backend, provider, engine, and state store together.
+- **`hydrate` depends only on `provider`** and `ranges`, and its consumers reach it
+  through small interfaces they declare themselves (`mount.Hydrator`,
+  `syncengine.Placeholders`, `syncengine.Materializer`). So `vfs` still knows
+  nothing about providers, and `syncengine` still knows nothing about xattrs.
+- **`ranges` is a leaf** — pure value types, no I/O, imported by everything that
+  talks about byte extents. It is deliberately not part of `hydrate`: dirty-range
+  tracking (M6) runs in eager mode too, and the default path must not have to
+  import the lazy-hydration package to describe a write.

@@ -9,6 +9,7 @@ import (
 	"syscall"
 
 	"github.com/zishmusic/drivel/internal/fsevent"
+	"github.com/zishmusic/drivel/internal/hydrate"
 	"github.com/zishmusic/drivel/internal/mount"
 	"github.com/zishmusic/drivel/internal/provider"
 	"github.com/zishmusic/drivel/internal/provider/gdrive"
@@ -25,12 +26,18 @@ func runMount(args []string) {
 	token := fset.String("token", "token.json", "path to the cached OAuth token (from 'drivel login')")
 	stateDB := fset.String("state", "drivel-state.db", "path to the sync-state DB (cursor + echo records); kept outside the backing tree")
 	driveRoot := fset.String("drive-root", "root", "Drive folder ID mapped to the mount root")
+	lazy := fset.Bool("lazy", false, "lazy hydration (M5): materialise remote files as placeholders and fetch content on first read (requires -credentials)")
 	debug := fset.Bool("debug", false, "enable FUSE debug logging")
 	_ = fset.Parse(args)
 
 	if *mountpoint == "" {
 		fset.Usage()
 		log.Fatal("-mount is required")
+	}
+	if *lazy && *credentials == "" {
+		// A placeholder is a promise that the bytes can be fetched later; without a
+		// provider there is nothing to redeem it against.
+		log.Fatal("-lazy requires -credentials (there is nothing to hydrate from)")
 	}
 	if err := os.MkdirAll(*mountpoint, 0o755); err != nil {
 		log.Fatalf("creating %s: %v", *mountpoint, err)
@@ -89,10 +96,27 @@ func runMount(args []string) {
 		log.Print("no -credentials: running in log-only mode (no cloud sync)")
 	}
 
+	// Lazy hydration (M5). The hydrator is shared by all three consumers: the mount
+	// backend faults content in on open, the downloader writes placeholders instead
+	// of content, and the uploader consults it to avoid pushing a placeholder's
+	// zeros over the real remote file.
+	var hyd *hydrate.Hydrator
+	if *lazy {
+		hyd = hydrate.New(backing.Path, store, st)
+		if !hyd.XattrsUsable() {
+			// Without xattrs the placeholder marker lives only in the state DB, so
+			// losing that DB makes placeholders look like empty files — which the
+			// uploader would then push over good remote content.
+			log.Printf("WARNING: %s cannot store user xattrs; placeholder marks rely on the state DB alone (%s). Do not delete it while placeholders exist.", backing.Path, *stateDB)
+		}
+		log.Printf("lazy hydration enabled (ranged reads: %t)", hyd.SupportsRanges())
+	}
+
 	engine := syncengine.New(syncengine.Config{
 		Store:   store,
 		DataDir: backing.Path,
 		State:   st,
+		Holes:   holesOf(hyd),
 	})
 	// The engine's lifecycle is bounded by close(events), NOT by ctx: on SIGINT the
 	// mount unmounts first (below), which flushes every pending FUSE event, and only
@@ -108,6 +132,9 @@ func runMount(args []string) {
 	// Inbound pull loop (M3), only if the store offers a change feed.
 	if src, ok := store.(provider.ChangeSource); ok {
 		dl := syncengine.NewDownloader(src, store, backing.Path, st, syncengine.DefaultCadence)
+		if hyd != nil {
+			dl = dl.Lazy(hyd)
+		}
 		log.Print("inbound sync enabled (changes.list pull loop)")
 		go dl.Run(ctx)
 	}
@@ -120,6 +147,7 @@ func runMount(args []string) {
 		Events:     events,
 		FsName:     "drivel",
 		Debug:      *debug,
+		Hydrator:   hydratorOf(hyd),
 	})
 	if err != nil {
 		log.Fatalf("serve: %v", err)
@@ -130,4 +158,23 @@ func runMount(args []string) {
 	close(events)
 	<-engineDone
 	log.Print("sync engine drained; exiting")
+}
+
+// holesOf and hydratorOf convert a possibly-nil *hydrate.Hydrator into the
+// consumer-defined interfaces without handing over a non-nil interface wrapping a
+// nil pointer — the classic Go trap that would make every "is lazy mode on?" check
+// answer yes and every IsPlaceholder call panic.
+
+func holesOf(h *hydrate.Hydrator) syncengine.Placeholders {
+	if h == nil {
+		return nil
+	}
+	return h
+}
+
+func hydratorOf(h *hydrate.Hydrator) mount.Hydrator {
+	if h == nil {
+		return nil
+	}
+	return h
 }

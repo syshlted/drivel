@@ -9,6 +9,7 @@ import (
 
 	"github.com/zishmusic/drivel/internal/fsevent"
 	"github.com/zishmusic/drivel/internal/provider"
+	"github.com/zishmusic/drivel/internal/ranges"
 )
 
 // --- coalescer (pure debounce logic, no timers) -----------------------------
@@ -25,10 +26,10 @@ func opPaths(evs []fsevent.Event) []string {
 }
 
 func TestCoalescerCoalescesContentWrites(t *testing.T) {
-	c := coalescer{pending: map[string]struct{}{}}
-	c.markContent("a.txt")
-	c.markContent("a.txt")
-	c.markContent("a.txt")
+	c := coalescer{pending: map[string]*ranges.Set{}}
+	c.markContent("a.txt", nil)
+	c.markContent("a.txt", nil)
+	c.markContent("a.txt", nil)
 
 	// A burst collapses to a single OpWrite task on flush.
 	got := opPaths(c.flush("a.txt"))
@@ -42,11 +43,11 @@ func TestCoalescerCoalescesContentWrites(t *testing.T) {
 }
 
 func TestCoalescerStructuralFlushesPendingFirst(t *testing.T) {
-	c := coalescer{pending: map[string]struct{}{}}
+	c := coalescer{pending: map[string]*ranges.Set{}}
 
 	// write then rename on the same path: the pending write must be dispatched
 	// before the rename so per-path order is preserved.
-	c.markContent("a.txt")
+	c.markContent("a.txt", nil)
 	got := opPaths(c.structural(fsevent.Event{Op: fsevent.OpRename, Path: "a.txt", NewPath: "b.txt"}))
 	want := []string{"write:a.txt", "rename:a.txt->b.txt"}
 	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
@@ -61,9 +62,9 @@ func TestCoalescerStructuralFlushesPendingFirst(t *testing.T) {
 }
 
 func TestCoalescerFlushAll(t *testing.T) {
-	c := coalescer{pending: map[string]struct{}{}}
-	c.markContent("a.txt")
-	c.markContent("b.txt")
+	c := coalescer{pending: map[string]*ranges.Set{}}
+	c.markContent("a.txt", nil)
+	c.markContent("b.txt", nil)
 	if got := c.flushAll(); len(got) != 2 {
 		t.Fatalf("flushAll returned %d tasks; want 2", len(got))
 	}

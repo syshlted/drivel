@@ -42,6 +42,26 @@ type Downloader struct {
 	dataDir string
 	state   *state.Store
 	cad     Cadence
+	mat     Materializer // nil => eager mode: apply content immediately
+}
+
+// Materializer is the OPTIONAL lazy-hydration hook (M5), satisfied by
+// *hydrate.Hydrator. With one installed the pull loop writes placeholders — right
+// name, size and mtime, no bytes — instead of downloading content the user has not
+// asked for. Nil restores the eager M3/M4 behaviour.
+type Materializer interface {
+	// CreatePlaceholder materialises rel with f's metadata and no content.
+	CreatePlaceholder(rel string, f provider.RemoteFile) error
+	// IsPlaceholder reports whether rel currently lacks its content.
+	IsPlaceholder(rel string) bool
+}
+
+// Lazy enables M5 lazy hydration on the pull loop and returns d for chaining:
+//
+//	NewDownloader(src, store, dir, st, cad).Lazy(hydrator)
+func (d *Downloader) Lazy(m Materializer) *Downloader {
+	d.mat = m
+	return d
 }
 
 // NewDownloader constructs the pull loop. cad zero-values fall back to
@@ -141,6 +161,7 @@ func (d *Downloader) apply(ctx context.Context, ch provider.RemoteChange) error 
 			return err
 		}
 		log.Printf("[pull] delete  %s", ch.Path)
+		_ = d.state.DeleteHydration(ch.Path)
 		return d.state.DeleteEcho(ch.Path)
 	}
 
@@ -162,6 +183,19 @@ func (d *Downloader) apply(ctx context.Context, ch provider.RemoteChange) error 
 			return err
 		}
 		log.Printf("[pull] mkdir   %s", ch.Path)
+		return d.rememberApplied(ch.Path, f)
+	}
+
+	// Lazy mode (M5): a local placeholder has no resident content, so it cannot
+	// have diverged — there is nothing for the user to have edited. Hashing it would
+	// compute the digest of a hole and read as a local edit, manufacturing a bogus
+	// conflict copy on every remote change. Re-stamp it with the new metadata and
+	// let the next read fetch the fresh bytes.
+	if d.mat != nil && d.mat.IsPlaceholder(ch.Path) {
+		if err := d.mat.CreatePlaceholder(ch.Path, *f); err != nil {
+			return err
+		}
+		log.Printf("[pull] restamp %s (placeholder, %d bytes pending)", ch.Path, f.Size)
 		return d.rememberApplied(ch.Path, f)
 	}
 
@@ -193,11 +227,32 @@ func (d *Downloader) apply(ctx context.Context, ch provider.RemoteChange) error 
 		}
 	}
 
-	if err := d.download(ctx, ch.Path, dst, f.Modified); err != nil {
+	if err := d.materialize(ctx, ch.Path, dst, f); err != nil {
 		return err
 	}
-	log.Printf("[pull] download %s", ch.Path)
 	return d.rememberApplied(ch.Path, f)
+}
+
+// materialize brings rel's remote content into the backing store: a real download
+// in eager mode, a zero-byte placeholder in lazy mode.
+//
+// Only paths that exist remotely may become placeholders — a placeholder is a
+// promise that the content can be fetched from rel later. Conflict copies are
+// therefore always downloaded in full (see resolveConflict): their paths are
+// local-only inventions, so a placeholder there could never be hydrated.
+func (d *Downloader) materialize(ctx context.Context, rel, dst string, f *provider.RemoteFile) error {
+	if d.mat == nil {
+		if err := d.download(ctx, rel, dst, f.Modified); err != nil {
+			return err
+		}
+		log.Printf("[pull] download %s", rel)
+		return nil
+	}
+	if err := d.mat.CreatePlaceholder(rel, *f); err != nil {
+		return err
+	}
+	log.Printf("[pull] placeholder %s (%d bytes, hydrates on read)", rel, f.Size)
+	return nil
 }
 
 // resolveConflict applies the §6 policy when a remote edit collides with a
@@ -218,7 +273,9 @@ func (d *Downloader) resolveConflict(ctx context.Context, rel, dst string, f *pr
 		if err := os.Rename(dst, copyDst); err != nil {
 			return err
 		}
-		if err := d.download(ctx, rel, dst, f.Modified); err != nil {
+		// rel still exists remotely, so the winner may be a placeholder; the copy
+		// keeps the real local bytes it was renamed from.
+		if err := d.materialize(ctx, rel, dst, f); err != nil {
 			return err
 		}
 		log.Printf("[pull] conflict %s: remote newer, local kept as %s", rel, copyRel)
@@ -227,7 +284,8 @@ func (d *Downloader) resolveConflict(ctx context.Context, rel, dst string, f *pr
 
 	// Local is newer (or same mtime): it keeps the real path; the remote version is
 	// saved alongside as the copy. Leave dst and its echo untouched — the uploader
-	// still holds the local edit to push.
+	// still holds the local edit to push. The copy is downloaded in full even in
+	// lazy mode: copyRel exists only locally, so it could never be hydrated later.
 	copyRel := conflictName(rel, f.Modified)
 	copyDst := filepath.Join(d.dataDir, filepath.FromSlash(copyRel))
 	if err := d.download(ctx, rel, copyDst, f.Modified); err != nil {
