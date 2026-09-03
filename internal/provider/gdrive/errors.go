@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net"
 	"net/http"
+	"strings"
 	"syscall"
 
 	"google.golang.org/api/googleapi"
@@ -62,4 +63,32 @@ func isTransient(err error) bool {
 		return true
 	}
 	return errors.Is(err, syscall.ECONNRESET) || errors.Is(err, syscall.ECONNREFUSED)
+}
+
+// isPageTokenExpired reports whether err says a change-feed cursor is no longer
+// usable. Drive answers a stale changes.list token with 410 Gone; a token that is
+// malformed (a corrupted state DB, a token from another account) comes back as
+// 400 with a pageToken reason. Both need the same recovery — a fresh start token
+// and a reconcile — and neither is helped by a retry, so they classify together.
+//
+// Before M7b there was no case for either: the pull loop logged the error, backed
+// off to the slow cadence, and retried the dead token forever. Inbound sync was
+// then permanently stopped with nothing in the log to say so.
+func isPageTokenExpired(err error) bool {
+	var ae *googleapi.Error
+	if !errors.As(err, &ae) {
+		return false
+	}
+	if ae.Code == http.StatusGone { // 410
+		return true
+	}
+	if ae.Code != http.StatusBadRequest {
+		return false
+	}
+	for _, e := range ae.Errors {
+		if strings.Contains(strings.ToLower(e.Reason), "pagetoken") {
+			return true
+		}
+	}
+	return strings.Contains(strings.ToLower(ae.Message), "page token")
 }

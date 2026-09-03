@@ -342,6 +342,16 @@ func (e *Engine) handle(ctx context.Context, ev fsevent.Event) {
 	e.executeWithRetry(ctx, ev)
 }
 
+// Push applies one event immediately, with the same retry policy Run uses. It is
+// the seam the M7b reconciler pushes through (syncengine.Pusher) so that a file
+// discovered by a sweep takes exactly the path a file written through the mount
+// takes — placeholder guard, M6 gates, echo recording, backoff — instead of a
+// second, subtly different implementation of "upload this".
+//
+// It bypasses only the debounce window, which exists to coalesce bursts; a
+// reconcile produces one event per path by construction.
+func (e *Engine) Push(ctx context.Context, ev fsevent.Event) { e.handle(ctx, ev) }
+
 // push maps one event to store calls. The store creates ancestor directories and
 // resolves paths to its native addressing itself, so this stays path-only.
 func (e *Engine) push(ctx context.Context, ev fsevent.Event) error {

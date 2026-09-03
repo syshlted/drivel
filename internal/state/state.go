@@ -24,7 +24,10 @@ var (
 	bucketCursor    = []byte("cursor")
 	bucketEcho      = []byte("echo")
 	bucketHydration = []byte("hydration")
+	bucketSweep     = []byte("sweep")
+	bucketSeen      = []byte("seen")
 	keyCursor       = []byte("changefeed")
+	keySweep        = []byte("current")
 )
 
 // Echo is what we last synced for a path, from either direction. A remote change
@@ -61,7 +64,7 @@ func Open(path string) (*Store, error) {
 		return nil, fmt.Errorf("open state db %s: %w", path, err)
 	}
 	err = db.Update(func(tx *bolt.Tx) error {
-		for _, b := range [][]byte{bucketCursor, bucketEcho, bucketHydration} {
+		for _, b := range [][]byte{bucketCursor, bucketEcho, bucketHydration, bucketSweep, bucketSeen} {
 			if _, err := tx.CreateBucketIfNotExists(b); err != nil {
 				return err
 			}
@@ -169,4 +172,157 @@ func (s *Store) DeleteHydration(path string) error {
 	return s.db.Update(func(tx *bolt.Tx) error {
 		return tx.Bucket(bucketHydration).Delete([]byte(path))
 	})
+}
+
+// --- enumeration sweep (M7b) ------------------------------------------------
+//
+// A sweep is one pass of provider.Enumerator over the whole remote tree, plus the
+// reconcile it feeds. Three facts have to survive a restart for that to be safe:
+//
+//   - Token: the change-feed start token taken BEFORE the sweep began. It is
+//     handed to the pull loop only once the sweep completes. The other order
+//     loses every change made while the sweep was running.
+//   - Cursor: how far the sweep itself got, so an interrupted sweep of a large
+//     Drive resumes instead of starting over.
+//   - Gen: which sweep the seen-set below belongs to, so a restarted sweep cannot
+//     read a previous one's marks as its own.
+
+// Sweep is the persisted progress of an enumeration sweep.
+type Sweep struct {
+	Gen     string    `json:"gen"`
+	Token   string    `json:"token"`
+	Cursor  string    `json:"cursor"`
+	Started time.Time `json:"started"`
+}
+
+// Sweep returns the in-progress sweep record, if one is stored. ok is false when
+// no sweep is running — the steady state, since a completed sweep clears it.
+func (s *Store) Sweep() (sw Sweep, ok bool, err error) {
+	err = s.db.View(func(tx *bolt.Tx) error {
+		v := tx.Bucket(bucketSweep).Get(keySweep)
+		if v == nil {
+			return nil
+		}
+		if uErr := json.Unmarshal(v, &sw); uErr != nil {
+			return uErr
+		}
+		ok = true
+		return nil
+	})
+	return sw, ok, err
+}
+
+// SetSweep persists sweep progress. Callers write it after every page, so the
+// cost of an interruption is one page rather than the whole sweep.
+func (s *Store) SetSweep(sw Sweep) error {
+	v, err := json.Marshal(sw)
+	if err != nil {
+		return err
+	}
+	return s.db.Update(func(tx *bolt.Tx) error {
+		return tx.Bucket(bucketSweep).Put(keySweep, v)
+	})
+}
+
+// ClearSweep drops the sweep record and its seen-set, ending the sweep. It is
+// called only after the reconcile has finished with both.
+func (s *Store) ClearSweep() error {
+	return s.db.Update(func(tx *bolt.Tx) error {
+		if err := tx.Bucket(bucketSweep).Delete(keySweep); err != nil {
+			return err
+		}
+		if err := tx.DeleteBucket(bucketSeen); err != nil && err != bolt.ErrBucketNotFound {
+			return err
+		}
+		_, err := tx.CreateBucket(bucketSeen)
+		return err
+	})
+}
+
+// MarkSeen records that this generation's sweep observed these paths remotely.
+//
+// It is what lets a delete be inferred from a *baseline* rather than from absence
+// alone: at the end of a complete sweep, a path with an echo record but no mark
+// is one the remote no longer has. The marks are persistent, not in-memory,
+// precisely so a sweep that resumed after a restart still knows about the pages
+// its predecessor consumed — an in-memory set would report every one of them as
+// remotely deleted.
+//
+// One transaction per call, so a page of a thousand objects costs one fsync.
+func (s *Store) MarkSeen(gen string, paths []string) error {
+	if gen == "" || len(paths) == 0 {
+		return nil
+	}
+	return s.db.Update(func(tx *bolt.Tx) error {
+		b := tx.Bucket(bucketSeen)
+		for _, p := range paths {
+			if err := b.Put(seenKey(gen, p), []byte{1}); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
+// SeenPath reports whether this generation's sweep observed path remotely.
+func (s *Store) SeenPath(gen, path string) (ok bool, err error) {
+	if gen == "" {
+		return false, nil
+	}
+	err = s.db.View(func(tx *bolt.Tx) error {
+		ok = tx.Bucket(bucketSeen).Get(seenKey(gen, path)) != nil
+		return nil
+	})
+	return ok, err
+}
+
+// UnseenEchoes returns every baseline (echo) record whose path this generation's
+// sweep did NOT observe remotely — the candidates for "deleted remotely while we
+// were not running".
+//
+// They are candidates, not decisions: the caller still has to look at the local
+// side, and deletion is the irreversible direction, so anything ambiguous keeps
+// the file. Restricting the answer to paths that have a baseline at all is the
+// M7b rule in one line — absence alone never implies a delete.
+func (s *Store) UnseenEchoes(gen string) (map[string]Echo, error) {
+	out := map[string]Echo{}
+	if gen == "" {
+		return out, nil
+	}
+	err := s.db.View(func(tx *bolt.Tx) error {
+		seen := tx.Bucket(bucketSeen)
+		return tx.Bucket(bucketEcho).ForEach(func(k, v []byte) error {
+			if seen.Get(seenKey(gen, string(k))) != nil {
+				return nil
+			}
+			var e Echo
+			if err := json.Unmarshal(v, &e); err != nil {
+				return err
+			}
+			out[string(k)] = e
+			return nil
+		})
+	})
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// HasEchoes reports whether any baseline record exists at all. A store with none
+// has never synced anything, which is what "first-ever run" means — and the first
+// run deletes nothing on either side.
+func (s *Store) HasEchoes() (has bool, err error) {
+	err = s.db.View(func(tx *bolt.Tx) error {
+		k, _ := tx.Bucket(bucketEcho).Cursor().First()
+		has = k != nil
+		return nil
+	})
+	return has, err
+}
+
+// seenKey namespaces a mark by generation, so the marks of an abandoned sweep are
+// invisible to the next one even before ClearSweep empties the bucket.
+func seenKey(gen, path string) []byte {
+	return []byte(gen + "\x00" + path)
 }

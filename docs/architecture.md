@@ -19,14 +19,17 @@ flowchart LR
         backing[("Backing directory<br/>source of truth / local cache")]
         engine["Sync engine — outbound<br/>internal/syncengine.Engine"]
         downloader["Sync engine — inbound<br/>internal/syncengine.Downloader"]
-        state[("State store<br/>internal/state (bbolt)<br/>cursor + echo records")]
+        state[("State store<br/>internal/state (bbolt)<br/>cursor + echo records<br/>+ sweep state (M7b)")]
         hydrate["Hydrator (M5, opt-in)<br/>internal/hydrate<br/>placeholders + fault-in"]
         transport["Transport<br/>internal/transport<br/>HTTP/3 → HTTP/2"]
+        index[("Path index (M7)<br/>internal/pathindex (bbolt)<br/>path ↔ fileID — a cache")]
     end
 
     subgraph cloud["Provider (Google Drive)"]
         drive["internal/provider/gdrive<br/>Store + ChangeSource"]
     end
+
+    drive -.->|"resolve path → ID<br/>(verified before it is trusted)"| index
 
     fuse <-->|"reads / writes<br/>(pass-through)"| backing
     fuse -->|"fsevent.Event per mutation<br/>(buffered channel)"| engine
@@ -36,7 +39,7 @@ flowchart LR
     engine -->|"record echo"| state
     engine -.->|"is this a placeholder?<br/>(skip if yes)"| hydrate
 
-    downloader -->|"changes.list cursor poll"| drive
+    downloader -->|"changes.list cursor poll<br/>+ files.list sweep (M7b)"| drive
     downloader -->|"apply remote edits"| backing
     downloader <-->|"cursor + echo check (§4)"| state
     downloader -.->|"write placeholder<br/>instead of content"| hydrate
@@ -78,6 +81,14 @@ Key points, mapped to DESIGN.md:
   read or partial write, and the uploader asks the hydrator before every push so a
   placeholder's zero bytes never overwrite the real remote file. That last edge is
   load-bearing, not an optimization.
+- **Enumeration & reconcile** (§9, M7b — always on): the change feed only reports
+  what changes after a cursor is taken, so the downloader sweeps the whole remote
+  tree once (`provider.Enumerator`) before it starts tailing — on a first run, a
+  resumed sweep, an expired cursor, or `-resync`. Two rules carry it: the start
+  token is taken *before* the sweep and adopted *after* it, and a deletion is
+  inferred only from a baseline (the §4 echo records plus the sweep's own
+  per-generation seen marks), never from a file being absent on one side. So the
+  first-ever run deletes nothing.
 
 ## Code structure (package dependencies)
 
@@ -101,6 +112,7 @@ flowchart TD
     hydrate["internal/hydrate<br/>placeholders · fault-in"]
     rangespkg["internal/ranges<br/>extent bitmap (present + dirty)"]
     gdrive["internal/provider/gdrive<br/>Drive impl"]
+    pathindex["internal/pathindex<br/>bbolt path↔ID cache"]
     gauth["internal/gauth<br/>OAuth login + token I/O"]
     transport["internal/transport<br/>HTTP/3 → HTTP/2"]
 
@@ -124,6 +136,8 @@ flowchart TD
 
     hydrate --> provider
     hydrate --> rangespkg
+
+    gdrive --> pathindex
 
     fsevent --> rangespkg
     provider --> rangespkg

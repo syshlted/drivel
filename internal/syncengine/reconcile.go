@@ -1,0 +1,544 @@
+package syncengine
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"io/fs"
+	"log"
+	"os"
+	"path/filepath"
+	"regexp"
+	"sort"
+	"strings"
+	"time"
+
+	"github.com/zishmusic/drivel/internal/fsevent"
+	"github.com/zishmusic/drivel/internal/provider"
+	"github.com/zishmusic/drivel/internal/state"
+)
+
+// Initial enumeration & reconcile (DESIGN.md §9, M7b).
+//
+// The pull loop starts from a "now" cursor, so everything that existed on the
+// remote before the first mount is invisible to it: nothing enumerates the tree,
+// and the backing dir only ever learns about objects that change while we are
+// running. A sweep (provider.Enumerator) is what makes that tree present.
+//
+// Two rules carry the whole thing, and both are about ordering or evidence:
+//
+//   - **Snapshot, then tail.** The change-feed start token is taken BEFORE the
+//     sweep and handed to the pull loop only after it completes. The overlap
+//     replays some changes, which is harmless — they are idempotent and §4 echo
+//     suppression drops them. The other order loses every change made while the
+//     sweep was running, permanently and silently.
+//   - **A delete is inferred only from a baseline, never from absence alone.**
+//     Without a last-known record, "created remotely" and "deleted locally" are
+//     the same observation. The baseline is the §4 echo store: a path with an echo
+//     is one we have synced, so its disappearance means something. A path without
+//     one is simply new, whichever side it is on — which is why the first-ever run
+//     performs no deletions at all.
+//
+// Everything ambiguous keeps data: unsure means materialise, not delete.
+
+// Pusher applies one local-origin event through the outbound path. It is
+// satisfied by *Engine, and the reconciler goes through it rather than calling
+// the store directly so that a push it triggers gets exactly what a push from the
+// mount gets — the M5 placeholder guard, the M6 gates, echo recording, and the
+// retry policy.
+type Pusher interface {
+	Push(ctx context.Context, ev fsevent.Event)
+}
+
+// ReconcileOptions configures the sweep. The zero value is inert: without an
+// Enumerator behind the store, and without state, nothing here runs and the
+// downloader behaves exactly as it did in M3–M7.
+type ReconcileOptions struct {
+	// Push applies the local-origin half of the reconcile (uploading a file that
+	// only exists locally, removing a remote object whose local copy is gone).
+	// Nil disables both, leaving the sweep read-only from the remote's point of view.
+	Push Pusher
+
+	// Fetch downloads remote objects that have no local counterpart in EAGER mode.
+	// It is off by default because there it means pulling down the entire remote
+	// tree, which must be an explicit request rather than a side effect of
+	// mounting. In lazy mode it is irrelevant: materialising is a placeholder,
+	// costs nothing, and always happens.
+	Fetch bool
+
+	// Force runs a sweep even when a baseline already exists (drivel mount -resync).
+	// Without it a sweep runs on the first run, when resuming an interrupted one,
+	// and when the change cursor has expired.
+	Force bool
+
+	// MaxDeletes caps how many deletions ONE sweep may infer, across both
+	// directions; 0 means unlimited. Exceeding it abandons the delete pass
+	// entirely rather than trimming it, because the shapes that produce a huge
+	// count are the accidents — a state DB reused against a different -drive-root,
+	// a fresh empty -data dir, a mount that came up pointing somewhere else — and
+	// in those the whole inference is wrong, not just its tail.
+	MaxDeletes int
+}
+
+// DefaultMaxDeletes is the out-of-the-box cap on reconcile-inferred deletions.
+// Routine offline activity produces a handful; hundreds means the premise is
+// broken. Deletions applied to the remote go through provider.Store.Remove, which
+// on Drive is permanent rather than a move to the trash — which is exactly why
+// there is a cap at all.
+const DefaultMaxDeletes = 100
+
+// Reconcile enables the M7b sweep on this downloader and returns it for chaining.
+// It is a no-op unless the store also implements provider.Enumerator.
+func (d *Downloader) Reconcile(opts ReconcileOptions) *Downloader {
+	if e, ok := d.store.(provider.Enumerator); ok {
+		d.enum = e
+	}
+	d.rec = opts
+	return d
+}
+
+// canSweep reports whether a sweep is possible at all: something to enumerate,
+// and somewhere to keep the token, the sweep cursor and the seen-set.
+func (d *Downloader) canSweep() bool { return d.enum != nil && d.state != nil }
+
+// startFeed returns the cursor the pull loop should poll from, running the
+// initial sweep first when one is due.
+//
+// The three ways a sweep becomes due are all "we cannot trust the feed alone":
+// an interrupted sweep to finish, a first run with no cursor at all (the remote
+// tree has never been looked at), or an explicit -resync. Cursor expiry is the
+// fourth and arrives later, through recoverCursor.
+func (d *Downloader) startFeed(ctx context.Context) (string, error) {
+	if !d.canSweep() {
+		return d.resumeCursor(ctx)
+	}
+
+	if sw, ok, err := d.state.Sweep(); err != nil {
+		log.Printf("[sweep] reading sweep state: %v", err)
+	} else if ok {
+		log.Printf("[sweep] resuming the enumeration interrupted at %s", sw.Started.Format(time.RFC3339))
+		return d.runSweep(ctx, sw)
+	}
+
+	cursor, ok, err := d.state.Cursor()
+	if err != nil {
+		return "", err
+	}
+	switch {
+	case !ok:
+		log.Print("[sweep] no change cursor yet: enumerating the remote tree before tailing it")
+	case d.rec.Force:
+		log.Print("[sweep] -resync: re-enumerating the remote tree")
+	default:
+		return cursor, nil
+	}
+	return d.beginSweep(ctx)
+}
+
+// beginSweep takes the start token FIRST, records it with the sweep, and only
+// then starts listing. The token is what the pull loop resumes from once the
+// sweep finishes, so it has to predate everything the sweep observes.
+func (d *Downloader) beginSweep(ctx context.Context) (string, error) {
+	token, err := d.src.StartCursor(ctx)
+	if err != nil {
+		return "", err
+	}
+	sw := state.Sweep{
+		Gen:     fmt.Sprintf("%d", time.Now().UnixNano()),
+		Token:   token,
+		Started: time.Now(),
+	}
+	if err := d.state.SetSweep(sw); err != nil {
+		return "", err
+	}
+	return d.runSweep(ctx, sw)
+}
+
+// recoverCursor handles an expired change cursor: the feed can no longer tell us
+// what we missed, so the only honest recovery is to look at the whole tree again.
+// A fresh token is taken before that sweep, exactly as on a first run.
+func (d *Downloader) recoverCursor(ctx context.Context) (string, error) {
+	if !d.canSweep() {
+		// Nothing to enumerate with. Restarting from "now" at least gets inbound
+		// sync moving again; what happened during the gap is lost either way, and a
+		// dead cursor retried forever is strictly worse.
+		log.Print("[pull] cursor expired and this provider cannot enumerate; restarting the feed from now (changes during the gap are lost)")
+		token, err := d.src.StartCursor(ctx)
+		if err != nil {
+			return "", err
+		}
+		return token, d.state.SetCursor(token)
+	}
+	log.Print("[pull] cursor expired: re-enumerating the remote tree to resync")
+	return d.beginSweep(ctx)
+}
+
+// runSweep drives one sweep to completion: pages in, reconcile per page, then the
+// passes that need the whole picture. It returns the cursor the pull loop should
+// use.
+//
+// Pages are applied as they arrive rather than accumulated into one transaction,
+// so an interruption leaves a partially populated but consistent tree — and the
+// sweep cursor is persisted after each one, so resuming costs at most a page.
+func (d *Downloader) runSweep(ctx context.Context, sw state.Sweep) (string, error) {
+	started := time.Now()
+	var st sweepStats
+	for {
+		files, next, err := d.enum.Enumerate(ctx, sw.Cursor)
+		if err != nil {
+			return "", fmt.Errorf("enumerate: %w", err)
+		}
+		if err := d.applyPage(ctx, sw, files, &st); err != nil {
+			return "", err
+		}
+		if next != "" && next == sw.Cursor {
+			// A provider that hands back the cursor it was given would loop us over
+			// one page forever. Treat it as the end of the sweep: the pages already
+			// applied stand, and the delete passes below are the only thing that
+			// needs completeness — so say so rather than pretending it completed.
+			log.Printf("[sweep] enumeration stalled on cursor %q; ending the sweep here", next)
+			next = ""
+		}
+		sw.Cursor = next
+		if err := d.state.SetSweep(sw); err != nil {
+			return "", err
+		}
+		if next == "" {
+			break
+		}
+		if ctx.Err() != nil {
+			return "", ctx.Err()
+		}
+	}
+
+	// Both passes below need the complete picture, so neither can run per page:
+	// "not seen anywhere in the sweep" is only knowable once the sweep has ended.
+	// They also run to completion before the pull loop starts polling, which on a
+	// large local-only tree can mean a slow first run. That is latency, not loss:
+	// the token was taken before the sweep, so the changes are still waiting when
+	// polling begins. Serial and deterministic is worth more here than concurrent
+	// and racing the very paths it is reconciling.
+	d.pushLocalOnly(ctx, sw, &st)
+	if err := d.applyDeletes(ctx, sw, &st); err != nil {
+		log.Printf("[sweep] delete pass: %v", err)
+	}
+
+	if err := d.state.SetCursor(sw.Token); err != nil {
+		return "", err
+	}
+	if err := d.state.ClearSweep(); err != nil {
+		log.Printf("[sweep] clearing sweep state: %v", err)
+	}
+	log.Printf("[sweep] reconcile complete in %s: %s", time.Since(started).Round(time.Millisecond), st)
+	return sw.Token, nil
+}
+
+// sweepStats is the running tally, logged at the end. A cost the user cannot see
+// is a cost they will assume is a hang.
+type sweepStats struct {
+	objects     int
+	materialize int
+	deferred    int // remote-only, eager mode, no -materialize
+	exportOnly  int
+	pushed      int
+	localDel    int
+	remoteDel   int
+	kept        int // would have been deleted locally, but the local copy diverged
+}
+
+func (s sweepStats) String() string {
+	out := fmt.Sprintf("%d remote object(s) listed, %d reconciled locally, %d pushed", s.objects, s.materialize, s.pushed)
+	if s.deferred > 0 {
+		out += fmt.Sprintf(", %d not fetched (add -materialize to download them)", s.deferred)
+	}
+	if s.exportOnly > 0 {
+		out += fmt.Sprintf(", %d Google-native doc(s) skipped", s.exportOnly)
+	}
+	if s.localDel > 0 || s.remoteDel > 0 {
+		out += fmt.Sprintf(", %d deleted locally, %d deleted remotely", s.localDel, s.remoteDel)
+	}
+	if s.kept > 0 {
+		out += fmt.Sprintf(", %d kept (locally modified after a remote delete)", s.kept)
+	}
+	return out
+}
+
+// applyPage reconciles one page of remote objects.
+func (d *Downloader) applyPage(ctx context.Context, sw state.Sweep, files []provider.RemoteFile, st *sweepStats) error {
+	if len(files) == 0 {
+		return nil
+	}
+	paths := make([]string, len(files))
+	for i := range files {
+		paths[i] = files[i].Path
+	}
+	// Mark before acting, and mark everything — including objects we then decline
+	// to materialise. The marks answer "does the remote still have this?", which is
+	// a different question from "did we copy it", and conflating them would let the
+	// delete pass remove a local file whose remote counterpart we merely skipped.
+	if err := d.state.MarkSeen(sw.Gen, paths); err != nil {
+		return err
+	}
+	st.objects += len(files)
+
+	for i := range files {
+		f := files[i]
+		if err := d.reconcileRemote(ctx, f, st); err != nil {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			log.Printf("[sweep] %s: %v", f.Path, err)
+		}
+	}
+	return nil
+}
+
+// reconcileRemote applies one remote object to the local tree.
+//
+// The remote-present rows of the three-way table are exactly what the pull loop's
+// apply already does — echo match ⇒ nothing, identical local bytes ⇒ nothing,
+// divergent local ⇒ §6 conflict copy, absent local ⇒ materialise — with the echo
+// record serving as the baseline in both. So this adds only what a sweep needs on
+// top: the two kinds of object it must NOT materialise.
+func (d *Downloader) reconcileRemote(ctx context.Context, f provider.RemoteFile, st *sweepStats) error {
+	if f.ExportOnly {
+		// A Google-native doc has no byte stream, no size and no checksum: nothing
+		// to place a placeholder against and nothing to download. It is still marked
+		// seen, so it is not mistaken for remotely deleted; it simply has no local
+		// representation. Deliberately no echo record either — recording one would
+		// claim we hold content we do not.
+		st.exportOnly++
+		return nil
+	}
+	if !d.wouldMaterialize(f) {
+		st.deferred++
+		return nil
+	}
+	if err := d.apply(ctx, provider.RemoteChange{Path: f.Path, File: &f}); err != nil {
+		return err
+	}
+	st.materialize++
+	return nil
+}
+
+// wouldMaterialize reports whether a remote object with no local counterpart
+// should be created locally now.
+//
+// In lazy mode it always should: a placeholder is metadata, so the whole remote
+// tree becomes visible for the price of the sweep. In eager mode the same
+// operation is a full download of everything, which is a decision the user makes
+// (-materialize), not a side effect of mounting. Objects that already exist
+// locally are unaffected either way — those are conflicts or no-ops, not
+// materialisation, and always get handled.
+func (d *Downloader) wouldMaterialize(f provider.RemoteFile) bool {
+	if d.mat != nil || d.rec.Fetch {
+		return true
+	}
+	_, err := os.Lstat(filepath.Join(d.dataDir, filepath.FromSlash(f.Path)))
+	return err == nil
+}
+
+// pushLocalOnly walks the backing tree and pushes files that exist only there.
+//
+// This is the "new locally" row, and it needs a local walk because nothing else
+// knows about a file the mount never saw created — an edit made while drivel was
+// down, or in in-place mode, a file dropped into the directory between runs. The
+// walk is local I/O and its only action is a push, so unlike the delete passes it
+// needs no cap and no flag: the worst case is uploading a file that belongs in a
+// directory the user is syncing anyway.
+func (d *Downloader) pushLocalOnly(ctx context.Context, sw state.Sweep, st *sweepStats) {
+	if d.rec.Push == nil {
+		return
+	}
+	err := filepath.WalkDir(d.dataDir, func(p string, e fs.DirEntry, err error) error {
+		if err != nil {
+			return nil // unreadable entry: skip it, never abandon the walk
+		}
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		rel, relErr := filepath.Rel(d.dataDir, p)
+		if relErr != nil || rel == "." {
+			return nil
+		}
+		rel = filepath.ToSlash(rel)
+		if skipLocal(filepath.Base(p)) {
+			if e.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if e.IsDir() {
+			return nil // Put creates ancestors; an empty dir is not worth a request
+		}
+		if !e.Type().IsRegular() {
+			return nil
+		}
+		// A placeholder is remote-born by definition — never a local-only file —
+		// and pushing one is the M5 catastrophe. The uploader would refuse it
+		// anyway; not asking is cheaper and clearer.
+		if d.mat != nil && d.mat.IsPlaceholder(rel) {
+			return nil
+		}
+		if _, ok, err := d.state.GetEcho(rel); err != nil || ok {
+			return nil // has a baseline: handled by the rows that need one
+		}
+		if seen, err := d.state.SeenPath(sw.Gen, rel); err != nil || seen {
+			return nil // exists remotely too: apply already reconciled it
+		}
+		log.Printf("[sweep] push    %s (local only)", rel)
+		d.rec.Push.Push(ctx, fsevent.Event{Op: fsevent.OpWrite, Path: rel})
+		st.pushed++
+		return nil
+	})
+	if err != nil && ctx.Err() == nil {
+		log.Printf("[sweep] walking the backing tree: %v", err)
+	}
+}
+
+// applyDeletes runs the two rows of the table that remove something. It is the
+// only part of a reconcile that can destroy data, and it runs last, only after a
+// sweep that completed, only on paths with a baseline older than the sweep, and
+// only within MaxDeletes.
+func (d *Downloader) applyDeletes(ctx context.Context, sw state.Sweep, st *sweepStats) error {
+	gone, err := d.state.UnseenEchoes(sw.Gen)
+	if err != nil {
+		return err
+	}
+	cands := make([]string, 0, len(gone))
+	for p, e := range gone {
+		// The baseline has to be older than the sweep. An echo written *during* the
+		// sweep describes a file that appeared after its page was listed — a local
+		// create pushed while we swept — and it is absent from the seen-set for that
+		// reason alone. Deleting it would destroy a file the user just made.
+		if !e.At.Before(sw.Started) {
+			continue
+		}
+		cands = append(cands, p)
+	}
+	if len(cands) == 0 {
+		return nil
+	}
+	if d.rec.MaxDeletes > 0 && len(cands) > d.rec.MaxDeletes {
+		log.Printf("[sweep] REFUSING to delete: the sweep says %d previously-synced path(s) are gone from the remote, over the -max-deletes limit of %d. "+
+			"That many at once usually means the state DB, the backing dir or -drive-root do not match each other, rather than %d real deletions. "+
+			"Nothing was deleted; re-run with a higher -max-deletes (or 0 for no limit) if the deletions are genuine.",
+			len(cands), d.rec.MaxDeletes, len(cands))
+		return nil
+	}
+
+	// Deepest first, so a directory is only considered once its own children have
+	// been dealt with and it can be removed by an empty-dir rmdir. The name
+	// tie-break is only there to keep the log order stable between runs.
+	sort.Slice(cands, func(i, j int) bool {
+		if len(cands[i]) != len(cands[j]) {
+			return len(cands[i]) > len(cands[j])
+		}
+		return cands[i] < cands[j]
+	})
+	for _, rel := range cands {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		d.deleteGone(ctx, rel, gone[rel], st)
+	}
+	return nil
+}
+
+// deleteGone handles one path that has a baseline but is no longer on the remote.
+//
+//	local absent  → the user deleted it here while we were down  ⇒ delete remotely
+//	local present → the remote lost it while we were down        ⇒ delete locally,
+//	                but only if the local copy is still the one the baseline
+//	                describes. A local copy that has changed since is the only
+//	                remaining version of that work, and no inference is worth
+//	                losing it: keep it and push it back instead.
+func (d *Downloader) deleteGone(ctx context.Context, rel string, e state.Echo, st *sweepStats) {
+	dst := filepath.Join(d.dataDir, filepath.FromSlash(rel))
+	info, err := os.Lstat(dst)
+	switch {
+	case errors.Is(err, os.ErrNotExist):
+		if d.rec.Push == nil {
+			return // nothing wired to act on the remote; leave it alone
+		}
+		log.Printf("[sweep] delete  %s remotely (gone locally)", rel)
+		d.rec.Push.Push(ctx, fsevent.Event{Op: fsevent.OpUnlink, Path: rel})
+		st.remoteDel++
+		return
+	case err != nil:
+		log.Printf("[sweep] %s: %v (keeping both sides)", rel, err)
+		return
+	}
+
+	if info.IsDir() {
+		// Never RemoveAll: the children are candidates in their own right, and a
+		// directory holding anything we did not account for must survive. An
+		// ENOTEMPTY here is the correct outcome, not an error.
+		if err := os.Remove(dst); err != nil {
+			log.Printf("[sweep] keep    %s (remote directory gone, but the local one is not empty)", rel)
+			return
+		}
+		_ = d.state.DeleteEcho(rel)
+		log.Printf("[sweep] rmdir   %s (gone remotely)", rel)
+		st.localDel++
+		return
+	}
+
+	unchanged, why := d.matchesBaseline(rel, dst, e)
+	if !unchanged {
+		// The local bytes are now the only copy of that work. Keep them, drop the
+		// baseline that no longer describes anything, and put them back on the
+		// remote if there is anywhere to put them.
+		log.Printf("[sweep] keep    %s (gone remotely, but %s)", rel, why)
+		_ = d.state.DeleteEcho(rel)
+		if d.rec.Push != nil {
+			d.rec.Push.Push(ctx, fsevent.Event{Op: fsevent.OpWrite, Path: rel})
+		}
+		st.kept++
+		return
+	}
+	if err := os.Remove(dst); err != nil {
+		log.Printf("[sweep] removing %s: %v", rel, err)
+		return
+	}
+	_ = d.state.DeleteEcho(rel)
+	_ = d.state.DeleteHydration(rel)
+	log.Printf("[sweep] delete  %s locally (gone remotely)", rel)
+	st.localDel++
+}
+
+// matchesBaseline reports whether the local file still holds exactly the content
+// the baseline recorded — the only state in which deleting it loses nothing,
+// because that content also existed remotely.
+//
+// It fails toward keeping the file: a placeholder is content-free and therefore
+// always safe to drop, but a baseline with no checksum to compare against, or a
+// file we cannot read, is not something to delete on a guess.
+func (d *Downloader) matchesBaseline(rel, dst string, e state.Echo) (bool, string) {
+	if d.mat != nil && d.mat.IsPlaceholder(rel) {
+		return true, ""
+	}
+	if e.Hash == "" {
+		return false, "the baseline has no checksum to compare against"
+	}
+	local, err := fileMD5(dst)
+	if err != nil {
+		return false, fmt.Sprintf("it could not be read (%v)", err)
+	}
+	if local != e.Hash {
+		return false, "it was modified locally since"
+	}
+	return true, ""
+}
+
+// conflictRe matches the names conflictName generates. Conflict copies are
+// local-only by §6 policy, so the local walk must not discover them and "helpfully"
+// upload them — which would publish the losing side of every conflict drivel has
+// ever resolved.
+var conflictRe = regexp.MustCompile(` \(conflict \d{4}-\d{2}-\d{2} \d{2}-\d{2}-\d{2}\)(\.[^./]*)?$`)
+
+// skipLocal reports names the local walk must not treat as user content: drivel's
+// own temporary files and probes, and §6 conflict copies.
+func skipLocal(base string) bool {
+	return strings.HasPrefix(base, ".drivel-") || conflictRe.MatchString(base)
+}

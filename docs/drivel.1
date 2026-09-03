@@ -36,9 +36,15 @@ drivel \- Drive-backed FUSE interceptor filesystem
 .IR file ]
 .RB [ -state
 .IR file ]
+.RB [ -index
+.IR file ]
 .RB [ -drive-root
 .IR id ]
 .RB [ -lazy ]
+.RB [ -resync ]
+.RB [ -materialize ]
+.RB [ -max-deletes
+.IR n ]
 .RB [ -debug ]
 .SH DESCRIPTION
 .B drivel
@@ -119,6 +125,15 @@ Path to the sync-state database (the change-feed cursor and echo-suppression
 records). Kept outside the backing tree so it is not itself synced. Default:
 .IR drivel-state.db .
 .TP
+.BI -index " file"
+Path to the provider's path\(->ID index: a cache that lets a restart resolve
+remote objects without re-deriving every mapping from the API. It is never
+authoritative \(em entries are verified against the remote before they are used,
+and anything missing is looked up again \(em so deleting this file costs API
+round trips and nothing else. Kept outside the backing tree. An empty value
+disables it. Default:
+.IR drivel-index.db .
+.TP
 .BI -drive-root " id"
 Drive folder ID mapped to the mount root. Use
 .B root
@@ -144,6 +159,46 @@ filesystem cannot store user extended attributes,
 .B drivel
 warns at startup and falls back to the state database alone; in that case do not
 delete the state database while placeholders exist.
+.TP
+.B -resync
+Enumerate the whole remote tree and reconcile it against the backing directory at
+startup, even when a baseline already exists.
+.IP
+A sweep runs automatically without this flag in three cases: the first run (there
+is no change cursor yet, so the remote tree has never been looked at), a sweep that
+a previous run left unfinished, and a change cursor the provider says has expired.
+It lists metadata only \(em roughly one request per 1000 objects, no content \(em
+and runs in the background, so the mount comes up immediately and stays usable
+while it proceeds.
+.IP
+The change-feed start token is taken
+.I before
+the sweep and adopted only after it finishes, so nothing that changes during the
+sweep is missed.
+.TP
+.B -materialize
+During a reconcile, create local copies of remote files that have none. Under
+.B -lazy
+this always happens and costs nothing (the copy is a placeholder), so the flag is
+only meaningful in the default eager mode, where materialising means downloading
+the entire remote tree \(em a decision the user makes rather than a side effect of
+mounting.
+.TP
+.BI -max-deletes " n"
+Cap on the deletions one reconcile may infer, in either direction. Default:
+.BR 100 ;
+.B 0
+removes the limit.
+.IP
+Exceeding the cap abandons the delete pass entirely rather than trimming it. A
+reconcile only ever infers a deletion for a path it has previously synced (never
+from a file merely being absent on one side), so a large count almost always means
+the premise is wrong rather than that there are that many real deletions \(em a
+state database reused against a different
+.BR -drive-root ,
+a fresh empty backing directory, a mount pointing somewhere new. Note that removing
+a remote object uses the provider's delete, which on Drive is permanent rather than
+a move to the trash.
 .TP
 .B -debug
 Enable FUSE debug logging.
@@ -235,6 +290,9 @@ Cached OAuth token from
 .TP
 .I drivel-state.db
 bbolt sync-state database (change-feed cursor + echo records).
+.TP
+.I drivel-index.db
+bbolt path\(->ID index for the provider. A cache; safe to delete.
 .SH EXAMPLES
 .PP
 Authenticate:

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"path"
 	"strconv"
 	"strings"
@@ -17,6 +18,7 @@ import (
 	"google.golang.org/api/googleapi"
 	"google.golang.org/api/option"
 
+	"github.com/zishmusic/drivel/internal/pathindex"
 	"github.com/zishmusic/drivel/internal/provider"
 )
 
@@ -77,23 +79,37 @@ const fileFields = "id,name,mimeType,md5Checksum,version,modifiedTime,parents,tr
 // against Google Drive API v3.
 //
 // Drive is natively ID-addressed, so the adapter owns the path↔fileID translation
-// that used to live in the sync engine. The index is in-memory for M2; DESIGN.md
-// §2.4 replaces it with a bbolt store in M3. A single mutex guards the maps and is
-// held across the API calls of a mutation — coarse but correct; the engine drives
-// mutations serially in M2, and per-path concurrency lands with the M4 uploader.
+// that the seam above it never sees. index.go holds that translation: two
+// in-memory maps in front of an optional persistent index, both of them caches
+// over Drive itself. A single mutex guards the maps and is held across the API
+// calls of a mutation — coarse but correct, and unchanged by M7: resolution may
+// now issue requests of its own, but each path is resolved at most once per
+// session and the engine's own per-path workers serialise on it anyway.
 type Drive struct {
 	svc   *drive.Service
 	close func() error // shuts down the HTTP/3 transport
 	root  string       // Drive folder ID mapped to the mount root ("" => My Drive root)
 
 	mu       sync.Mutex
+	rootID   string            // concrete ID of root, which may be the "root" alias
 	idByPath map[string]string // root-relative slash path -> fileID ("" => root)
 	pathByID map[string]string // reverse, for resolving change-feed entries
+
+	// Persistent path↔ID index (M7): a cache of the two maps above that outlives
+	// the process. Never authoritative — see the note at the top of index.go.
+	idx       *pathindex.Store
+	idxState  indexState
+	idxWarned bool
+
+	// In-flight enumeration sweep (M7b), nil when none is running. See
+	// enumerate.go — it is derived state, rebuilt or restarted after a restart.
+	sweep *sweepState
 }
 
 var (
 	_ provider.Store         = (*Drive)(nil)
 	_ provider.ChangeSource  = (*Drive)(nil)
+	_ provider.Enumerator    = (*Drive)(nil)
 	_ provider.RangeGetter   = (*Drive)(nil)
 	_ provider.ContentHasher = (*Drive)(nil)
 )
@@ -113,11 +129,24 @@ var (
 // and retryable. The RangePutter path stays exercised by providers that can
 // patch — see the range-write tests in internal/syncengine.
 
-// Open authenticates and returns a Drive provider. credentialsPath is a desktop
-// OAuth client secret; tokenPath caches the user token across runs. rootID is the
-// Drive folder ID mapped to the mount root ("" => My Drive root).
-func Open(ctx context.Context, credentialsPath, tokenPath, rootID string) (*Drive, error) {
-	client, closer, err := buildHTTPClient(ctx, credentialsPath, tokenPath)
+// Config is what a Drive provider needs to open.
+type Config struct {
+	// Credentials is the desktop OAuth client secret JSON.
+	Credentials string
+	// Token caches the user token across runs (written by `drivel login`).
+	Token string
+	// RootID is the Drive folder ID mapped to the mount root ("" or "root" => My
+	// Drive root).
+	RootID string
+	// IndexPath is where the persistent path↔fileID index lives (M7). Empty
+	// disables persistence, which costs API round trips and nothing else. It must
+	// not sit inside the backing tree, or it would sync itself to Drive.
+	IndexPath string
+}
+
+// Open authenticates and returns a Drive provider.
+func Open(ctx context.Context, cfg Config) (*Drive, error) {
+	client, closer, err := buildHTTPClient(ctx, cfg.Credentials, cfg.Token)
 	if err != nil {
 		return nil, err
 	}
@@ -126,17 +155,36 @@ func Open(ctx context.Context, credentialsPath, tokenPath, rootID string) (*Driv
 		_ = closer()
 		return nil, fmt.Errorf("creating drive service: %w", err)
 	}
-	return &Drive{
+	d := &Drive{
 		svc:      svc,
 		close:    closer,
-		root:     rootID,
-		idByPath: map[string]string{"": rootID},
-		pathByID: map[string]string{rootID: ""},
-	}, nil
+		root:     cfg.RootID,
+		idByPath: map[string]string{"": cfg.RootID},
+		pathByID: map[string]string{cfg.RootID: ""},
+	}
+	if cfg.IndexPath != "" {
+		// A failure here is not fatal: the index only ever saves work, so we log it
+		// and run from memory, exactly as M2-M6 did.
+		idx, err := pathindex.Open(cfg.IndexPath)
+		if err != nil {
+			log.Printf("[drive] path index: disabled: %v", err)
+		} else {
+			d.idx = idx
+		}
+	}
+	return d, nil
 }
 
-// Close releases the underlying HTTP/3 transport.
-func (d *Drive) Close() error { return d.close() }
+// Close releases the underlying HTTP/3 transport and the persistent index.
+func (d *Drive) Close() error {
+	err := d.close()
+	if d.idx != nil {
+		if cerr := d.idx.Close(); cerr != nil && err == nil {
+			err = cerr
+		}
+	}
+	return err
+}
 
 // --- provider.Store ---------------------------------------------------------
 
@@ -144,12 +192,15 @@ func (d *Drive) Put(ctx context.Context, p string, r io.Reader) (provider.Remote
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
-	if id, ok := d.idByPath[p]; ok {
+	// Resolve before creating. An unresolvable path is genuinely absent remotely;
+	// anything less than that check and a restart would upload a duplicate beside
+	// the real file instead of replacing it (see index.go).
+	if id, ok := d.resolveLocked(ctx, p); ok {
 		updated, err := d.svc.Files.Update(id, &drive.File{}).Media(r, mediaOptions()...).Fields(fileFields).Context(ctx).Do()
 		if err != nil {
 			return provider.RemoteFile{}, classify(err)
 		}
-		return d.remember(p, updated), nil
+		return d.rememberLocked(ctx, p, updated), nil
 	}
 	parentID, err := d.ensureDirLocked(ctx, path.Dir(p))
 	if err != nil {
@@ -163,7 +214,7 @@ func (d *Drive) Put(ctx context.Context, p string, r io.Reader) (provider.Remote
 	if err != nil {
 		return provider.RemoteFile{}, classify(err)
 	}
-	return d.remember(p, created), nil
+	return d.rememberLocked(ctx, p, created), nil
 }
 
 func (d *Drive) Mkdir(ctx context.Context, p string) (provider.RemoteFile, error) {
@@ -177,14 +228,14 @@ func (d *Drive) Mkdir(ctx context.Context, p string) (provider.RemoteFile, error
 	if err != nil {
 		return provider.RemoteFile{}, classify(err)
 	}
-	return d.remember(p, got), nil
+	return d.rememberLocked(ctx, p, got), nil
 }
 
 func (d *Drive) Move(ctx context.Context, oldPath, newPath string) (provider.RemoteFile, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
-	id, ok := d.idByPath[oldPath]
+	id, ok := d.resolveLocked(ctx, oldPath)
 	if !ok {
 		return provider.RemoteFile{}, provider.ErrNotExist
 	}
@@ -210,31 +261,31 @@ func (d *Drive) Move(ctx context.Context, oldPath, newPath string) (provider.Rem
 	}
 	// Reindex the moved node and, if it's a directory, every descendant whose path
 	// carried the old prefix.
-	d.reindexLocked(oldPath, newPath)
-	return d.remember(newPath, moved), nil
+	d.reindexLocked(ctx, oldPath, newPath)
+	return d.rememberLocked(ctx, newPath, moved), nil
 }
 
 func (d *Drive) Remove(ctx context.Context, p string) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
-	id, ok := d.idByPath[p]
+	id, ok := d.resolveLocked(ctx, p)
 	if !ok {
-		return nil // never uploaded; nothing to remove
+		return nil // no such object remotely; nothing to remove
 	}
 	if err := d.svc.Files.Delete(id).Context(ctx).Do(); err != nil {
 		return classify(err)
 	}
-	d.forgetLocked(p)
+	d.forgetLocked(ctx, p)
 	return nil
 }
 
 func (d *Drive) Get(ctx context.Context, p string) (io.ReadCloser, error) {
 	d.mu.Lock()
-	id, ok := d.idByPath[p]
+	id, ok := d.resolveLocked(ctx, p)
 	d.mu.Unlock()
 	if !ok {
-		return nil, fmt.Errorf("get: unknown path %q", p)
+		return nil, fmt.Errorf("get %q: %w", p, provider.ErrNotExist)
 	}
 	// No lock held while the caller streams the body.
 	resp, err := d.svc.Files.Get(id).Context(ctx).Download()
@@ -251,10 +302,10 @@ func (d *Drive) Get(ctx context.Context, p string) (io.ReadCloser, error) {
 // asked for, starting at off" and stop reading at length themselves.
 func (d *Drive) GetRange(ctx context.Context, p string, off, length int64) (io.ReadCloser, error) {
 	d.mu.Lock()
-	id, ok := d.idByPath[p]
+	id, ok := d.resolveLocked(ctx, p)
 	d.mu.Unlock()
 	if !ok {
-		return nil, fmt.Errorf("get range: unknown path %q", p)
+		return nil, fmt.Errorf("get range %q: %w", p, provider.ErrNotExist)
 	}
 	if off < 0 {
 		off = 0
@@ -288,14 +339,14 @@ func (d *Drive) HashContent(r io.Reader) (string, error) {
 func (d *Drive) Stat(ctx context.Context, p string) (provider.RemoteFile, bool, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	id, ok := d.idByPath[p]
+	id, ok := d.resolveLocked(ctx, p)
 	if !ok {
 		return provider.RemoteFile{}, false, nil
 	}
 	got, err := d.svc.Files.Get(id).Fields(fileFields).Context(ctx).Do()
 	if err != nil {
 		if isNotFound(err) {
-			d.forgetLocked(p)
+			d.forgetLocked(ctx, p)
 			return provider.RemoteFile{}, false, nil
 		}
 		return provider.RemoteFile{}, false, err
@@ -303,7 +354,7 @@ func (d *Drive) Stat(ctx context.Context, p string) (provider.RemoteFile, bool, 
 	if got.Trashed {
 		return provider.RemoteFile{}, false, nil
 	}
-	return d.remember(p, got), true, nil
+	return d.rememberLocked(ctx, p, got), true, nil
 }
 
 // --- provider.ChangeSource --------------------------------------------------
@@ -326,7 +377,13 @@ func (d *Drive) Changes(ctx context.Context, cursor string) ([]provider.RemoteCh
 			Fields(googleapi.Field("nextPageToken,newStartPageToken,changes(fileId,removed,file(" + fileFields + "))")).
 			Context(ctx).Do()
 		if err != nil {
-			return nil, "", err
+			// A dead token is not a transient failure and retrying it never
+			// succeeds: the changes it covered are gone. Say so distinctly so the
+			// engine can recover the only way that works — re-enumerate (M7b).
+			if isPageTokenExpired(err) {
+				return nil, "", fmt.Errorf("changes since cursor: %w", provider.ErrCursorExpired)
+			}
+			return nil, "", classify(err)
 		}
 		for _, ch := range res.Changes {
 			rc, ok := d.toRemoteChange(ctx, ch)
@@ -350,9 +407,9 @@ func (d *Drive) toRemoteChange(ctx context.Context, ch *drive.Change) (provider.
 	// reverse index. Unknown => not in our subtree => skip.
 	if ch.Removed || ch.File == nil || ch.File.Trashed {
 		d.mu.Lock()
-		p, known := d.pathByID[ch.FileId]
+		p, known := d.knownPathForIDLocked(ctx, ch.FileId)
 		if known {
-			d.forgetLocked(p)
+			d.forgetLocked(ctx, p)
 		}
 		d.mu.Unlock()
 		if !known {
@@ -372,46 +429,8 @@ func (d *Drive) toRemoteChange(ctx context.Context, ch *drive.Change) (provider.
 		return provider.RemoteChange{}, false // outside our root subtree
 	}
 	p := path.Join(dir, ch.File.Name)
-	rf := d.remember(p, ch.File)
+	rf := d.rememberLocked(ctx, p, ch.File)
 	return provider.RemoteChange{Path: p, File: &rf}, true
-}
-
-// --- index helpers (all callers hold d.mu except Get) ----------------------
-
-// remember records the path↔ID mapping and returns the RemoteFile view.
-func (d *Drive) remember(p string, f *drive.File) provider.RemoteFile {
-	d.idByPath[p] = f.Id
-	d.pathByID[f.Id] = p
-	return toRemoteFile(p, f)
-}
-
-// forgetLocked drops p (and, for a directory, all descendants) from the index.
-func (d *Drive) forgetLocked(p string) {
-	prefix := p + "/"
-	for q, id := range d.idByPath {
-		if q == p || strings.HasPrefix(q, prefix) {
-			delete(d.idByPath, q)
-			delete(d.pathByID, id)
-		}
-	}
-}
-
-// reindexLocked rewrites index keys after moving oldPath -> newPath, including any
-// descendants of a moved directory.
-func (d *Drive) reindexLocked(oldPath, newPath string) {
-	oldPrefix := oldPath + "/"
-	moves := map[string]string{oldPath: newPath}
-	for q := range d.idByPath {
-		if strings.HasPrefix(q, oldPrefix) {
-			moves[q] = newPath + "/" + strings.TrimPrefix(q, oldPrefix)
-		}
-	}
-	for from, to := range moves {
-		id := d.idByPath[from]
-		delete(d.idByPath, from)
-		d.idByPath[to] = id
-		d.pathByID[id] = to
-	}
 }
 
 // ensureDirLocked returns the Drive folder ID for slash dir path p, creating it and
@@ -420,7 +439,9 @@ func (d *Drive) ensureDirLocked(ctx context.Context, p string) (string, error) {
 	if p == "" || p == "." || p == "/" {
 		return d.root, nil
 	}
-	if id, ok := d.idByPath[p]; ok {
+	// Resolve, don't just consult memory: creating a folder that already exists
+	// remotely gives Drive two same-named siblings and splits the subtree in half.
+	if id, ok := d.resolveLocked(ctx, p); ok {
 		return id, nil
 	}
 	parentID, err := d.ensureDirLocked(ctx, path.Dir(p))
@@ -435,31 +456,8 @@ func (d *Drive) ensureDirLocked(ctx context.Context, p string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	d.remember(p, created)
+	d.rememberLocked(ctx, p, created)
 	return created.Id, nil
-}
-
-// pathForIDLocked resolves a folder ID to its root-relative path, walking parents
-// and caching results. ok is false if the chain does not reach our root.
-func (d *Drive) pathForIDLocked(ctx context.Context, id string) (string, bool) {
-	if id == "" || id == d.root {
-		return "", true
-	}
-	if p, ok := d.pathByID[id]; ok {
-		return p, true
-	}
-	got, err := d.svc.Files.Get(id).Fields("name,parents").Context(ctx).Do()
-	if err != nil || len(got.Parents) == 0 {
-		return "", false
-	}
-	parent, ok := d.pathForIDLocked(ctx, got.Parents[0])
-	if !ok {
-		return "", false
-	}
-	p := path.Join(parent, got.Name)
-	d.idByPath[p] = id
-	d.pathByID[id] = p
-	return p, true
 }
 
 func toRemoteFile(p string, f *drive.File) provider.RemoteFile {
@@ -468,13 +466,24 @@ func toRemoteFile(p string, f *drive.File) provider.RemoteFile {
 		modified, _ = time.Parse(time.RFC3339, f.ModifiedTime)
 	}
 	return provider.RemoteFile{
-		Path:     p,
-		IsDir:    f.MimeType == folderMIME,
-		Size:     f.Size,
-		Hash:     f.Md5Checksum,
-		Version:  strconv.FormatInt(f.Version, 10),
-		Modified: modified,
+		Path:       p,
+		IsDir:      f.MimeType == folderMIME,
+		Size:       f.Size,
+		Hash:       f.Md5Checksum,
+		Version:    strconv.FormatInt(f.Version, 10),
+		Modified:   modified,
+		ExportOnly: isExportOnly(f.MimeType),
 	}
+}
+
+// isExportOnly reports a Google-native object — a Doc, Sheet, Slide, Form or
+// shortcut. They carry no md5Checksum and no byte size because they have no byte
+// stream: files.get(alt=media) refuses them, and files.export produces a
+// *converted* rendering whose bytes are not the object. Reporting the fact is the
+// honest answer; guessing a size for a placeholder or a digest for a comparison
+// would not be. See DESIGN.md §9 (M7b).
+func isExportOnly(mimeType string) bool {
+	return mimeType != folderMIME && strings.HasPrefix(mimeType, "application/vnd.google-apps.")
 }
 
 func isNotFound(err error) bool {

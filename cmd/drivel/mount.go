@@ -25,8 +25,12 @@ func runMount(args []string) {
 	credentials := fset.String("credentials", "", "OAuth client secret JSON; enables Drive sync (else log-only)")
 	token := fset.String("token", "token.json", "path to the cached OAuth token (from 'drivel login')")
 	stateDB := fset.String("state", "drivel-state.db", "path to the sync-state DB (cursor + echo records); kept outside the backing tree")
+	indexDB := fset.String("index", "drivel-index.db", "path to the provider's path↔ID index (a cache; safe to delete); \"\" disables it")
 	driveRoot := fset.String("drive-root", "root", "Drive folder ID mapped to the mount root")
 	lazy := fset.Bool("lazy", false, "lazy hydration (M5): materialise remote files as placeholders and fetch content on first read (requires -credentials)")
+	resync := fset.Bool("resync", false, "enumerate the whole remote tree and reconcile it against the backing dir at startup, even if a baseline already exists")
+	materialize := fset.Bool("materialize", false, "during a reconcile in eager mode, download remote files that have no local copy (implied by -lazy, where it costs only a placeholder)")
+	maxDeletes := fset.Int("max-deletes", syncengine.DefaultMaxDeletes, "cap on deletions one reconcile may infer, in either direction; 0 for no limit")
 	debug := fset.Bool("debug", false, "enable FUSE debug logging")
 	_ = fset.Parse(args)
 
@@ -77,7 +81,12 @@ func runMount(args []string) {
 		st    *state.Store
 	)
 	if *credentials != "" {
-		d, err := gdrive.Open(ctx, *credentials, *token, *driveRoot)
+		d, err := gdrive.Open(ctx, gdrive.Config{
+			Credentials: *credentials,
+			Token:       *token,
+			RootID:      *driveRoot,
+			IndexPath:   *indexDB,
+		})
 		if err != nil {
 			log.Fatalf("google drive auth: %v", err)
 		}
@@ -135,6 +144,17 @@ func runMount(args []string) {
 		if hyd != nil {
 			dl = dl.Lazy(hyd)
 		}
+		// Initial enumeration & reconcile (M7b). The downloader owns it because it
+		// owns the cursor, and the ordering rule that makes a sweep safe — take the
+		// start token before the sweep, poll from it only after — is a statement
+		// about the cursor. It runs in this goroutine, off the FUSE path, so the
+		// mount below comes up and stays usable while a large Drive is swept.
+		dl = dl.Reconcile(syncengine.ReconcileOptions{
+			Push:       engine,
+			Fetch:      *materialize,
+			Force:      *resync,
+			MaxDeletes: *maxDeletes,
+		})
 		log.Print("inbound sync enabled (changes.list pull loop)")
 		go dl.Run(ctx)
 	}

@@ -24,6 +24,16 @@ import (
 // a hard failure (e.g. renaming a file the store never received).
 var ErrNotExist = errors.New("provider: path does not exist")
 
+// ErrCursorExpired is returned by ChangeSource.Changes when the cursor is too old
+// for the provider to answer from (Drive replies 410 to a stale page token).
+//
+// It is a distinct sentinel because it needs a distinct recovery: the gap it
+// leaves cannot be filled by retrying — the changes it covers are simply not
+// available any more — so the engine responds by re-enumerating and reconciling
+// (M7b) rather than by backing off. Before it existed, a dead token logged once a
+// poll and inbound sync stayed silently stopped forever.
+var ErrCursorExpired = errors.New("provider: change cursor expired")
+
 // IsRetryable reports whether err is a transient failure worth retrying with
 // backoff (a rate limit, a 5xx, a dropped connection) rather than a permanent
 // one (bad request, permission denied, not found). A provider signals "retryable"
@@ -47,6 +57,14 @@ type RemoteFile struct {
 	Hash     string // content checksum (e.g. Drive md5Checksum), when the provider exposes one
 	Version  string // opaque provider version/etag
 	Modified time.Time
+
+	// ExportOnly marks an object with no directly downloadable byte stream —
+	// Google-native Docs/Sheets/Slides, which are *converted* on the way out
+	// rather than downloaded. Such an object has no honest size and no checksum,
+	// so it can be neither placeholder'd (M5 needs an apparent size) nor compared
+	// (M6 needs a digest), and Get on it fails. Callers skip its content and say
+	// so, instead of retrying a download that cannot work.
+	ExportOnly bool
 }
 
 // RemoteChange is one entry from a provider's incremental change feed.
@@ -89,6 +107,29 @@ type ChangeSource interface {
 	StartCursor(ctx context.Context) (string, error)
 	// Changes returns changes since cursor and the cursor to use next time.
 	Changes(ctx context.Context, cursor string) (changes []RemoteChange, next string, err error)
+}
+
+// Enumerator is an OPTIONAL capability: a complete listing of everything under
+// the mount root, used by the M7b initial-enumeration sweep to make a Drive that
+// existed before the first mount visible at all (the change feed only ever
+// reports what changes *after* a cursor is taken).
+//
+// It is metadata only — no content is transferred — and is expected to cost
+// roughly one request per page of objects, which is what makes running it by
+// default affordable. Providers that cannot enumerate omit it and M7b is a no-op
+// for them; inbound sync still works from the change feed.
+//
+// The listing is path-addressed like the rest of the seam, so id→path assembly
+// happens below it: a provider that is natively ID-addressed resolves the tree
+// itself (and warms its own path index doing so), and the engine never learns
+// what a native ID is.
+//
+// cursor resumes an interrupted sweep — pass "" to start one, then the token
+// returned by the previous call. A next of "" means the sweep is complete.
+// Objects whose parent chain does not reach the mount root are the provider's to
+// drop; the engine only ever sees paths inside the mount.
+type Enumerator interface {
+	Enumerate(ctx context.Context, cursor string) (files []RemoteFile, next string, err error)
 }
 
 // RangeGetter is an OPTIONAL capability: reading a byte range of an object

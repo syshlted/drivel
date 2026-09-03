@@ -51,8 +51,12 @@ _drivel_mount_args() {
         '-credentials=[OAuth client secret JSON; enables Drive sync]:credentials file:_files' \
         '-token=[cached OAuth token from `drivel login`]:token file:_files' \
         '-state=[sync-state DB (cursor + echo records)]:state db:_files' \
+        '-index=[provider path<->ID index; a cache, safe to delete]:index db:_files' \
         '-drive-root=[Drive folder ID mapped to the mount root]:folder id:' \
         '-lazy[materialise remote files as placeholders; fetch content on first read]' \
+        '-resync[enumerate the remote tree and reconcile it at startup]' \
+        '-materialize[eager mode: download remote files that have no local copy]' \
+        '-max-deletes=[cap on deletions one reconcile may infer; 0 for no limit]:count:' \
         '-debug[enable FUSE debug logging]' \
         '(-h -help)'{-h,-help}'[show mount usage]'
 }

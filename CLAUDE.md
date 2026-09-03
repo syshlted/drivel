@@ -39,10 +39,15 @@ bidirectional sync — don't regress it.
   worker pool with retry/backoff on the push side, §6 conflict copies on the pull
   side, and a bounded drain on shutdown. M6 adds three gates before every content
   push (placeholder → unchanged-content hash → range write), each falling through
-  to the whole-file `Put`.
+  to the whole-file `Put`. M7b adds `reconcile.go`: the initial enumeration sweep
+  and the three-way reconcile, owned by the `Downloader` because it owns the cursor.
+- `internal/pathindex` — leaf package: a persistent bbolt path↔native-ID map for
+  ID-addressed providers (M7). Provider-private (composed by `gdrive`, invisible
+  above the seam) and a *cache*, never an authority — see "Path resolution" below.
 - `internal/state` — engine-level bbolt sync state: the change-feed cursor and the
   echo-suppression records shared by the up/down paths (DESIGN.md §2.4, §4), plus
-  the M5 hydration bitmap cache (opaque bytes; the encoding belongs to `ranges`).
+  the M5 hydration bitmap cache (opaque bytes; the encoding belongs to `ranges`)
+  and the M7b sweep record + per-generation `seen` marks.
 - `internal/hydrate` — M5 lazy hydration: placeholder creation, the authoritative
   `user.drivel.placeholder` xattr marker, and whole-file hydrate-on-first-I/O with
   singleflight. Provider-agnostic.
@@ -61,6 +66,11 @@ rclone's port **53682**; forward it into the container for auto-capture, else us
 the paste fallback. When adding stdin prompts, share ONE bufio reader — multiple
 readers on os.Stdin race and swallow buffered lines.
 
+M7b flags on `mount`: `-resync` (force an enumeration sweep), `-materialize` (eager
+mode only — download remote files that have no local copy; `-lazy` always
+materialises, as placeholders), `-max-deletes N` (cap on reconcile-inferred
+deletions, default 100, 0 = unlimited).
+
 ## Milestones
 
 **v1, shipped.** M1 passthrough mount · M2 transport (HTTP/3→HTTP/2) + Drive auth +
@@ -72,12 +82,15 @@ copies, bounded drain on shutdown.
 **v2, in progress.** M5 lazy hydration **shipped**: `drivel mount -lazy` (opt-in;
 default is unchanged eager mode). See "Lazy hydration" below for the invariants.
 M6 range writes **shipped**: always on, no flag. See "Range writes" below.
+M7 path↔ID index persistence **shipped**: on by default (`-index`, `""` disables).
+See "Path resolution" below. M7b initial enumeration & reconcile **shipped**: the
+sweep runs automatically on a first run, a resumed sweep or a dead cursor, with
+`-resync` to force it. See "Enumeration & reconcile" below.
 
-**v2, planned** (DESIGN.md §9 has the detail). M7 path↔ID index persistence (provider-private bbolt store, latency only, must
-stay non-load-bearing) · M8 multi-account (real) + multi-provider (framework only;
-proven with a pseudo-provider that is `gdrive` registered under a second name) ·
-M9 plugin architecture (out-of-process or WASM; Go's `plugin` package is a poor
-fit).
+**v2, planned** (DESIGN.md §9 has the detail). **M8** multi-account (real) +
+multi-provider (framework only; proven with a pseudo-provider that is `gdrive`
+registered under a second name) · **M9** plugin architecture (out-of-process or
+WASM; Go's `plugin` package is a poor fit).
 
 DESIGN.md §10 is a design note on carrying POSIX metadata (mode, ACLs, xattrs,
 SELinux) over Drive — unscheduled. If you touch it, the rule is that permission
@@ -155,6 +168,94 @@ engine's size cross-check rejects every set — M6 silently never fires.
 In `internal/ranges`, present-ranges round **inward** (`Mark`) and dirty-ranges
 round **outward** (`MarkCovering`). Same bitmap, opposite rounding, and the
 asymmetry is the point.
+
+## Path resolution (M7)
+
+Drive is ID-addressed; the seam above it is path-addressed. `gdrive/index.go`
+answers "which fileID is this path?" from three sources, cheapest first: the
+in-memory maps, the persistent index (`internal/pathindex`), then a `files.list`
+name query against Drive. **Only the third is a source of truth.**
+
+1. **A persisted entry is a hint; verify before you act on it.** The remote may
+   have moved, renamed, replaced or deleted that object while drivel was down — the
+   ID still resolves, just to the wrong file, and `Files.Update` on it destroys
+   someone's data with no conflict copy. `verifyLocked` re-checks name + parent +
+   not-trashed before an entry is believed, and a failed directory drops its whole
+   subtree. Never "optimize" this away; it is the price of persistence.
+2. **The index must stay non-load-bearing.** Deleting `drivel-index.db` may cost
+   latency and quota, never correctness. The name lookup is what makes that true,
+   so it is not optional garnish — before M7 an unknown path meant "absent", which
+   made a restart upload a *duplicate* beside the real file, disabled M6's
+   unchanged-content gate, and made M5 placeholders from an earlier session `EIO`.
+3. **The index is bound to (account permissionId, concrete root ID); a mismatch
+   wipes it.** Binding is lazy — at first index use, not at `Open` — because mount
+   must not require the network. Unbound reads empty and drops writes; an
+   unidentified index is treated as no index.
+
+Everything here degrades to memory-only on any failure. The store is
+provider-private and lives in its own DB file, *not* in `internal/state` (which
+stays engine-level and provider-agnostic).
+
+Also: a file's `parents` carry the **concrete** root ID, never the `root` alias
+that `-drive-root` defaults to. Comparing against the alias is what made the parent
+walk climb past the mount root and drop every inbound change to a top-level file
+(fixed in M7 by resolving the alias once, up front).
+
+Deliberately absent: any startup enumeration of the remote tree. Warming the cache
+that way is a long, quota-heavy walk, and what to do with what it finds is a policy
+question, not a caching one.
+
+## Enumeration & reconcile (M7b)
+
+The change feed only reports what changed *after* a cursor was taken, so a Drive
+that existed before the first mount was invisible. `Enumerate` (optional
+`provider.Enumerator`, one flat `files.list`) makes the tree present;
+`syncengine/reconcile.go` decides what to do with it. It runs off the FUSE path,
+automatically on a first run / a resumed sweep / a dead cursor, and on `-resync`.
+
+1. **Snapshot, then tail.** Take the change-feed start token *before* the sweep and
+   give it to the pull loop only *after* the sweep finishes. The overlap replays
+   idempotent changes that §4 drops; the other order loses everything that changed
+   during the sweep. The `Downloader` owns both because it owns the cursor.
+2. **A delete is inferred only from a baseline, never from absence alone.** The
+   baseline is the §4 echo store ("we have synced this content at this path"); the
+   per-generation `seen` marks in `internal/state` answer "did this sweep observe
+   it?". No baseline ⇒ the path is new, whichever side it is on ⇒ **the first-ever
+   run deletes nothing.** Four guards make the delete rows safe, and none is
+   optional: deletes run only after a *complete* sweep; the baseline must predate
+   the sweep (or a file created locally *during* it looks remotely deleted); a local
+   copy that diverged from its baseline is kept and pushed back, never deleted; and
+   `-max-deletes` abandons the whole pass rather than trimming it, because a huge
+   count means the premise is broken (wrong `-drive-root`, empty `-data`), not that
+   there are 4000 real deletions. Note `Store.Remove` on Drive is permanent, not a
+   move to the trash.
+3. **The marks are persistent, and the reason is resume.** An in-memory seen-set
+   would report every page a *previous* process consumed as remotely deleted.
+4. **A sweep that reports an empty tree is the dangerous shape** — every synced path
+   then looks deleted — so `gdrive.Enumerate` *errors* when it cannot resolve the
+   concrete root ID rather than returning nothing. Same alias trap as M7.
+
+Below the seam: a flat listing has no parent-before-child guarantee, so an object
+whose parent is unseen is parked on that parent's ID and released when it arrives;
+whatever is still parked at the end is outside the mount and dropped. Resolution
+stays *local* during a sweep (a complete listing contains every parent), except on
+a resume, where the persistent index stands in for the pages this process never
+saw — and with no usable index the sweep restarts rather than silently omitting a
+subtree. The sweep doubles as index warm-up via `pathindex.SetMany`, one commit per
+page.
+
+The local walk (row 2, "new locally") is on and unflagged because its only action
+is a push. It **must** keep skipping §6 conflict copies (local-only by policy —
+uploading them publishes the losing side of every conflict) and placeholders
+(remote-born; pushing one is the M5 catastrophe). Reconcile pushes go through
+`Engine.Push`, never straight to the store, so they get the same M5/M6 gates, echo
+recording and retries as a write from the mount.
+
+Google-native Docs/Sheets/Slides carry `RemoteFile.ExportOnly`: reported and marked
+seen (so their absence is never read as a delete) but **never materialised and
+never given an echo** — they have no byte stream, so there is no honest size for a
+placeholder and no digest to compare. Cursor expiry (`provider.ErrCursorExpired`,
+Drive's 410) recovers through this same path: fresh token, then a sweep.
 
 ## Transport
 

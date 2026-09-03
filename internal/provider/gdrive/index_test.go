@@ -1,6 +1,7 @@
 package gdrive
 
 import (
+	"context"
 	"testing"
 
 	drive "google.golang.org/api/drive/v3"
@@ -9,6 +10,8 @@ import (
 
 // newIndex builds a Drive with just the in-memory path↔ID index populated (no
 // svc), which is all the index helpers touch.
+var ctx = context.Background()
+
 func newIndex() *Drive {
 	return &Drive{
 		root:     "ROOT",
@@ -32,7 +35,7 @@ func assertIndexConsistent(t *testing.T, d *Drive) {
 
 func TestRememberIndexesBothDirections(t *testing.T) {
 	d := newIndex()
-	rf := d.remember("a/b.txt", &drive.File{
+	rf := d.rememberLocked(ctx, "a/b.txt", &drive.File{
 		Id:           "id-b",
 		Name:         "b.txt",
 		Md5Checksum:  "abc123",
@@ -58,12 +61,12 @@ func TestRememberIndexesBothDirections(t *testing.T) {
 
 func TestForgetLockedDropsSubtree(t *testing.T) {
 	d := newIndex()
-	d.remember("a", &drive.File{Id: "id-a", MimeType: folderMIME})
-	d.remember("a/b.txt", &drive.File{Id: "id-b"})
-	d.remember("a/sub/c.txt", &drive.File{Id: "id-c"})
-	d.remember("other.txt", &drive.File{Id: "id-o"})
+	d.rememberLocked(ctx, "a", &drive.File{Id: "id-a", MimeType: folderMIME})
+	d.rememberLocked(ctx, "a/b.txt", &drive.File{Id: "id-b"})
+	d.rememberLocked(ctx, "a/sub/c.txt", &drive.File{Id: "id-c"})
+	d.rememberLocked(ctx, "other.txt", &drive.File{Id: "id-o"})
 
-	d.forgetLocked("a")
+	d.forgetLocked(ctx, "a")
 
 	for _, gone := range []string{"a", "a/b.txt", "a/sub/c.txt"} {
 		if _, ok := d.idByPath[gone]; ok {
@@ -81,10 +84,10 @@ func TestForgetLockedDropsSubtree(t *testing.T) {
 // forgotten (string-prefix false positive guard).
 func TestForgetLockedRespectsPathBoundary(t *testing.T) {
 	d := newIndex()
-	d.remember("a", &drive.File{Id: "id-a", MimeType: folderMIME})
-	d.remember("ab", &drive.File{Id: "id-ab"})
+	d.rememberLocked(ctx, "a", &drive.File{Id: "id-a", MimeType: folderMIME})
+	d.rememberLocked(ctx, "ab", &drive.File{Id: "id-ab"})
 
-	d.forgetLocked("a")
+	d.forgetLocked(ctx, "a")
 
 	if _, ok := d.idByPath["ab"]; !ok {
 		t.Fatal("forgetLocked(\"a\") wrongly dropped sibling \"ab\"")
@@ -94,11 +97,11 @@ func TestForgetLockedRespectsPathBoundary(t *testing.T) {
 
 func TestReindexLockedMovesSubtree(t *testing.T) {
 	d := newIndex()
-	d.remember("dir", &drive.File{Id: "id-dir", MimeType: folderMIME})
-	d.remember("dir/f.txt", &drive.File{Id: "id-f"})
-	d.remember("dir/sub/g.txt", &drive.File{Id: "id-g"})
+	d.rememberLocked(ctx, "dir", &drive.File{Id: "id-dir", MimeType: folderMIME})
+	d.rememberLocked(ctx, "dir/f.txt", &drive.File{Id: "id-f"})
+	d.rememberLocked(ctx, "dir/sub/g.txt", &drive.File{Id: "id-g"})
 
-	d.reindexLocked("dir", "moved")
+	d.reindexLocked(ctx, "dir", "moved")
 
 	want := map[string]string{"moved": "id-dir", "moved/f.txt": "id-f", "moved/sub/g.txt": "id-g"}
 	for p, id := range want {

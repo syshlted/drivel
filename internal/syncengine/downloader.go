@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/md5"
 	"encoding/hex"
+	"errors"
 	"io"
 	"log"
 	"os"
@@ -43,6 +44,13 @@ type Downloader struct {
 	state   *state.Store
 	cad     Cadence
 	mat     Materializer // nil => eager mode: apply content immediately
+
+	// Initial enumeration & reconcile (M7b). enum is nil unless the store can
+	// enumerate, in which case the downloader owns the sweep as well as the feed —
+	// one owner for the cursor means one place where "snapshot, then tail" can be
+	// got wrong. See reconcile.go.
+	enum provider.Enumerator
+	rec  ReconcileOptions
 }
 
 // Materializer is the OPTIONAL lazy-hydration hook (M5), satisfied by
@@ -80,9 +88,8 @@ func NewDownloader(src provider.ChangeSource, store provider.Store, dataDir stri
 // obtains a fresh start token on first run so it only ever sees changes from
 // "now" forward.
 func (d *Downloader) Run(ctx context.Context) {
-	cursor, err := d.resumeCursor(ctx)
-	if err != nil {
-		log.Printf("[pull] cannot start change feed: %v", err)
+	cursor, ok := d.start(ctx)
+	if !ok {
 		return
 	}
 
@@ -99,8 +106,23 @@ func (d *Downloader) Run(ctx context.Context) {
 			if ctx.Err() != nil {
 				return
 			}
-			// M4 adds classification/backoff on transient errors; for now log and
-			// retry at the slow cadence rather than hot-looping.
+			// An expired cursor is not a transient failure: the changes it covered
+			// no longer exist to be fetched, so retrying it never recovers. Before
+			// M7b there was no case for it and inbound sync simply stopped, forever
+			// and quietly, at the slow cadence. The recovery is a resync (M7b).
+			if errors.Is(err, provider.ErrCursorExpired) {
+				fresh, rErr := d.recoverCursor(ctx)
+				if rErr != nil {
+					if ctx.Err() != nil {
+						return
+					}
+					log.Printf("[pull] resync after cursor expiry failed: %v", rErr)
+					wait = d.cad.Slow
+					continue
+				}
+				cursor, wait = fresh, d.cad.Fast
+				continue
+			}
 			log.Printf("[pull] changes: %v", err)
 			wait = d.cad.Slow
 			continue
@@ -128,6 +150,44 @@ func (d *Downloader) Run(ctx context.Context) {
 			wait = d.cad.Fast
 		} else if wait *= 2; wait > d.cad.Slow {
 			wait = d.cad.Slow
+		}
+	}
+}
+
+// start establishes the cursor to poll from, retrying at the slow cadence while
+// the failure is transient.
+//
+// It can block for a while on a first run — that is the initial sweep — which is
+// exactly why the whole downloader runs off the FUSE path: the mount is already
+// up and usable while this happens. Polling does not begin until it returns,
+// because the token it returns was taken *before* the sweep and using it earlier
+// would mean applying changes twice for no benefit.
+func (d *Downloader) start(ctx context.Context) (string, bool) {
+	for attempt := 1; ; attempt++ {
+		cursor, err := d.startFeed(ctx)
+		if err == nil {
+			return cursor, true
+		}
+		if ctx.Err() != nil {
+			return "", false
+		}
+		if !provider.IsRetryable(err) {
+			// A permanent failure must not keep inbound sync hostage. Fall back to
+			// the feed alone: any sweep already recorded stays recorded, so a later
+			// run (or -resync) picks it up where this one stopped.
+			log.Printf("[pull] initial reconcile failed: %v; continuing with the change feed alone", err)
+			cursor, ferr := d.resumeCursor(ctx)
+			if ferr != nil {
+				log.Printf("[pull] cannot start change feed: %v", ferr)
+				return "", false
+			}
+			return cursor, true
+		}
+		log.Printf("[pull] cannot start change feed (attempt %d): %v", attempt, err)
+		select {
+		case <-ctx.Done():
+			return "", false
+		case <-time.After(d.cad.Slow):
 		}
 	}
 }
@@ -166,6 +226,14 @@ func (d *Downloader) apply(ctx context.Context, ch provider.RemoteChange) error 
 	}
 
 	f := ch.File
+
+	// A Google-native doc (M7b) has no byte stream: Get on it fails, its size is
+	// not a byte count and it has no checksum. There is nothing to place locally,
+	// so say so once instead of failing a download on every report of it.
+	if f.ExportOnly {
+		log.Printf("[pull] skip    %s (Google-native document; no downloadable content)", ch.Path)
+		return nil
+	}
 
 	echo, hasEcho, err := d.state.GetEcho(ch.Path)
 	if err != nil {

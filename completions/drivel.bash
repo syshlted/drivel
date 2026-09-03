@@ -25,7 +25,7 @@ _drivel() {
     local subcommands="login mount help"
 
     # Flags that take a path/dir argument -> complete filenames.
-    local file_flags="-mount -data -credentials -token -state"
+    local file_flags="-mount -data -credentials -token -state -index"
     # Flags that take a free-form value -> no filename completion.
     local value_flags="-drive-root -client-id -client-secret -project-id -scope -port"
 
@@ -48,7 +48,7 @@ _drivel() {
             _filedir -d
             return
             ;;
-        -credentials|-token|-state)
+        -credentials|-token|-state|-index)
             _filedir
             return
             ;;
@@ -65,7 +65,7 @@ _drivel() {
     # Complete the subcommand slot.
     if [[ -z $sub ]]; then
         if [[ $cur == -* ]]; then
-            COMPREPLY=( $(compgen -W "$file_flags $value_flags -lazy -debug -open -h -help" -- "$cur") )
+            COMPREPLY=( $(compgen -W "$file_flags $value_flags -lazy -resync -materialize -max-deletes -debug -open -h -help" -- "$cur") )
         else
             COMPREPLY=( $(compgen -W "$subcommands" -- "$cur") )
         fi
@@ -75,7 +75,7 @@ _drivel() {
     # Flag completion within a subcommand.
     local flags=""
     case "$sub" in
-        mount) flags="-mount -data -credentials -token -state -drive-root -lazy -debug -h -help" ;;
+        mount) flags="-mount -data -credentials -token -state -index -drive-root -lazy -resync -materialize -max-deletes -debug -h -help" ;;
         login) flags="-credentials -token -client-id -client-secret -project-id -scope -port -open -h -help" ;;
         help)  return ;;
     esac

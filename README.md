@@ -22,7 +22,9 @@ identity you control. Licensed under the [GNU AGPLv3](#license).
 
 **v1 is feature-complete** (M1–M4): Drivel mounts, proxies, and syncs
 bidirectionally with Google Drive. On top of it, **M5 (lazy hydration)** has
-landed as an opt-in mode, and **M6 (smarter uploads)** as always-on behaviour.
+landed as an opt-in mode, and **M6 (smarter uploads)**, **M7 (restart-safe path
+resolution)** and **M7b (initial enumeration & reconcile)** as always-on
+behaviour.
 
 - `internal/vfs` — go-fuse loopback that proxies to the underlying dir and emits a
   change `Event` per mutation, including `OpWrite` on close (file-handle capture).
@@ -31,6 +33,8 @@ landed as an opt-in mode, and **M6 (smarter uploads)** as always-on behaviour.
 - `internal/provider` + `internal/provider/gdrive` — the cloud interface and its
   Google Drive implementation (OAuth desktop flow, transport folded under auth).
 - `internal/state` — bbolt store for the change-feed cursor and echo records.
+- `internal/pathindex` — bbolt path↔ID index for ID-addressed providers (M7); a
+  verified cache, never authoritative.
 - `internal/hydrate` — M5 lazy hydration: placeholders and hydrate-on-read.
 - `internal/ranges` — the byte-extent bitmap shared by M5's present-ranges and
   M6's dirty-ranges.
@@ -63,9 +67,52 @@ re-upload. What Drivel does there is make that upload survivable — chunked
 resumable sessions with per-chunk timeouts, retries, and a checksum Drive verifies
 before committing. See [DESIGN.md §9](DESIGN.md) for the full reasoning.
 
-Roadmap (v2), in [DESIGN.md §9](DESIGN.md): **M7** path↔ID index persistence ·
-**M8** multi-account and multi-provider mounts · **M9** plugin architecture for
-third-party providers.
+### Restart-safe path resolution (M7)
+
+Always on. Google Drive addresses files by opaque ID, not by path, so Drivel keeps
+a path↔ID index — now persisted (`-index`, default `drivel-index.db`) so a restart
+starts warm instead of relearning every mapping through the API.
+
+The index is a **cache, never an authority**. A stored mapping is checked against
+Drive before it is used — the object may have been moved, renamed or deleted while
+Drivel was not running — and dropped if it no longer matches. Anything unknown or
+rejected is looked up by name against Drive itself, so a deleted index rebuilds on
+demand: losing the file costs API round trips and nothing else.
+
+That lookup also closes a gap that predates the index. Previously a path Drivel had
+not yet learned counted as "not on Drive", so a restart followed by an edit uploaded
+a **duplicate** file beside the real one instead of replacing it, skipped M6's
+already-uploaded check, and left `-lazy` placeholders from an earlier session
+unreadable.
+
+### Seeing a Drive that was already there (M7b)
+
+Always on. The change feed only reports what changes *after* Drivel first runs, so
+a Drive full of existing files used to be invisible to it. Now the first run (and
+`-resync`, and a recovery from an expired cursor) enumerates the whole remote tree
+once — one request per thousand objects, no content transferred — and reconciles it
+against the backing directory.
+
+With `-lazy` the entire Drive becomes visible immediately as placeholders. Without
+it, materialising means downloading, so that stays behind `-materialize`.
+
+Reconciling means deciding what changed on each side while Drivel was not running,
+and the dangerous half of that is deletion. Drivel infers a delete **only from a
+baseline** — a record that it previously synced that exact path — never from a file
+being missing on one side. A path it has never synced is *new*, whichever side it
+is on, which is why **the first run never deletes anything**. On top of that: a
+local file that changed since the baseline is kept and pushed back rather than
+deleted; a directory is only removed once it is empty; and `-max-deletes` (default
+100) abandons the whole delete pass if the count looks like a broken setup rather
+than a real cleanup — a state database pointed at the wrong Drive folder, say, or a
+fresh empty backing directory.
+
+The same machinery fixes a silent failure: Google expires change cursors, and
+Drivel used to retry a dead one forever with inbound sync quietly stopped. It now
+recognises the expiry and recovers by re-enumerating.
+
+Roadmap (v2), in [DESIGN.md §9](DESIGN.md): **M8** multi-account and
+multi-provider mounts · **M9** plugin architecture for third-party providers.
 
 ## Build
 

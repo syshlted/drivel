@@ -43,3 +43,50 @@ func TestClassify(t *testing.T) {
 		t.Fatal("classify(nil) should be nil")
 	}
 }
+
+// A dead change cursor must classify as expired, not as retryable and not as a
+// generic failure: the recovery is a resync (M7b), and no amount of retrying gets
+// back changes Drive no longer holds.
+func TestIsPageTokenExpired(t *testing.T) {
+	badToken := &googleapi.Error{Code: 400}
+	badToken.Errors = []googleapi.ErrorItem{{Reason: "invalidPageToken"}}
+	badRequest := &googleapi.Error{Code: 400}
+	badRequest.Errors = []googleapi.ErrorItem{{Reason: "invalidParameter"}}
+
+	cases := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"410 gone", &googleapi.Error{Code: 410}, true},
+		{"400 invalid page token", badToken, true},
+		{"400 by message", &googleapi.Error{Code: 400, Message: "Invalid page token."}, true},
+		{"400 unrelated", badRequest, false},
+		{"503", &googleapi.Error{Code: 503}, false},
+		{"404", &googleapi.Error{Code: 404}, false},
+		{"plain error", errors.New("boom"), false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := isPageTokenExpired(c.err); got != c.want {
+				t.Fatalf("isPageTokenExpired(%v) = %v; want %v", c.err, got, c.want)
+			}
+		})
+	}
+}
+
+// End to end: a 410 from changes.list surfaces above the seam as
+// provider.ErrCursorExpired, which is what makes the pull loop resync instead of
+// retrying a token forever.
+func TestChangesReportsExpiredCursor(t *testing.T) {
+	d, fake := newFakeDrive(t)
+	fake.expirePageTokens = true
+
+	_, _, err := d.Changes(ctx, "stale-token")
+	if !errors.Is(err, provider.ErrCursorExpired) {
+		t.Fatalf("Changes = %v; want provider.ErrCursorExpired", err)
+	}
+	if provider.IsRetryable(err) {
+		t.Fatal("an expired cursor was classified as retryable; the loop would retry a token that can never answer")
+	}
+}

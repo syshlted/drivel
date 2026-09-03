@@ -96,13 +96,25 @@ provider. First (and currently only) provider: **Google Drive**.
 Single embedded key/value DB ([`go.etcd.io/bbolt`](https://github.com/etcd-io/bbolt)).
 Ownership splits along the provider seam (§2.5):
 
-Provider-internal (below the seam — Drive's private path↔ID translation):
-- `pathToID`   : relative path → Drive fileID
-- `idToMeta`   : fileID → {path, driveModifiedTime, driveVersion, localMtime, size, md5}
+Provider-internal (below the seam — Drive's private path↔ID translation, M7). A
+**separate DB file** (`drivel-index.db`), not a bucket in this one: its contents are
+meaningless outside the one provider and the one account that wrote them, and the
+engine must never be able to reach them. See §2.5 and `internal/pathindex`.
+- `path`       : relative path → Drive fileID
+- `id`         : Drive fileID → relative path (the change feed's direction)
+- `meta`       : the account+root this index was built against (see §2.5)
 
 Engine-level (provider-agnostic sync state):
 - `cursor`     : the change-feed cursor (single key; opaque provider token)
 - `pending`    : in-flight/echo-suppression records, keyed by path + content hash (see §4)
+- `hydration`  : per-path present-ranges bitmaps (M5), opaque here — a cache over the
+  authoritative xattr marker
+- `sweep`      : the in-progress enumeration sweep (M7b): the pre-sweep change-feed
+  token, how far the sweep got, and the generation the marks below belong to
+- `seen`       : per-generation marks for the paths one sweep observed remotely. They
+  are persistent rather than in-memory precisely so a sweep that resumed after a
+  restart still knows about the pages its predecessor consumed — an in-memory set
+  would report every one of them as remotely deleted (§9, M7b)
 
 ### 2.5 Provider interface — path-addressed store + optional change feed
 Thin seam so the FS/sync layers don't hard-code Drive. The seam is **path-addressed**:
@@ -135,6 +147,13 @@ type ChangeSource interface {
     Changes(ctx, cursor string) (changes []RemoteChange, next string, err error)
 }
 
+// Optional capability: a complete listing of everything under the mount root
+// (M7b). Metadata only, ~one request per page. cursor resumes an interrupted
+// sweep; next == "" means complete. Providers that cannot enumerate omit it.
+type Enumerator interface {
+    Enumerate(ctx, cursor string) (files []RemoteFile, next string, err error)
+}
+
 // Optional capability: ranged reads (M5 hydration). Length <= 0 means "to EOF".
 type RangeGetter interface {
     GetRange(ctx, path string, off, length int64) (io.ReadCloser, error)
@@ -156,14 +175,31 @@ type ContentHasher interface {
 }
 ```
 
-The four optional interfaces are all *accelerators that may decline*. Every one of
+The five optional interfaces are all *accelerators that may decline*. Every one of
 them has a correct, slower answer available if the provider omits it or a call
 fails, and the engine is written so that "unsure" always selects that answer.
+`Enumerator` is the one whose absence costs a *feature* rather than speed — without
+it a pre-existing remote tree stays invisible (§9, M7b) — but its absence is still
+safe, because nothing infers anything from a sweep that never ran.
+
+Two sentinel errors cross the seam, both because they need a *different response*
+rather than a retry: `ErrNotExist` from `Move` (upload the destination as fresh
+content) and `ErrCursorExpired` from `Changes` (the changes are gone; re-enumerate
+and reconcile — §9, M7b). Providers classify them below the seam, the same
+convention `IsRetryable` uses.
 
 `RemoteFile`/`RemoteChange` are keyed by `Path`, not fileID. The Drive implementation
-owns a path↔fileID index (in-memory for M2; the bbolt buckets of §2.4 in M3) and is
-constructed with the **root folder ID** it maps the mount root to, plus an injected
-`*http.Client` (see §2.6) so transport is chosen independently of provider logic.
+owns the path↔fileID index and is constructed with the **root folder ID** it maps the
+mount root to, plus an injected `*http.Client` (see §2.6) so transport is chosen
+independently of provider logic.
+
+**Resolving a path is a three-source question** (M7, `internal/provider/gdrive/index.go`).
+In cost order: the in-memory maps, then the persistent index (`internal/pathindex`),
+then Drive itself via a name query. Only the last is a source of truth. The first is
+derived from the API within this session and kept current by the pull loop; the second
+is a *hint* written by a process that may have exited months ago, so it is verified
+before it is believed and dropped when it no longer matches. The rule the whole design
+hangs on: **deleting the index costs latency and quota, never correctness.**
 
 **Move semantics — a real capability difference, documented not abstracted.** Drive's
 `Move` preserves object identity (a cheap metadata reparent), so history/permissions
@@ -259,7 +295,12 @@ and lighter than the Workspace Events API, and no webhook endpoint required.
 3. For each remote change, run it through **echo suppression** (§4). If it's ours,
    drop it. Otherwise apply to the underlying dir (download/rename/delete) and update
    state.
-4. **Adaptive cadence**: poll fast (~2–5s) while there's recent local or remote
+4. **Cursor expiry**: Drive answers a token it can no longer serve with 410. That is
+   not a transient failure — the changes it covered are gone — so the provider
+   reports `provider.ErrCursorExpired` and the loop responds by resyncing: a fresh
+   start token, then a full enumeration and reconcile (§9, M7b). Retrying instead is
+   what the pre-M7b loop did, and it left inbound sync silently dead forever.
+5. **Adaptive cadence**: poll fast (~2–5s) while there's recent local or remote
    activity; back off (up to ~30–60s) when idle. Gives event-driven feel without
    webhooks. (Optional future: `changes.watch` push as a latency optimization, but it
    needs a public HTTPS endpoint + channel renewal — impractical for a laptop mount.)
@@ -359,8 +400,12 @@ are both lossy and racy.
   contexts) carried alongside content — see §10. Not scheduled; the security
   analysis is the blocker, not the plumbing.
 - **Google-native docs** (Docs/Sheets/Slides) have no binary content and no
-  `md5Checksum`. Today they fall back to the opaque `Version` for echo matching;
-  export-on-read (`files.export`) is unexplored.
+  `md5Checksum`. They fall back to the opaque `Version` for echo matching, and since
+  M7b they are marked `RemoteFile.ExportOnly`: reported by the sweep (so their
+  absence locally is never read as a deletion) but never materialised and never
+  given an echo. Export-on-read (`files.export`) is the unexplored half — it would
+  need a policy for which format a `.gdoc` becomes locally, and a story for writing
+  one back.
 
 ---
 
@@ -375,7 +420,7 @@ are both lossy and racy.
    underlying dir, with §4 echo suppression and adaptive cadence (§3.4). Engine-level
    state (cursor + echo records) persisted in `internal/state` (bbolt). ✅ The
    provider-internal path↔ID index stays in-memory (self-rebuilding, §2.5); its bbolt
-   persistence is a latency optimization deferred to M7.
+   persistence lands in M7.
 4. **M4 — Full bidirectional** with debounce, retries, conflict copies (§6), clean
    shutdown (drain the uploader queue; the downloader stops on ctx cancel). ✅
    Outbound: events are coalesced per path behind a debounce window and dispatched
@@ -543,13 +588,272 @@ are both lossy and racy.
    under the chunk retry deadline or the retry it exists to trigger can never
    run — the deadline timer starts when the chunk starts and is only checked
    between attempts.
-7. **M7 — Path↔ID index persistence.** Promote the Drive provider's in-memory
-   path↔fileID index (§2.5) to a bbolt store, so a restart doesn't re-walk the
-   remote tree to rebuild it. Purely a startup-latency optimization — the index
-   stays self-rebuilding and provider-private, below the seam, and must never
-   become a correctness dependency. Note this store belongs to the *provider*, not
-   to `internal/state`, which stays engine-level and provider-agnostic.
-8. **M8 — Multi-account & multi-provider mounts.** Two separable pieces:
+7. **M7 — Path↔ID index persistence.** ✅ Shipped. On by default
+   (`drivel mount -index FILE`, `-index ""` to disable), because everything it adds
+   either saves work or declines to act.
+
+   The milestone was scoped as "promote the in-memory path↔fileID index to bbolt so
+   a restart doesn't re-walk the remote tree — purely a startup-latency
+   optimization". Building it turned up that both halves of that sentence were
+   wrong, and the correction is the interesting part.
+
+   **Nothing ever walked the tree.** The pull loop starts from a "now" cursor, so
+   the index only ever learned a path when an operation touched it. What a cold
+   index actually did was worse than slow. An unknown path meant "does not exist
+   remotely", so after a restart the first edit to an existing file ran `Files.Create`
+   instead of `Files.Update` — and since Drive permits same-name siblings, the user
+   got a **second file beside the real one, under a second copy of every parent
+   folder**. The same false "absent" from `Stat` disabled M6's unchanged-content
+   gate (a full re-upload of a file Drive already held byte for byte), and in `-lazy`
+   mode it made a placeholder written by a previous session unredeemable: `Get` on
+   an unknown path failed, and a failed hydration is `EIO` (M5). So M7 is a
+   correctness milestone that happens to also be faster.
+
+   Resolution now has **three sources**, tried in cost order:
+
+   1. the in-memory maps — everything this process has already learned;
+   2. the persistent index — what a previous process learned;
+   3. Drive itself — a `files.list` name query, one path component at a time.
+
+   Only (3) is a source of truth, and adding it is what makes the index
+   *self-rebuilding* rather than merely *claimed to be*. It is also the fix for the
+   duplicate-create bug on its own: an unresolvable path is now genuinely absent.
+
+   **A persisted entry is a hint, and using one unverified is the one way this
+   could lose data that the in-memory index never could.** While drivel was down,
+   another client may have moved, renamed, replaced or deleted that object. The
+   stored ID still resolves — to a different file, in a different place. Handing it
+   to `Files.Update` overwrites a file the user never touched, with no conflict copy
+   and no event to notice it by. So an entry is checked before first use (still
+   exists, not trashed, still carries that name, still under the parent the path
+   names) and dropped when it fails, and a failed directory takes its **whole
+   subtree** with it: if a folder is not where we left it, nothing recorded beneath
+   it is trustworthy either. Verification costs one metadata `GET` per path per
+   session, and because it resolves the parent chain through the same path, the
+   ancestors are verified once and then free.
+
+   This is the same shape as M5's xattr-over-DB and M6's hash-against-`Stat`: the
+   cheap local record is a cache, the remote is the authority, and "unsure" always
+   selects the slower correct answer.
+
+   **The index is bound to an identity** — the account's `permissionId` plus the
+   concrete root folder ID — and any change to that pair wipes it rather than
+   reading one account's paths as another's IDs, which matters as soon as M8 makes
+   two accounts routine. `permissionId` rather than the email address, so a file the
+   user did not ask to hold an identifiable address does not hold one. Binding needs
+   a network round trip and therefore happens lazily at **first index use, not at
+   `Open`**: mount must not depend on the network to come up, and nothing on disk is
+   read before we know whose it is. Until it succeeds the store reads as empty and
+   drops writes — an unidentified index is treated as no index.
+
+   Everything about it degrades to M2–M6 behaviour: a DB that won't open, an
+   identity that can't be established, a bbolt error mid-operation — each logs and
+   falls back to memory-only. The store lives in `internal/pathindex`, composed
+   privately by the provider and kept out of `internal/state`, which stays
+   engine-level and provider-agnostic (§2.4). It is a separate DB file for the same
+   reason.
+
+   One long-standing bug fell out of testing the parent walk. A file's `parents`
+   carry the *concrete* root ID, while `-drive-root` defaults to the alias `root`,
+   and the walk compared against the alias — so it climbed past the mount root to My
+   Drive, found a folder with no parents, and concluded the object was outside our
+   subtree. **Every inbound change to a top-level file had been silently dropped
+   since M3.** Resolving the alias to its real ID once, up front, is the fix.
+
+   Deliberately not included here: an initial reconcile that enumerates the remote
+   tree. Deciding what to do with what such a sweep finds is a policy question of its
+   own, not a cache-warming one — and the sweep is a *one-time* cost rather than a
+   per-startup one only because the index and cursor persist, which is what this
+   milestone put in place. That is **M7b** below, which shipped next and made the
+   sweep double as this index's warm-up.
+
+8. **M7b — Initial enumeration & reconcile.** ✅ Shipped. The other half of M7's
+   story, and the piece that makes a large pre-existing Drive usable.
+
+   M3's pull loop starts from a "now" cursor, so a Drive that existed before the
+   first mount was invisible: nothing enumerated it, and the backing tree only ever
+   learned about objects that changed while we were running. M7 made any path
+   *resolvable* on demand. M7b makes the tree *present*.
+
+   **The milestone splits in two, because the two halves differ in cost by orders
+   of magnitude.**
+
+   - *Enumeration* — build the path↔ID index and a baseline record of remote state.
+     One flat listing, roughly **one request per 1000 objects**, no content
+     transferred and no local files created. Cheap enough to be the default, and it
+     is: a mount with no cursor yet sweeps before it starts tailing.
+   - *Materialisation* — create local entries for remote objects that have no local
+     counterpart. Under `-lazy` these are placeholders: metadata only, effectively
+     free, and the whole Drive becomes visible for the price of the sweep. In eager
+     mode the same operation is a full download of everything, so it sits behind
+     `-materialize` and is never a silent side effect of mounting.
+
+   **Seam.** A new optional capability, in the established shape (§2.5): providers
+   that cannot enumerate omit it and M7b is a no-op for them.
+
+   ```go
+   // Optional capability: a complete listing of everything under the mount root.
+   type Enumerator interface {
+       Enumerate(ctx, cursor string) (files []RemoteFile, next string, err error)
+   }
+   ```
+
+   `RemoteFile` is path-addressed, so the id→path assembly happens *below* the seam
+   — which means the sweep doubles as index warm-up, populating `internal/pathindex`
+   as it goes (batched, one bbolt commit per page rather than one per object), and
+   the engine never learns what a fileID is. `cursor` resumes an interrupted sweep;
+   `next == ""` means complete. For `gdrive` this is one flat `files.list`
+   (`q: trashed = false`, `spaces=drive`, `pageSize=1000`, the §2.5 projection plus
+   `parents`), with the tree assembled locally: a flat listing has no
+   parent-before-child guarantee, so an object whose parent has not been seen yet is
+   **parked on that parent's ID** and released the moment the parent arrives
+   (recursively, so a strictly child-first listing still costs one pass). Anything
+   still parked when the sweep ends never reached our root and is dropped — the same
+   rule `pathForIDLocked` applies to the change feed, and what keeps a subfolder
+   mount correct while listing the whole account.
+
+   Resolution during a sweep is deliberately **local**: a complete sweep sees every
+   non-trashed object, so a parent missing from it is genuinely absent rather than
+   merely unseen, and walking parents by ID over the network would turn a cheap
+   sweep into a per-object quota disaster. The exception is a *resumed* sweep, whose
+   earlier pages this process never saw; there the persistent index stands in for
+   them, verified per M7 before it is believed. With no usable index there is
+   nothing to stand in, so the sweep **restarts** rather than silently omitting a
+   subtree — an omission the reconcile above would read as "deleted remotely".
+
+   One failure is fatal rather than empty: if the concrete root folder ID cannot be
+   resolved, `Enumerate` errors out. Reporting an empty tree instead is the single
+   most dangerous thing a sweep can do, because then *every* previously-synced path
+   looks remotely deleted. (This is the same alias trap M7 fixed in the parent walk:
+   a file's `parents` carry the concrete ID, never the `root` alias.)
+
+   **Snapshot, then tail — the ordering is not negotiable.** Take the `changes.list`
+   start token *before* the sweep begins and hand it to the pull loop only after the
+   sweep completes. The overlap replays some changes, which is harmless (they are
+   idempotent, and §4 echo suppression drops them); the other order loses everything
+   that changed while the sweep was running. A sweep of a large Drive will be
+   interrupted, so the token, the sweep cursor and a generation marker are persisted
+   together (`internal/state`, `sweep` bucket) and a restart resumes mid-sweep rather
+   than starting over. The downloader owns all of this because it owns the cursor:
+   one owner means one place where the ordering can be got wrong.
+
+   **Reconcile needs a baseline, and this is the actual hard part.** For each path
+   the decision is three-way — last-known × local-now × remote-now:
+
+   | last-known | local | remote | action |
+   |---|---|---|---|
+   | — | — | present | materialise locally (new remotely) |
+   | — | present | — | push (new locally) |
+   | present | — | present | delete remotely (deleted locally while we were off) |
+   | present | present | — | delete locally (deleted remotely while we were off) |
+   | present | present | differs | §6 last-writer-wins + conflict copy |
+   | present | present | same | nothing |
+
+   Without the last-known column, "created remotely" and "deleted locally" are
+   *indistinguishable* — both are "present on one side only" — and guessing wrong
+   deletes the user's data. **§4's echo records are the baseline**, not a manifest
+   alongside them: an echo says "we have synced this content at this path", which is
+   exactly what the column means, and a second record would only be a second thing to
+   keep in sync. What the echoes lacked was a way to ask "which of these did the
+   sweep *not* see", so M7b adds the per-generation `seen` marks and the
+   `UnseenEchoes` join over them. The rule, unchanged: **a delete may be inferred
+   only from a baseline, never from absence alone.**
+
+   The remote-present rows needed no new code at all. They are exactly what the pull
+   loop's `apply` already does — echo match ⇒ nothing, identical local bytes ⇒
+   nothing, divergent local ⇒ §6 conflict copy, absent local ⇒ materialise — with the
+   echo serving as the baseline in both. The sweep adds only what it must not
+   materialise (below) and the seen mark.
+
+   **Four guards make the delete rows safe**, and each exists because of a specific
+   way the inference can be wrong:
+
+   1. **Deletes run only after a sweep completes**, and only from that sweep's own
+      generation of marks. "Not seen anywhere" is not knowable per page.
+   2. **The baseline must predate the sweep.** A file created locally *while the
+      sweep ran* has an echo (the uploader recorded it) and no mark (its page was
+      listed before it existed) — it looks exactly like a remote deletion, and
+      deleting it would destroy something the user just made.
+   3. **A local copy that diverged from its baseline is never deleted.** Those bytes
+      are the only remaining version of that work, so it is kept and pushed back
+      instead. A directory is removed only if empty, so a subtree can only disappear
+      one accounted-for file at a time.
+   4. **`-max-deletes` (default 100) caps the whole pass, and exceeding it abandons
+      the pass rather than trimming it.** The shapes that produce a huge count — a
+      state DB reused against a different `-drive-root`, a fresh empty `-data` dir, a
+      mount pointing somewhere new — are ones where the *premise* is broken, not
+      where there are genuinely 4000 deletions. This matters more on the remote side
+      than the local one: `Store.Remove` on Drive is a permanent delete, not a move
+      to the trash.
+
+   The fail-safe direction is the same one M5 and M6 use — when the baseline is
+   missing or ambiguous, keep and materialise rather than delete, because deletion is
+   the irreversible half. One consequence is worth stating as a rule rather than
+   leaving it to fall out of the table: **the first-ever run performs no deletions at
+   all.** Every path is baseline-absent, so remote-only materialises, local-only
+   pushes, and nothing is removed on either side.
+
+   Worth noting what a sweep that *under*-reports costs, since that is the residual
+   risk: in the local direction a re-download (we only delete a local file whose
+   content still matches the baseline, so those bytes exist remotely), and in the
+   remote direction the deletion the user already performed locally. It is the sweep
+   that reports *nothing* which is dangerous, which is why the root-resolution
+   failure above is an error rather than an empty result.
+
+   **The local walk resolves an open question the spec left.** Row 2 ("new locally")
+   needs one — nothing else knows about a file the mount never saw created, whether
+   from an edit made while drivel was down or, in in-place mode, a file dropped into
+   the directory between runs. It ships **on, unflagged**: the walk is local I/O and
+   its only action is a push, which never destroys anything. Two exclusions are
+   load-bearing rather than cosmetic: §6 **conflict copies are skipped**, because
+   they are local-only by policy and uploading them would publish the losing side of
+   every conflict drivel has ever resolved; and **placeholders are skipped**,
+   because a placeholder is remote-born by definition and pushing one is the M5
+   catastrophe.
+
+   **Pushes go through the Engine** (`syncengine.Pusher`, satisfied by `*Engine`),
+   never straight to the store, so a file a sweep discovers takes exactly the path a
+   file written through the mount takes: M5's placeholder guard, M6's gates, echo
+   recording, and the retry policy. A second, subtly different "upload this" is how
+   the guards get skipped.
+
+   **Cursor expiry wires into the same path.** Before M7b, `Downloader.resumeCursor`
+   had no expired-token case: Drive answers a dead page token with 410, the loop
+   logged it and retried at the slow cadence indefinitely, and inbound sync was
+   silently dead. The fix belongs here because the recovery *is* a resync —
+   classified below the seam (`provider.ErrCursorExpired`, following the
+   `ErrNotExist`/`IsRetryable` convention, and covering both the 410 and the
+   malformed-token 400) and answered by taking a fresh token and re-enumerating.
+   That converts a permanently stuck loop into a self-healing one. A provider with no
+   `Enumerator` still recovers, by restarting the feed from "now" and saying in the
+   log what the gap cost.
+
+   **Operationally:** it runs off the FUSE path in the downloader's goroutine, so the
+   mount comes up immediately and stays usable while the sweep proceeds;
+   materialisation is applied per page rather than as one transaction, so an
+   interrupted sweep leaves a partially populated but consistent tree; and it logs
+   pages, objects and elapsed time, because a cost the user cannot see is a cost they
+   will assume is a hang. It runs automatically when there is no cursor (first run),
+   when a sweep was interrupted, or when the cursor is dead, with `-resync` to force
+   it.
+
+   **The other open questions, decided.** Google-native Docs/Sheets/Slides have no
+   `md5Checksum` and no byte size because they have no byte stream — they are
+   exported, not downloaded — so there is no honest apparent size for a placeholder
+   and no digest to compare. They are **reported but not materialised**:
+   `RemoteFile.ExportOnly` says so, the sweep marks them seen (so their absence
+   locally is never read as a deletion) and records **no echo** (recording one would
+   claim we hold content we do not), and the pull loop skips them with a log instead
+   of failing a download on every report. Shared-with-me files stay out of scope by
+   construction: they are not under the My Drive root, so a root-scoped sweep excludes
+   them — a decision, not an accident. Sharding the sweep (list folders first, then
+   fan out) remains unbuilt, because one sequential pagination has not been measured
+   to be too slow and building for that on speculation is how a cheap sweep becomes an
+   expensive one.
+
+   **Not in scope:** dedup, periodic full scans (the cursor feed stays the steady
+   state), and any content transfer in lazy mode.
+9. **M8 — Multi-account & multi-provider mounts.** Two separable pieces:
    - *Multi-account (real, proof-of-concept).* One `drivel` process serving several
      mounts, each with its own credentials, token, state DB, and engine. Requires
      making `gauth` token storage account-scoped rather than one global
@@ -560,7 +864,7 @@ are both lossy and racy.
      second name, mounted alongside the real one. If a Drive-shaped assumption has
      leaked above the seam, two independently-configured Drive stores in one
      process will surface it. No second real backend in this milestone.
-9. **M9 — Plugin architecture.** Let third parties add providers (and eventually
+10. **M9 — Plugin architecture.** Let third parties add providers (and eventually
    mount backends) without forking. The seam already exists — `provider.Store` +
    optional `ChangeSource`/`RangeGetter` — so M9 is about the *loading* mechanism
    and its blast radius, not the interface. Go's `plugin` package is a poor fit
