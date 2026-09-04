@@ -43,6 +43,7 @@ type Downloader struct {
 	dataDir string
 	state   *state.Store
 	cad     Cadence
+	lg      *log.Logger  // nil => the log package's default
 	mat     Materializer // nil => eager mode: apply content immediately
 
 	// Initial enumeration & reconcile (M7b). enum is nil unless the store can
@@ -75,6 +76,23 @@ type Materializer interface {
 func (d *Downloader) Lazy(m Materializer) *Downloader {
 	d.mat = m
 	return d
+}
+
+// Logger sets where this pull loop writes and returns d for chaining. Per
+// downloader for the same reason as the engine: with several mounts running,
+// an unattributed line does not say whose remote changed (M8).
+func (d *Downloader) Logger(lg *log.Logger) *Downloader {
+	d.lg = lg
+	return d
+}
+
+// logf writes one line for this pull loop.
+func (d *Downloader) logf(format string, args ...any) {
+	if d.lg == nil {
+		log.Printf(format, args...)
+		return
+	}
+	d.lg.Printf(format, args...)
 }
 
 // NewDownloader constructs the pull loop. cad zero-values fall back to
@@ -129,14 +147,14 @@ func (d *Downloader) Run(ctx context.Context) {
 					if ctx.Err() != nil {
 						return
 					}
-					log.Printf("[pull] resync after cursor expiry failed: %v", rErr)
+					d.logf("[pull] resync after cursor expiry failed: %v", rErr)
 					wait = d.cad.Slow
 					continue
 				}
 				cursor, wait = fresh, d.cad.Fast
 				continue
 			}
-			log.Printf("[pull] changes: %v", err)
+			d.logf("[pull] changes: %v", err)
 			wait = d.cad.Slow
 			continue
 		}
@@ -152,17 +170,17 @@ func (d *Downloader) Run(ctx context.Context) {
 				if ctx.Err() != nil {
 					return
 				}
-				log.Printf("[pull] apply %s: %v", ch.Path, err)
+				d.logf("[pull] apply %s: %v", ch.Path, err)
 			}
 		}
 		if err := d.flushForget(forget); err != nil {
-			log.Printf("[pull] clearing %d removed record(s): %v", len(forget), err)
+			d.logf("[pull] clearing %d removed record(s): %v", len(forget), err)
 			continue // leave the cursor where it is; the page replays idempotently
 		}
 
 		if next != "" && next != cursor {
 			if err := d.state.SetCursor(next); err != nil {
-				log.Printf("[pull] persist cursor: %v", err)
+				d.logf("[pull] persist cursor: %v", err)
 			}
 			cursor = next
 		}
@@ -198,15 +216,15 @@ func (d *Downloader) start(ctx context.Context) (string, bool) {
 			// A permanent failure must not keep inbound sync hostage. Fall back to
 			// the feed alone: any sweep already recorded stays recorded, so a later
 			// run (or -resync) picks it up where this one stopped.
-			log.Printf("[pull] initial reconcile failed: %v; continuing with the change feed alone", err)
+			d.logf("[pull] initial reconcile failed: %v; continuing with the change feed alone", err)
 			cursor, ferr := d.resumeCursor(ctx)
 			if ferr != nil {
-				log.Printf("[pull] cannot start change feed: %v", ferr)
+				d.logf("[pull] cannot start change feed: %v", ferr)
 				return "", false
 			}
 			return cursor, true
 		}
-		log.Printf("[pull] cannot start change feed (attempt %d): %v", attempt, err)
+		d.logf("[pull] cannot start change feed (attempt %d): %v", attempt, err)
 		select {
 		case <-ctx.Done():
 			return "", false
@@ -269,7 +287,7 @@ func (d *Downloader) applyTo(ctx context.Context, ch provider.RemoteChange, forg
 		if err := os.RemoveAll(dst); err != nil {
 			return err
 		}
-		log.Printf("[pull] delete  %s", ch.Path)
+		d.logf("[pull] delete  %s", ch.Path)
 		forget[ch.Path] = struct{}{}
 		return nil
 	}
@@ -285,7 +303,7 @@ func (d *Downloader) applyTo(ctx context.Context, ch provider.RemoteChange, forg
 	// not a byte count and it has no checksum. There is nothing to place locally,
 	// so say so once instead of failing a download on every report of it.
 	if f.ExportOnly {
-		log.Printf("[pull] skip    %s (Google-native document; no downloadable content)", ch.Path)
+		d.logf("[pull] skip    %s (Google-native document; no downloadable content)", ch.Path)
 		return nil
 	}
 
@@ -304,7 +322,7 @@ func (d *Downloader) applyTo(ctx context.Context, ch provider.RemoteChange, forg
 		if err := os.MkdirAll(dst, 0o755); err != nil {
 			return err
 		}
-		log.Printf("[pull] mkdir   %s", ch.Path)
+		d.logf("[pull] mkdir   %s", ch.Path)
 		return d.rememberApplied(ch.Path, f)
 	}
 
@@ -317,7 +335,7 @@ func (d *Downloader) applyTo(ctx context.Context, ch provider.RemoteChange, forg
 		if err := d.mat.CreatePlaceholder(ch.Path, *f); err != nil {
 			return err
 		}
-		log.Printf("[pull] restamp %s (placeholder, %d bytes pending)", ch.Path, f.Size)
+		d.logf("[pull] restamp %s (placeholder, %d bytes pending)", ch.Path, f.Size)
 		return d.rememberApplied(ch.Path, f)
 	}
 
@@ -367,13 +385,13 @@ func (d *Downloader) materialize(ctx context.Context, rel, dst string, f *provid
 		if err := d.download(ctx, rel, dst, f.Modified); err != nil {
 			return err
 		}
-		log.Printf("[pull] download %s", rel)
+		d.logf("[pull] download %s", rel)
 		return nil
 	}
 	if err := d.mat.CreatePlaceholder(rel, *f); err != nil {
 		return err
 	}
-	log.Printf("[pull] placeholder %s (%d bytes, hydrates on read)", rel, f.Size)
+	d.logf("[pull] placeholder %s (%d bytes, hydrates on read)", rel, f.Size)
 	return nil
 }
 
@@ -400,7 +418,7 @@ func (d *Downloader) resolveConflict(ctx context.Context, rel, dst string, f *pr
 		if err := d.materialize(ctx, rel, dst, f); err != nil {
 			return err
 		}
-		log.Printf("[pull] conflict %s: remote newer, local kept as %s", rel, copyRel)
+		d.logf("[pull] conflict %s: remote newer, local kept as %s", rel, copyRel)
 		return d.rememberApplied(rel, f)
 	}
 
@@ -413,7 +431,7 @@ func (d *Downloader) resolveConflict(ctx context.Context, rel, dst string, f *pr
 	if err := d.download(ctx, rel, copyDst, f.Modified); err != nil {
 		return err
 	}
-	log.Printf("[pull] conflict %s: local newer, remote saved as %s", rel, copyRel)
+	d.logf("[pull] conflict %s: local newer, remote saved as %s", rel, copyRel)
 	return nil
 }
 

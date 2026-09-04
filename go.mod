@@ -3,6 +3,7 @@ module github.com/zishmusic/drivel
 go 1.27.1
 
 require (
+	github.com/BurntSushi/toml v1.6.0
 	github.com/hanwen/go-fuse/v2 v2.10.1
 	github.com/quic-go/quic-go v0.60.0
 	go.etcd.io/bbolt v1.5.0

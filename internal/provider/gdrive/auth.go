@@ -21,7 +21,7 @@ import (
 //
 // It is non-interactive: it requires an already-cached token (created by
 // `drivel login`). This keeps `drivel mount` from unexpectedly blocking on stdin.
-func buildHTTPClient(ctx context.Context, credentialsPath, tokenPath string) (*http.Client, func() error, error) {
+func buildHTTPClient(ctx context.Context, credentialsPath, tokenPath, scope string) (*http.Client, func() error, error) {
 	creds, err := gauth.LoadCredentials(credentialsPath)
 	if err != nil {
 		return nil, nil, fmt.Errorf("reading credentials: %w", err)
@@ -36,7 +36,10 @@ func buildHTTPClient(ctx context.Context, credentialsPath, tokenPath string) (*h
 	base, closer := transport.New()
 	ctx = context.WithValue(ctx, oauth2.HTTPClient, base)
 
-	config := creds.Config("", gauth.ScopeDrive)
+	if scope == "" {
+		scope = gauth.ScopeDrive
+	}
+	config := creds.Config("", scope)
 	client := &http.Client{
 		Transport: &oauth2.Transport{
 			Source: config.TokenSource(ctx, tok),

@@ -90,6 +90,11 @@ type Drive struct {
 	close func() error // shuts down the HTTP/3 transport
 	root  string       // Drive folder ID mapped to the mount root ("" => My Drive root)
 
+	// lg is where this instance writes. Per instance rather than the package
+	// default because one process may hold several Drives, and a line that does
+	// not say which mount it came from is close to useless (M8).
+	lg *log.Logger
+
 	mu       sync.Mutex
 	rootID   string            // concrete ID of root, which may be the "root" alias
 	idByPath map[string]string // root-relative slash path -> fileID ("" => root)
@@ -135,23 +140,44 @@ var (
 // patch — see the range-write tests in internal/syncengine.
 
 // Config is what a Drive provider needs to open.
+// The struct tags are what a `[mount.provider]` table in drivel's config file
+// decodes into (M8). They exist because this IS the provider's configuration —
+// the same reason a type carries json tags — and naming the keys explicitly beats
+// the decoder's default case-insensitive field matching, which would spell
+// RootID as "rootid".
 type Config struct {
 	// Credentials is the desktop OAuth client secret JSON.
-	Credentials string
+	Credentials string `toml:"credentials"`
 	// Token caches the user token across runs (written by `drivel login`).
-	Token string
+	Token string `toml:"token"`
 	// RootID is the Drive folder ID mapped to the mount root ("" or "root" => My
 	// Drive root).
-	RootID string
+	RootID string `toml:"root"`
 	// IndexPath is where the persistent path↔fileID index lives (M7). Empty
 	// disables persistence, which costs API round trips and nothing else. It must
 	// not sit inside the backing tree, or it would sync itself to Drive.
-	IndexPath string
+	IndexPath string `toml:"index"`
+	// Scope is the OAuth scope the token was granted, as `drivel login` recorded
+	// it. Empty means gauth.ScopeDrive.
+	//
+	// It matters little to a refresh — the refresh token carries the scopes the
+	// user actually consented to, whatever we ask for — but asking for a scope the
+	// user declined is a lie in the one place a reader would go to find out what
+	// this mount can do. A read-only account should say so.
+	Scope string `toml:"scope"`
 }
 
-// Open authenticates and returns a Drive provider.
+// Open authenticates and returns a Drive provider that logs to the default
+// logger. Callers that own a per-mount logger go through Factory instead.
 func Open(ctx context.Context, cfg Config) (*Drive, error) {
-	client, closer, err := buildHTTPClient(ctx, cfg.Credentials, cfg.Token)
+	return open(ctx, cfg, nil)
+}
+
+func open(ctx context.Context, cfg Config, lg *log.Logger) (*Drive, error) {
+	if lg == nil {
+		lg = log.Default()
+	}
+	client, closer, err := buildHTTPClient(ctx, cfg.Credentials, cfg.Token, cfg.Scope)
 	if err != nil {
 		return nil, err
 	}
@@ -163,6 +189,7 @@ func Open(ctx context.Context, cfg Config) (*Drive, error) {
 	d := &Drive{
 		svc:      svc,
 		close:    closer,
+		lg:       lg,
 		root:     cfg.RootID,
 		idByPath: map[string]string{"": cfg.RootID},
 		pathByID: map[string]string{cfg.RootID: ""},
@@ -173,7 +200,7 @@ func Open(ctx context.Context, cfg Config) (*Drive, error) {
 		// and run from memory, exactly as M2-M6 did.
 		idx, err := pathindex.Open(cfg.IndexPath)
 		if err != nil {
-			log.Printf("[drive] path index: disabled: %v", err)
+			lg.Printf("[drive] path index: disabled: %v", err)
 		} else {
 			d.idx = idx
 		}
@@ -498,4 +525,14 @@ func isNotFound(err error) bool {
 		return ae.Code == 404
 	}
 	return false
+}
+
+// logf writes one line for this Drive instance. The nil check keeps a
+// zero-valued Drive (which the tests build directly) usable.
+func (d *Drive) logf(format string, args ...any) {
+	if d.lg == nil {
+		log.Printf(format, args...)
+		return
+	}
+	d.lg.Printf(format, args...)
 }

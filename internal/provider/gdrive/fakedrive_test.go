@@ -40,6 +40,10 @@ type fakeDrive struct {
 	// expirePageTokens makes the next paginated request answer 410, as Drive does
 	// for a listing or change token that has aged out.
 	expirePageTokens bool
+
+	// permID is what about.get reports. Two fakes in one test give different
+	// answers, which is how the persistent index tells the accounts apart (M7).
+	permID string
 }
 
 // rootID is the concrete ID of My Drive, which is what a file's parents actually
@@ -55,7 +59,7 @@ var (
 
 func newFakeDrive(t *testing.T, files ...*drive.File) (*Drive, *fakeDrive) {
 	t.Helper()
-	f := &fakeDrive{files: map[string]*drive.File{
+	f := &fakeDrive{permID: "perm-1", files: map[string]*drive.File{
 		fakeRootID: {Id: fakeRootID, Name: "My Drive", MimeType: folderMIME},
 	}}
 	for _, file := range files {
@@ -117,7 +121,7 @@ func (f *fakeDrive) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	switch {
 	case r.URL.Path == "/about":
-		writeJSON(w, map[string]any{"user": map[string]string{"permissionId": "perm-1"}})
+		writeJSON(w, map[string]any{"user": map[string]string{"permissionId": f.permID}})
 
 	case r.URL.Path == "/changes" && r.Method == http.MethodGet:
 		if f.expirePageTokens {

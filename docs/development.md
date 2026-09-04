@@ -20,7 +20,8 @@ dependency graph.
   `OpRename`.
 - **`context.Context` is threaded for cancellation/shutdown.** SIGINT/SIGTERM
   unmounts, which makes `server.Wait()` return; the engine then drains on a
-  background context (see `cmd/drivel/mount.go`).
+  background context (see `internal/app/mount.go`). With several mounts each runs
+  that sequence itself — `App` waits for them, it does not replace it.
 - **In-place mode's cardinal rule:** never touch the backing store by the
   *mountpoint* path — only via `backing.Path` (the `/proc/self/fd/N` handle) — or
   reads/writes recurse into the FUSE handler and deadlock. See DESIGN.md §2.7.
@@ -363,14 +364,39 @@ not really change. Getting the encoding subtly wrong is harmless in the dangerou
 direction — hashes simply never match and every push proceeds — but you lose the
 optimisation, so it is worth a test against a real round-trip.
 
-### 4. Wire it into the CLI
+### 4. Register it
 
-Backend selection currently lives in [cmd/drivel/mount.go](../cmd/drivel/mount.go),
-where `gdrive.Open(...)` constructs the store and assigns it to a
-`provider.Store`. Add your constructor alongside it behind a flag (e.g. a
-`-provider` selector or a provider-specific credentials flag). Everything
-downstream — `syncengine.New`, the `ChangeSource` type assertion, the downloader —
-is already provider-agnostic and needs no changes.
+Since M8 backends are selected by name through a `provider.Registry`, so wiring one
+in is a `Factory` plus one line of registration.
+
+```go
+// internal/provider/<name>/factory.go
+func Factory(ctx context.Context, p provider.Params) (provider.Store, error) {
+    var cfg Config                    // your own struct, with toml tags
+    if err := p.Decode(&cfg); err != nil {
+        return nil, err
+    }
+    return Open(ctx, cfg, p.Log)      // return the untyped nil on error, not a
+}                                     // typed nil inside a non-nil interface
+```
+
+```go
+// cmd/drivel/mount.go
+_ = reg.Register("<name>", yourpkg.Factory)
+```
+
+Your config struct is decoded straight from the account's table in the config file,
+so a user selects the backend with `provider = "<name>"` and configures it with
+whatever keys you defined. Nothing in `internal/config` or `internal/app` learns
+what those keys mean, and neither needs changing.
+
+Registration is deliberately by hand rather than by `init()`: an explicit registry
+keeps the tree free of process-global mutable state, and it is what lets a test
+register the same factory twice to check that two independently-configured stores
+really are independent.
+
+Everything downstream — `syncengine.New`, the `ChangeSource` type assertion, the
+downloader — is already provider-agnostic.
 
 ### 5. Test it offline
 
@@ -389,7 +415,8 @@ coverage.
 - [ ] `ChangeSource` implemented **iff** the provider has a native cursor feed.
 - [ ] `RangeGetter` implemented **iff** the provider serves real byte ranges.
 - [ ] Store is safe for concurrent use.
-- [ ] Wired into `cmd/drivel/mount.go` behind a flag; nothing else changed.
+- [ ] A `Factory` registered in `cmd/drivel/mount.go`; nothing else changed.
+- [ ] Config struct carries `toml` tags and errors on keys it does not define.
 - [ ] Offline unit tests for translation + error classification.
 - [ ] `go build ./...`, `go vet ./...`, `go test ./...` clean.
 

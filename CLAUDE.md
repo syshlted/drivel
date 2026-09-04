@@ -20,14 +20,21 @@ bidirectional sync — don't regress it.
 
 ## Layout
 
-- `cmd/drivel` — entrypoint; flag parsing, mount, signal-based unmount.
+- `cmd/drivel` — entrypoint; flag parsing, the flag→spec mapping, signal context.
+- `internal/app` — the composition root below `main` (M8): `Mount` (Open/Run/Close
+  for one mount) and `App` (N of them, with the cross-mount guards in
+  `validate.go`). Provider-agnostic; it names a provider *kind*, never a type.
+- `internal/config` — the TOML config file (M8): accounts, mounts, XDG paths, and
+  the append-only account writer `drivel login` uses. Knows no provider.
 - `internal/fsevent` — backend-neutral change `Event`/`Op` types (shared by any
   mount backend and the sync engine).
 - `internal/mount` — the mount-backend seam: `Backend` interface + `Options`, and
   `ResolveBacking` (separate-dir vs in-place). Platform bits in `backing_*.go`.
 - `internal/vfs` — the go-fuse mount backend: loopback that proxies to the backing
   store and emits an `fsevent.Event` per mutation. Reads/lookups/attrs pass through.
-- `internal/provider` — cloud-backend interface (the seam). Drive impl is M2.
+- `internal/provider` — cloud-backend interface (the seam). Drive impl is M2. M8
+  adds the `Registry` (kind → `Factory`), an explicit value rather than an
+  `init()`-filled package map.
 - `internal/provider/gdrive` — Google Drive impl of the interface.
 - `internal/gauth` — Google OAuth: credentials.json/token.json I/O and the
   interactive login flow (loopback redirect + manual paste, rclone-style).
@@ -64,8 +71,12 @@ bidirectional sync — don't regress it.
 
 `drivel` has two subcommands (`mount` is the default, so `drivel -mount … -data …`
 still works): `drivel login` (interactive OAuth wizard → credentials.json +
-token.json) and `drivel mount`. `mount` is **non-interactive**: it requires a
-token from `login` and never prompts on stdin. The login loopback server uses
+token.json) and `drivel mount`. From M8 both are account-aware: `drivel login
+-account NAME` scopes credentials to `$XDG_CONFIG_HOME/drivel/NAME` and appends
+`[account.NAME]` to the config file, and `drivel mount` with no flags reads
+`$XDG_CONFIG_HOME/drivel/config.toml` and serves every `[[mount]]` in it.
+`mount` is **non-interactive**: it requires a token from `login` and never
+prompts on stdin. The login loopback server uses
 rclone's port **53682**; forward it into the container for auto-capture, else use
 the paste fallback. When adding stdin prompts, share ONE bufio reader — multiple
 readers on os.Stdin race and swallow buffered lines.
@@ -75,6 +86,11 @@ mode only — download remote files that have no local copy; `-lazy` always
 materialises, as placeholders), `-max-deletes N` (cap on reconcile-inferred
 deletions, default 100, 0 = unlimited), `-sweep-interval D` (re-enumerate this
 often, default 24h, 0 disables).
+
+M8 adds `-config FILE` to `mount` and `-account NAME` / `-config FILE` to `login`.
+`-config` cannot be combined with any flag describing *what* to mount — that would
+need a precedence rule nobody would remember — but `-debug` composes. Flags without
+`-config` synthesize a one-entry config, so there is one code path below them.
 
 ## Milestones
 
@@ -92,18 +108,20 @@ See "Path resolution" below. M7b initial enumeration & reconcile **shipped**: th
 sweep runs automatically on a first run, a resumed sweep or a dead cursor, with
 `-resync` to force it. See "Enumeration & reconcile" below.
 
-**v2, planned** (DESIGN.md §9 has the detail). **M8** multi-account (real) +
-multi-provider (framework only; proven with a pseudo-provider that is `gdrive`
-registered under a second name) · **M9** plugin architecture (out-of-process or
-WASM; Go's `plugin` package is a poor fit).
+M8 multi-account & multi-provider **shipped**: N mounts per process from a TOML
+config, a provider registry, account-scoped login. See "Multi-account" below.
+
+**v2, planned** (DESIGN.md §9 has the detail). **M9** plugin architecture
+(out-of-process or WASM; Go's `plugin` package is a poor fit). M8 discharged its
+precondition: the §2.5 seam holds under two independently-configured stores in one
+process.
 
 **M0 — Test & CI** is a cross-cutting, always-open track (DESIGN.md §9), not a
-numbered milestone. Every package but `cmd/drivel` and `fsevent` has tests, green
-under `-race`. CI enforces that on every push, together with `golangci-lint` and
-`govulncheck`; every gate is a `make` target that the git hooks and the workflow
-both call, so "passed locally" and "passed in CI" cannot drift apart. Open:
-`cmd/drivel` untested · property tests for `ranges` · one end-to-end
-mount→push→pull→reconcile test · `gauth` at 18%.
+numbered milestone. Every package but `fsevent` has tests, green under `-race`. CI
+enforces that on every push, together with `golangci-lint` and `govulncheck`; every
+gate is a `make` target that the git hooks and the workflow both call, so "passed
+locally" and "passed in CI" cannot drift apart. M8 closed the `cmd/drivel` and
+end-to-end items. Open: property tests for `ranges` · `gauth` at 18% · `fsevent`.
 
 DESIGN.md §10 is a design note on carrying POSIX metadata (mode, ACLs, xattrs,
 SELinux) over Drive — unscheduled. If you touch it, the rule is that permission
@@ -290,6 +308,52 @@ seen (so their absence is never read as a delete) but **never materialised and
 never given an echo** — they have no byte stream, so there is no honest size for a
 placeholder and no digest to compare. Cursor expiry (`provider.ErrCursorExpired`,
 Drive's 410) recovers through this same path: fresh token, then a sweep.
+
+## Multi-account & multi-provider (M8)
+
+One process, N mounts, each with its own credentials, state DB, index and engine.
+Everything below the wiring was already per-instance, so the milestone is about
+composition — and about the ways several mounts can corrupt each other.
+
+1. **The three-phase lifecycle is not cosmetic.** `app.Open` acquires, `Run` serves
+   then drains, `Close` releases. That split is what lets a process that fails to
+   bring up mount 3 of 5 unmount and drain the two that came up. Inside `Run` the
+   per-mount ordering is unchanged and still load-bearing: unmount → `close(events)`
+   → wait for the engine's bounded drain, engine on a **detached context**. `App`
+   aggregates around that; it must never collapse it into one cancellation. (gosec
+   flags the detached context — the waiver is deliberate, not an oversight.)
+2. **`app.Validate` runs before anything opens, on the flag path too.** Each guard
+   exists because the failure is otherwise a deadlock, an opaque five-second bbolt
+   timeout, or a file synced to the wrong account: shared state DB (each engine
+   reads the other's echoes as its own baseline — which is also M7b's *delete*
+   baseline), either direction of backing-tree/mountpoint overlap (§2.7's cardinal
+   rule, generalised), shared mountpoints, duplicate names, and **a state DB inside
+   a backing tree** — the one that needed no second mount to be wrong, since the DB
+   syncs itself and its own writes generate more events.
+3. **The registry is a value, not a package-global.** No `init()` registration, no
+   import for side effect. It would be the only process-global mutable state in the
+   tree, in the milestone whose premise is that there isn't any — and the explicit
+   form is what lets a test register `gdrive` twice and run two Drive stores at
+   once, which is M8's seam proof. **The pseudo-provider is test-only and stays
+   that way**; nothing shipped registers a duplicate.
+4. **Provider config crosses the seam undecoded** (`provider.Params.Decode` fills a
+   provider-defined struct). `internal/config` must never learn what a Drive folder
+   ID is. Adding a provider touches neither package.
+5. **The config file is only ever appended to, never re-serialized.** TOML was
+   chosen for comments; any encoder round trip drops them all. `login` prints an
+   existing account for the user to reconcile rather than replacing it.
+6. Unknown config keys are an **error** — `lazzy = true` doing nothing is the same
+   failure as a flag that stopped being read. Free-form regions (an account's
+   provider settings, `[mount.provider]`) are exempt because that is their purpose.
+   `max-deletes`/`sweep-interval` are pointers so an explicit `0` survives; merging
+   it with "unset" would silently uncap M7b's delete guard.
+7. Inside a provider table a value is path-expanded **only when written like a
+   path** (`~/`, `./`, `../`). This layer cannot know which keys name files, and
+   rewriting a Drive folder ID would be silent corruption. `login` writes absolute
+   paths so the common case never relies on it.
+8. **Logging is per mount** and a single mount stays unprefixed, so its output is
+   byte for byte what it was pre-M8. New log calls belong on `e.logf`/`d.logf`/
+   `d.logf`/`n.logf`, never `log.Printf`.
 
 ## Transport
 

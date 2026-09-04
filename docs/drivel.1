@@ -1,6 +1,6 @@
 .\" Manpage for drivel.
 .\" Render with:  man ./docs/drivel.1     or     mandoc -a docs/drivel.1
-.TH DRIVEL 1 "2026-07-22" "drivel" "User Commands"
+.TH DRIVEL 1 "2026-09-04" "drivel" "User Commands"
 .SH NAME
 drivel \- Drive-backed FUSE interceptor filesystem
 .SH SYNOPSIS
@@ -9,6 +9,10 @@ drivel \- Drive-backed FUSE interceptor filesystem
 .RI [ flags ]
 .br
 .B drivel login
+.RB [ -account
+.IR name ]
+.RB [ -config
+.IR file ]
 .RB [ -credentials
 .IR file ]
 .RB [ -token
@@ -24,6 +28,10 @@ drivel \- Drive-backed FUSE interceptor filesystem
 .RB [ -port
 .IR n ]
 .RB [ -open ]
+.br
+.B drivel mount
+.RB [ -config
+.IR file ]
 .br
 .B drivel mount
 .B -mount
@@ -45,6 +53,8 @@ drivel \- Drive-backed FUSE interceptor filesystem
 .RB [ -materialize ]
 .RB [ -max-deletes
 .IR n ]
+.RB [ -sweep-interval
+.IR d ]
 .RB [ -debug ]
 .SH DESCRIPTION
 .B drivel
@@ -94,8 +104,31 @@ and never prompts on stdin. This is the default command, so
 Print top-level usage.
 .SH MOUNT OPTIONS
 .TP
+.BI -config " file"
+TOML file describing one or more mounts; see
+.BR CONFIGURATION .
+When neither
+.B -config
+nor
+.B -mount
+is given,
+.B drivel
+reads
+.I $XDG_CONFIG_HOME/drivel/config.toml
+if it exists, so
+.B "drivel mount"
+on its own serves everything configured.
+.IP
+It cannot be combined with any flag that describes
+.I what
+to mount \(em that would require a precedence rule between the two \(em though
+.B -debug
+composes with it.
+.TP
 .BI -mount " dir"
-Path to mount the filesystem. Required. Created if missing.
+Path to mount the filesystem. Required unless
+.B -config
+is used. Created if missing.
 .TP
 .BI -data " dir"
 Backing directory used as the source of truth. If omitted,
@@ -200,9 +233,44 @@ a fresh empty backing directory, a mount pointing somewhere new. Note that remov
 a remote object uses the provider's delete, which on Drive is permanent rather than
 a move to the trash.
 .TP
+.BI -sweep-interval " d"
+Re-enumerate and reconcile the remote tree this often, timed from the last
+.I completed
+sweep rather than from process start. Default:
+.BR 24h ;
+.B 0
+disables it.
+.IP
+The change feed only reports what happens while
+.B drivel
+is watching, so anything that happened while it was not running stays
+unreconciled until something enumerates the tree again. Without a periodic sweep
+that means a first run, a resumed sweep, an expired cursor or
+.BR -resync ,
+which for a long-lived mount can be never.
+.TP
 .B -debug
 Enable FUSE debug logging.
 .SH LOGIN OPTIONS
+.TP
+.BI -account " name"
+Store this login as a named account: its credentials and token go in
+.IR $XDG_CONFIG_HOME/drivel/name ,
+created mode 0700, and
+.BI [account. name ]
+is appended to the config file.
+.IP
+Without it,
+.B drivel login
+behaves as it always has and writes to the current directory. With several
+accounts a shared token file is not a limitation but a hazard: each login would
+silently overwrite the previous one's credentials.
+.TP
+.BI -config " file"
+Config file to add the account to. Default:
+.IR $XDG_CONFIG_HOME/drivel/config.toml .
+Only ever appended to \(em an account that is already defined is printed for you
+to reconcile by hand rather than rewritten, so comments and layout survive.
 .TP
 .BI -credentials " file"
 Path to read/write the OAuth client-secret JSON. Default:
@@ -240,6 +308,73 @@ picks a free port automatically. Default:
 .B -open
 Attempt to open the authorization URL with the operating system's browser
 handler.
+.SH CONFIGURATION
+.PP
+The config file describes any number of mounts, which one
+.B drivel
+process serves together. A single mount needs nothing beyond its flags; the file
+is what you graduate to when one stops being enough.
+.PP
+An
+.I account
+is a set of credentials \(em a provider kind plus that provider's settings. A
+.I mount
+references an account and says what to mount from it. Their provider settings are
+merged, with the mount's winning, so one account can be mounted more than once
+with different roots.
+.PP
+.RS
+.EX
+[account.personal]
+provider    = "gdrive"
+credentials = "/home/you/.config/drivel/personal/credentials.json"
+token       = "/home/you/.config/drivel/personal/token.json"
+
+[[mount]]
+account = "personal"
+path    = "~/drive-personal"
+data    = "~/.cache/drivel/personal"
+lazy    = true
+
+[mount.provider]
+root = "root"
+.EE
+.RE
+.PP
+Mount keys mirror the flags:
+.IR name ,
+.IR account ,
+.IR path ,
+.IR data ,
+.IR state ,
+.IR lazy ,
+.IR debug ,
+.IR resync ,
+.IR materialize ,
+.I max-deletes
+and
+.IR sweep-interval .
+An unrecognised key is an error rather than a silent no-op. Relative paths resolve
+against the config file's own directory, so a config directory can be moved or
+kept in a dotfiles repository. Within a
+.B [mount.provider]
+or account table, a value is treated as a path only when written like one \(em
+beginning
+.RI \(dq ~/ \(dq,
+.RI \(dq ./ \(dq
+or
+.RI \(dq ../ \(dq
+\(em since a folder ID is a string too.
+.PP
+Mounts are validated against each other before any of them is opened, because
+several mounts can damage each other in ways one cannot. Two mounts may not share
+a sync-state database (each engine would read the other's echo records as its own
+baseline, which is also what reconcile infers deletions from), a mountpoint, or a
+name; a backing directory may not sit inside another mount's mountpoint, or its
+reads would be routed back through
+.BR drivel ;
+and a state database may not sit inside any backing tree, or it would sync itself
+to the cloud and its own writes would generate the events causing more.
 .SH IN-PLACE MODE
 Omitting
 .I -data
@@ -280,6 +415,32 @@ drains its bounded queue of in-flight uploads before the process exits. A second
 .B Ctrl-C
 forces an immediate exit.
 .SH FILES
+.TP
+.I $XDG_CONFIG_HOME/drivel/config.toml
+Mount and account configuration; see
+.BR CONFIGURATION .
+Read when
+.B drivel mount
+is given neither
+.B -config
+nor
+.BR -mount .
+Defaults to
+.I ~/.config/drivel/config.toml
+when
+.I $XDG_CONFIG_HOME
+is unset.
+.TP
+.I $XDG_CONFIG_HOME/drivel/<account>/
+Per-account credentials and token, created mode 0700 by
+.BR "drivel login -account" .
+.TP
+.I $XDG_STATE_HOME/drivel/<name>/state.db
+Default sync-state database for a configured mount, one per mount. Defaults under
+.I ~/.local/state
+when
+.I $XDG_STATE_HOME
+is unset.
 .TP
 .I credentials.json
 OAuth client secret (client ID/secret). Treat as a secret; do not commit.
@@ -325,6 +486,17 @@ Mount with Google Drive sync:
 .EX
 drivel mount -mount ./mnt -data ./data \e
     -credentials credentials.json -token token.json -drive-root <folderID>
+.EE
+.RE
+.PP
+Set up two accounts and serve both from one process:
+.PP
+.RS
+.EX
+drivel login \-account personal
+drivel login \-account work
+$EDITOR ~/.config/drivel/config.toml   # add a [[mount]] for each
+drivel mount
 .EE
 .RE
 .SH EXIT STATUS

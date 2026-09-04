@@ -21,7 +21,7 @@ func (backend) Name() string { return "go-fuse" }
 // Serve mounts the loopback filesystem and blocks until ctx is cancelled, which
 // triggers an unmount and makes the server's Wait return.
 func (backend) Serve(ctx context.Context, opts mount.Options) error {
-	root, err := NewRoot(opts.Backing, opts.Events, opts.Hydrator)
+	root, err := NewRoot(opts.Backing, opts.Events, opts.Hydrator, opts.Logger)
 	if err != nil {
 		return fmt.Errorf("building root from %s: %w", opts.Backing, err)
 	}

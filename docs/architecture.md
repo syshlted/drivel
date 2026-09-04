@@ -98,11 +98,13 @@ core provider- and FUSE-agnostic.
 
 ```mermaid
 flowchart TD
-    main["cmd/drivel<br/>flags · wiring · signals"]
+    main["cmd/drivel<br/>flags · signals"]
+    app["internal/app<br/>Mount lifecycle · N mounts · guards"]
+    config["internal/config<br/>TOML: accounts + mounts"]
 
     subgraph seams["Seams (interfaces)"]
         mount["internal/mount<br/>Backend · ResolveBacking"]
-        provider["internal/provider<br/>Store · ChangeSource<br/>RangeGetter · RangePutter"]
+        provider["internal/provider<br/>Store · ChangeSource<br/>RangeGetter · RangePutter<br/>Registry · Factory"]
         fsevent["internal/fsevent<br/>Event · Op"]
     end
 
@@ -116,14 +118,23 @@ flowchart TD
     gauth["internal/gauth<br/>OAuth login + token I/O"]
     transport["internal/transport<br/>HTTP/3 → HTTP/2"]
 
-    main --> mount
+    main --> app
+    main --> config
     main --> provider
     main --> gdrive
     main --> syncengine
-    main --> state
-    main --> vfs
-    main --> fsevent
-    main --> hydrate
+    main --> gauth
+
+    config --> app
+    config --> syncengine
+
+    app --> mount
+    app --> provider
+    app --> syncengine
+    app --> state
+    app --> vfs
+    app --> fsevent
+    app --> hydrate
 
     vfs --> mount
     vfs --> fsevent

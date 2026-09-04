@@ -3,13 +3,16 @@ package main
 import (
 	"bufio"
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 
+	"github.com/zishmusic/drivel/internal/config"
 	"github.com/zishmusic/drivel/internal/gauth"
 )
 
@@ -18,6 +21,8 @@ import (
 // credentials.json, runs the loopback/paste login flow, and caches the token.
 func runLogin(args []string) error {
 	fs := flag.NewFlagSet("login", flag.ExitOnError)
+	account := fs.String("account", "", "name this login as an account: store its files under $XDG_CONFIG_HOME/drivel/NAME and add [account.NAME] to the config file")
+	configPath := fs.String("config", "", "config file to add the account to (default: $XDG_CONFIG_HOME/drivel/config.toml)")
 	credPath := fs.String("credentials", "credentials.json", "path to read/write the OAuth client secret JSON")
 	tokenPath := fs.String("token", "token.json", "path to write the OAuth token")
 	clientID := fs.String("client-id", "", "OAuth client ID (else read from -credentials or prompted)")
@@ -27,6 +32,32 @@ func runLogin(args []string) error {
 	port := fs.Int("port", gauth.DefaultLoopbackPort, "loopback port for the OAuth redirect (0 = auto)")
 	openBrowser := fs.Bool("open", false, "attempt to open the auth URL with the OS browser handler")
 	_ = fs.Parse(args)
+
+	given := map[string]bool{}
+	fs.Visit(func(f *flag.Flag) { given[f.Name] = true })
+
+	// An account keeps its secrets in a directory of its own. One shared
+	// token.json is not a degraded multi-account experience — it is each login
+	// silently overwriting the previous one's credentials.
+	if *account != "" {
+		if err := config.ValidName(*account); err != nil {
+			return fmt.Errorf("-account: %w", err)
+		}
+		dir, err := config.AccountDir(*account)
+		if err != nil {
+			return err
+		}
+		// 0700: this directory holds a client secret and a refresh token.
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			return fmt.Errorf("creating %s: %w", dir, err)
+		}
+		if !given["credentials"] {
+			*credPath = filepath.Join(dir, "credentials.json")
+		}
+		if !given["token"] {
+			*tokenPath = filepath.Join(dir, "token.json")
+		}
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -70,9 +101,76 @@ func runLogin(args []string) error {
 	if driveRoot == "" {
 		driveRoot = "root"
 	}
-	fmt.Printf("\nDone. Mount with:\n\n  drivel mount -mount ./mnt -data ./data \\\n    -credentials %s -token %s -drive-root %s\n\n",
-		*credPath, *tokenPath, driveRoot)
+	if *account == "" {
+		fmt.Printf("\nDone. Mount with:\n\n  drivel mount -mount ./mnt -data ./data \\\n    -credentials %s -token %s -drive-root %s\n\n",
+			*credPath, *tokenPath, driveRoot)
+		return nil
+	}
+	return recordAccount(*configPath, *account, *credPath, *tokenPath, scope, driveRoot)
+}
+
+// recordAccount adds the account to the config file and shows the mount block to
+// go with it.
+//
+// It appends and never rewrites: the config file is hand-edited and commented,
+// and a round trip through a TOML encoder would drop every comment in it. An
+// account that already exists is therefore printed rather than replaced — the
+// credentials on disk have been refreshed either way, which is the part that
+// actually needed doing.
+func recordAccount(configPath, name, credPath, tokenPath, scope, driveRoot string) error {
+	if configPath == "" {
+		p, err := config.DefaultPath()
+		if err != nil {
+			return err
+		}
+		configPath = p
+	}
+	settings := []config.Setting{
+		{Key: "provider", Value: driveKind},
+		{Key: "credentials", Value: absOr(credPath)},
+		{Key: "token", Value: absOr(tokenPath)},
+		{Key: "scope", Value: scope},
+	}
+
+	err := config.AppendAccount(configPath, name, settings)
+	switch {
+	case errors.Is(err, config.ErrAccountExists):
+		fmt.Printf("\n%s already defines [account.%s]; the credentials on disk are updated either way.\nIf anything below differs, change it by hand:\n\n%s\n",
+			configPath, name, indent(config.AccountBlock(name, settings)))
+	case err != nil:
+		return err
+	default:
+		fmt.Printf("\nAdded [account.%s] to %s\n", name, configPath)
+	}
+
+	mount := fmt.Sprintf("[[mount]]\naccount = %q\npath    = \"~/drive-%s\"\ndata    = \"~/.cache/drivel/%s\"\n\n[mount.provider]\nroot = %q\n",
+		name, name, name, driveRoot)
+	fmt.Printf("\nAdd a mount for it:\n\n%s\nThen run: drivel mount\n\n", indent(mount))
 	return nil
+}
+
+// absOr makes a path absolute, since the config file resolves relative paths
+// against its own directory rather than the one login happened to run in.
+func absOr(p string) string {
+	a, err := filepath.Abs(p)
+	if err != nil {
+		return p
+	}
+	return a
+}
+
+// indent shifts a block two spaces right so it reads as output rather than as
+// something already in the file.
+func indent(s string) string {
+	var b strings.Builder
+	for _, line := range strings.Split(strings.TrimRight(s, "\n"), "\n") {
+		if line == "" {
+			b.WriteString("\n")
+			continue
+		}
+		b.WriteString("  " + line + "\n")
+	}
+	return b.String()
 }
 
 // resolveCredentials fills the client id/secret from flags, then an existing

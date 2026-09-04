@@ -286,6 +286,101 @@ go-fuse loopback work unchanged. macOS/FreeBSD have no procfs, so in-place there
 would need a fd-relative loopback using the `*at` syscall family (`openat`,
 `renameat`, …) — future work; in-place is Linux-only for now.
 
+### 2.8 Configuration, the provider registry, and N mounts per process (M8)
+
+Everything above is per-instance by construction: `gdrive.Open`, `state.Open`,
+`pathindex.Open`, `syncengine.New`, `hydrate.New` and `vfs.NewBackend` all take
+their configuration explicitly, and there is no process-global mutable state
+anywhere in the tree. Serving several mounts from one process is therefore a
+wiring question, not an internals one — which is what M8 is.
+
+**`internal/app` owns a mount's lifecycle**, in three phases, and the split is the
+whole point. `Open` acquires (backing dirfd, provider, state DB, hydrator, engine)
+and can fail; `Run` serves and then drains; `Close` releases. A function that owned
+the process's signal context and its defers — which is what `runMount` was — cannot
+do this, because bringing up three of five mounts and then failing has to unmount
+and drain the three, not exit holding their dirfds and bbolt locks. The per-mount
+shutdown ordering inside `Run` is unchanged and still load-bearing: unmount (which
+flushes pending FUSE events), then `close(events)`, then wait for the engine's
+bounded drain, with the engine on a detached context (§7). `App` aggregates; it
+must never replace that sequence with one cancellation.
+
+**The registry is an explicit value, not a package-level map filled by `init()`.**
+The `database/sql` shape would introduce the only process-global mutable state in
+the tree — in the very milestone whose point is that everything is per-instance —
+and would hide the dependency behind an import for side effect. It also would not
+allow the thing M8 exists to prove: a test registering `gdrive` under two names and
+running both, so the seam is exercised by two independently-configured Drive stores
+without a pseudo-provider ever reaching a user's binary.
+
+A provider's own configuration crosses the registry **undecoded**, as a
+`Params.Decode` callback filling a provider-defined struct. `internal/config` never
+learns what a Drive folder ID is, and adding a provider touches neither package.
+`Params` is a struct rather than bare arguments so that giving providers something
+new — the per-mount logger it already carries, a metrics sink later — does not churn
+every `Factory` signature.
+
+**The config file is TOML, and the format choice is about comments.** Everything
+drivel does that is worth configuring has a reason that belongs next to it, and
+JSON cannot hold one. That in turn dictates how `drivel login -account NAME` writes
+to it: **append, never re-serialize**, because a round trip through any encoder
+silently discards every comment in the file. An account that already exists is
+printed for the user to reconcile by hand rather than replaced.
+
+The schema splits along a real seam. An **account** is credentials — a provider kind
+plus that provider's settings, in a directory of its own under
+`$XDG_CONFIG_HOME/drivel/NAME` at 0700. A **mount** references an account and says
+what to mount from it; its `[mount.provider]` table is laid over the account's
+settings, so one account can be mounted twice with different roots. Relative paths
+resolve against the config file's directory, which makes a config directory
+self-contained enough to move or check into dotfiles. Inside a *provider* table the
+rule has to be syntactic, since this layer cannot know which of a provider's keys
+name files: a value is expanded only when written like a path (`~/`, `./`, `../`),
+so a Drive folder ID is never rewritten. `login` writes absolute paths, so the
+common case does not depend on it.
+
+Unknown keys are an error. `lazzy = true` doing nothing is the same failure as a
+flag that silently stopped being read, and the free-form regions are exempt because
+unknown keys are precisely their purpose. Fields whose zero value is meaningful —
+`max-deletes`, `sweep-interval` — are pointers, so an explicit `0` stays
+distinguishable from unset; conflating them would silently uncap M7b's delete guard.
+
+**Flags remain, and synthesize a one-entry config.** Both paths end in the same
+`[]app.MountSpec`, so validation, opening and shutdown have one implementation
+rather than a single-mount one that drifts from the N-mount one. `-config` and a
+flag that describes *what* to mount cannot be combined: the alternative is a
+precedence rule nobody would remember.
+
+**The guards are the interesting part**, because several mounts can corrupt each
+other in ways one never could, and every one of them otherwise surfaces as a
+deadlock, an opaque five-second bbolt timeout, or a file quietly synced to the wrong
+account. `app.Validate` runs before anything is opened, on the flag path too:
+
+- **Two mounts sharing a state DB.** Each engine would read the other's echo
+  records as its own — and §4 echoes are also M7b's *delete* baseline, so this can
+  infer deletions across accounts.
+- **Either direction of overlap between one mount's backing tree and another's
+  mountpoint.** §2.7's cardinal rule generalised: reading a backing store through
+  another mount's FUSE handler recurses into our own filesystem, and the mirror case
+  leaks — everything written to one mount appears in the other's backing tree and is
+  pushed to *its* remote.
+- **A state DB inside a backing tree.** This one needed no second mount to be wrong:
+  the DB syncs itself to the cloud, and its own writes generate the events that
+  cause more writes. It was previously documented in a flag's help string and
+  enforced nowhere.
+- Shared mountpoints, duplicate names, an account or provider kind nothing answers
+  to, and a backing dir written out to equal its own mountpoint (which is in-place
+  mode, spelled the way that recurses).
+
+**Logging is per mount.** With two mounts the default logger is unreadable —
+`[sync] create a.txt` does not say whose. Each mount gets a `*log.Logger` threaded
+through the existing config structs. A single mount keeps the bare default, so its
+output is byte for byte what drivel printed before several were possible.
+
+Deliberately absent: a second *real* provider (M8 is framework only, and the
+pseudo-provider proof is a test), hot-reloading the config, and any daemon or IPC
+control surface.
+
 ---
 
 ## 3. The sync loop (inbound / pull)
@@ -899,17 +994,47 @@ are both lossy and racy.
 
    **Not in scope:** dedup, periodic full scans (the cursor feed stays the steady
    state), and any content transfer in lazy mode.
-9. **M8 — Multi-account & multi-provider mounts.** Two separable pieces:
-   - *Multi-account (real, proof-of-concept).* One `drivel` process serving several
-     mounts, each with its own credentials, token, state DB, and engine. Requires
-     making `gauth` token storage account-scoped rather than one global
-     `token.json`, and a config file — the flag surface stops scaling here.
-   - *Multi-provider (framework only).* Prove the §2.5 seam actually holds by
-     registering more than one provider *kind* and selecting per mount. The proof
-     is a **pseudo-provider**: `internal/provider/gdrive` re-registered under a
-     second name, mounted alongside the real one. If a Drive-shaped assumption has
-     leaked above the seam, two independently-configured Drive stores in one
-     process will surface it. No second real backend in this milestone.
+9. **M8 — Multi-account & multi-provider mounts.** ✅ Shipped. §2.8 has the design;
+   what is worth recording here is what building it changed about the plan.
+
+   - *Multi-account.* One process, N mounts, each with its own credentials, token,
+     state DB, index and engine, described by a TOML config file
+     (`$XDG_CONFIG_HOME/drivel/config.toml`). `drivel login -account NAME` scopes
+     credentials to a 0700 directory of their own and appends the account to the
+     config. The flags still work and now synthesize a one-entry config, so there is
+     one code path below them rather than two that drift.
+   - *Multi-provider (framework only).* A `provider.Registry` mapping a kind name to
+     a `Factory`, with the provider's own settings crossing it undecoded. As
+     planned, no second real backend.
+
+   Three things the milestone was scoped as, that it turned out not to be.
+
+   **It was not a refactor of anything below the wiring.** The expectation was that
+   two accounts in one process would surface Drive-shaped assumptions; a sweep for
+   process-global mutable state found none — every package-level `var` in the tree
+   is an interface assertion, a sentinel error, a bbolt bucket name or a default. The
+   seam held, which is the result M9 was waiting on, and the proof is a test rather
+   than a shipped pseudo-provider: `newFakeDrive` already builds a real `*Drive`
+   against an httptest server, so two independently-configured Drive stores cost
+   nothing to run and never reach a user's binary.
+
+   **The registry wanted to be a value, not a package.** `init()`-time registration
+   would have added the first process-global mutable state in the tree, in the
+   milestone whose entire premise is that everything is per-instance.
+
+   **The interesting work was the guards, not the plumbing.** Several mounts can
+   corrupt each other in ways one never could, and each failure mode otherwise
+   surfaces as a deadlock, an opaque bbolt timeout, or a file synced to the wrong
+   account — see §2.8. One of them turned out to need no second mount at all: a state
+   DB inside a backing tree syncs itself to the cloud and its own writes generate the
+   events that cause more, which every version of drivel until now documented in a
+   flag's help string and enforced nowhere.
+
+   Two smaller corrections fell out. `drivel login` had always prompted for an OAuth
+   scope and then discarded it — `gdrive` hardcoded `ScopeDrive` — so a read-only
+   account asked for full access. And `-sweep-interval` existed as a flag with a
+   documented default that nothing was reading into `ReconcileOptions`; the mount
+   spec now carries it.
 10. **M9 — Plugin architecture.** Let third parties add providers (and eventually
    mount backends) without forking. The seam already exists — `provider.Store` +
    optional `ChangeSource`/`RangeGetter` — so M9 is about the *loading* mechanism
@@ -927,9 +1052,8 @@ Not a numbered milestone: it has no completion date and nothing waits on it. It 
 listed here because the test suite is load-bearing and was, until now, tracked
 nowhere.
 
-**Where it stands.** Every package except `cmd/drivel` and `internal/fsevent` has
-tests — roughly 6,100 lines of them against 5,700 lines of tested source, green
-under `go test -race ./...`. The invariants whose failure mode is *data loss*
+**Where it stands.** Every package except `internal/fsevent` has tests, green under
+`go test -race ./...`. The invariants whose failure mode is *data loss*
 rather than inconvenience each have a dedicated file: `syncengine/lazy_test.go`
 (M5, never push a placeholder), `rangewrite_test.go` (M6's three gates, especially
 "decline on a diverged remote"), `conflict_test.go` (§6), `reconcile_test.go`
@@ -943,25 +1067,33 @@ while the data-loss guards never execute. `internal/testenv` turns those skips
 into failures for any facility named in `DRIVEL_REQUIRE_TESTENV` (`fuse`, `xattr`,
 or `all`), which is what CI must set.
 
-**Open, roughly in order of what a regression would cost:**
+**The list, in order of what a regression would cost.** Struck items are done and
+kept here with what they taught; 1 landed before M8, 2 and 4 during it. What
+remains is the tail — property tests, `gauth`'s file I/O, `fsevent`:
 
-1. **CI.** Nothing currently enforces `go build`, `go vet`, `go test -race` on
-   push; the suite passes because someone remembers to run it. The job must set
-   `DRIVEL_REQUIRE_TESTENV=all` and install `fuse3` — otherwise it buys less than
-   it appears to. Add a `golangci-lint` config in the same pass.
-2. **`cmd/drivel` is untested** (~400 lines: flag parsing, subcommand dispatch,
-   mount wiring, and M7b's `-resync` / `-materialize` / `-max-deletes`). A flag
-   that silently stops being read is invisible to every other test in the tree.
-   Wants the wiring factored out of `main` far enough to be callable.
+1. ~~**CI.**~~ ✅ Done. Every gate is a `make` target that the git hooks and the
+   GitHub Actions workflow both call, so "passed locally" and "passed in CI" cannot
+   mean different things. The test job sets `DRIVEL_REQUIRE_TESTENV=all` and
+   installs `fuse3`, without which it would buy much less than it appears to.
+2. ~~**`cmd/drivel` is untested.**~~ ✅ Done in M8, which needed the same refactor:
+   the wiring moved to `internal/app`, and `cmd/drivel` keeps flag parsing and the
+   flag-to-spec mapping, which is what the tests cover.
 3. **Property tests for `internal/ranges`.** The inward/outward rounding asymmetry
    (`Mark` vs `MarkCovering`) and the coalescer's "unknown absorbs known" rule are
    invariants, and invariants are better checked by generated cases than by
    examples: a dirty set must always cover its input, a present set must never
    exceed it, and a union across mismatched block grids must degrade to unknown.
-4. **One end-to-end test.** Each layer is tested against its own fake; nothing
-   threads mount → write → push → pull → reconcile through a single fake provider.
-   That seam-crossing path is exactly where the echo model (§4) is supposed to
-   hold, and it is currently only ever tested in halves.
+4. ~~**One end-to-end test.**~~ ✅ Done in M8: `internal/app` threads mount → write
+   → push → pull → reconcile through one in-memory provider. It taught two things
+   worth keeping. The downloader writes *below* FUSE rather than through it, so a
+   pull generates no mount event at all — the loop §4 breaks is our own push coming
+   back down, not a pull going back up. And for identical content the three loop
+   breakers (the echo record, `apply`'s on-disk hash comparison, M6's
+   unchanged-content gate) are redundant by design, so no end-to-end assertion can
+   isolate one: deleting the echo write leaves every observable unchanged. The test
+   asserts what it can show — that they compose into a system which settles rather
+   than ping-pongs, and that no conflict copy appears where both sides agree — and
+   leaves isolating the gates to the unit tests that can.
 5. **`gauth` at 18%.** The interactive flow is not worth harnessing, but the
    credentials/token file I/O around it is, and it is what fails on a bad install.
 6. **`internal/fsevent`** has no tests. Small and mostly types — lowest priority,

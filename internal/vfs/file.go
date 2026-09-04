@@ -25,6 +25,7 @@ type fileHandle struct {
 	path    string
 	events  chan<- fsevent.Event
 	hyd     mount.Hydrator // nil => eager mode
+	lg      *log.Logger    // nil => the log package's default
 	dirty   dirtyTracker
 	// resident latches once the content is known to be present, so the steady-state
 	// read path costs one atomic load rather than a getxattr per operation.
@@ -121,7 +122,7 @@ func (f *fileHandle) ensureResident(ctx context.Context) syscall.Errno {
 	}
 	if f.hyd.IsPlaceholder(f.path) {
 		if err := f.hyd.Hydrate(ctx, f.path); err != nil {
-			log.Printf("[hydrate] %s: %v", f.path, err)
+			logTo(f.lg, "[hydrate] %s: %v", f.path, err)
 			return syscall.EIO
 		}
 	}

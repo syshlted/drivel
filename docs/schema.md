@@ -10,6 +10,12 @@ Neither file is authoritative for anything. Losing either costs latency, API
 quota and precision — never user data. The [authority ladder](#authority-ladder)
 below is the reason.
 
+Since M8 there is one pair of these files **per mount**, not per process: a
+configured mount defaults its state DB to `$XDG_STATE_HOME/drivel/<name>/state.db`.
+The schema below is unchanged — what changed is that sharing one between two
+mounts is now a startup error rather than a slow surprise, because each engine
+would read the other's echo records as its own baseline.
+
 ## `drivel-state.db` — engine sync state
 
 Owned by `internal/state`. Written by the uploader, the downloader and the M7b

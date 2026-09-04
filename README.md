@@ -22,10 +22,13 @@ identity you control. Licensed under the [GNU AGPLv3](#license).
 
 **v1 is feature-complete** (M1–M4): Drivel mounts, proxies, and syncs
 bidirectionally with Google Drive. On top of it, **M5 (lazy hydration)** has
-landed as an opt-in mode, and **M6 (smarter uploads)**, **M7 (restart-safe path
+landed as an opt-in mode, **M6 (smarter uploads)**, **M7 (restart-safe path
 resolution)** and **M7b (initial enumeration & reconcile)** as always-on
-behaviour.
+behaviour, and **M8 (multi-account mounts)** as a config file.
 
+- `internal/app` — one mount's lifecycle (open, serve, drain, close) and several of
+  them in one process, with the checks that stop two mounts corrupting each other.
+- `internal/config` — the TOML config file: accounts, mounts, and where they live.
 - `internal/vfs` — go-fuse loopback that proxies to the underlying dir and emits a
   change `Event` per mutation, including `OpWrite` on close (file-handle capture).
 - `internal/mount` — the mount-backend seam and in-place mode (Linux).
@@ -111,8 +114,49 @@ The same machinery fixes a silent failure: Google expires change cursors, and
 Drivel used to retry a dead one forever with inbound sync quietly stopped. It now
 recognises the expiry and recovers by re-enumerating.
 
-Roadmap (v2), in [DESIGN.md §9](DESIGN.md): **M8** multi-account and
-multi-provider mounts · **M9** plugin architecture for third-party providers.
+### Several accounts at once (M8)
+
+One `drivel` process can serve any number of mounts, each with its own account,
+credentials, sync state and backing directory. A single mount still needs no
+configuration beyond its flags; the config file is what you graduate to when one
+stops being enough.
+
+```sh
+drivel login -account personal     # credentials go to ~/.config/drivel/personal
+drivel login -account work
+drivel mount                       # serves everything in the config file
+```
+
+Each `login` appends its account to `~/.config/drivel/config.toml`, and prints the
+mount block to go with it:
+
+```toml
+[account.personal]
+provider    = "gdrive"
+credentials = "/home/you/.config/drivel/personal/credentials.json"
+token       = "/home/you/.config/drivel/personal/token.json"
+
+[[mount]]
+account = "personal"
+path    = "~/drive-personal"
+data    = "~/.cache/drivel/personal"
+lazy    = true
+
+[mount.provider]
+root = "root"                      # or a folder ID, to mount one subtree
+```
+
+Drivel only ever appends to this file, so your comments and layout survive.
+
+Mounts are checked against each other before any of them comes up, because several
+mounts can break each other in ways one cannot: sharing a sync-state database lets
+one account's records be read as another's, and a backing directory that sits
+inside another mount would have its reads routed back through Drivel. Those are
+startup errors naming both mounts, rather than a hang or a file synced to the
+wrong account.
+
+Roadmap (v2), in [DESIGN.md §9](DESIGN.md): **M9** plugin architecture for
+third-party providers.
 
 ## Build
 

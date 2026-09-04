@@ -9,6 +9,7 @@ package mount
 import (
 	"context"
 	"io"
+	"log"
 
 	"github.com/zishmusic/drivel/internal/fsevent"
 )
@@ -40,6 +41,10 @@ type Options struct {
 	FsName     string               // display name for the mount
 	Debug      bool                 // backend-level tracing
 	Hydrator   Hydrator             // nil => eager mode (content always resident)
+	// Logger is where the backend reports; nil uses the log package's default.
+	// With several mounts in one process it carries the mount's identity, without
+	// which a hydration failure does not say whose file failed.
+	Logger *log.Logger
 }
 
 // Backend mounts and serves an interceptor filesystem.

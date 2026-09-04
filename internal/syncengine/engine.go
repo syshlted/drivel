@@ -70,10 +70,20 @@ type Engine struct {
 	state   *state.Store   // echo-suppression store; nil => don't record
 	holes   Placeholders   // nil => eager mode; see Placeholders
 
+	lg           *log.Logger
 	debounce     time.Duration
 	workers      int
 	drainTimeout time.Duration
 	retry        retryPolicy
+}
+
+// logf writes one line for this engine.
+func (e *Engine) logf(format string, args ...any) {
+	if e.lg == nil {
+		log.Printf(format, args...)
+		return
+	}
+	e.lg.Printf(format, args...)
 }
 
 // Config parameterises an Engine. The tuning fields are optional; zero values fall
@@ -83,6 +93,11 @@ type Config struct {
 	DataDir string         // underlying directory (source of truth)
 	State   *state.Store   // engine-level sync state; nil to skip echo recording
 	Holes   Placeholders   // lazy-hydration guard (M5); nil for eager mode
+
+	// Logger is where this engine writes; nil uses the log package's default.
+	// Per engine because one process may run several mounts, and a sync line that
+	// does not say which mount it belongs to is close to useless (M8).
+	Logger *log.Logger
 
 	Debounce     time.Duration // per-path coalescing window
 	Workers      int           // size of the path-hashed worker pool
@@ -96,6 +111,7 @@ func New(cfg Config) *Engine {
 		dataDir:      cfg.DataDir,
 		state:        cfg.State,
 		holes:        cfg.Holes,
+		lg:           cfg.Logger,
 		debounce:     cfg.Debounce,
 		workers:      cfg.Workers,
 		drainTimeout: cfg.DrainTimeout,
@@ -204,7 +220,7 @@ loop:
 	select {
 	case <-done:
 	case <-time.After(e.drainTimeout):
-		log.Printf("[sync] drain deadline (%s) exceeded; aborting in-flight uploads", e.drainTimeout)
+		e.logf("[sync] drain deadline (%s) exceeded; aborting in-flight uploads", e.drainTimeout)
 		opCancel()
 		<-done
 	}
@@ -221,7 +237,7 @@ func (e *Engine) runLogOnly(ctx context.Context, events <-chan fsevent.Event) {
 			if !ok {
 				return
 			}
-			logEvent(ev)
+			e.logEvent(ev)
 		}
 	}
 }
@@ -318,10 +334,10 @@ func (e *Engine) executeWithRetry(ctx context.Context, ev fsevent.Event) {
 			return // cancelled: give up quietly (drain deadline or shutdown)
 		}
 		if !provider.IsRetryable(err) || attempt >= e.retry.max {
-			log.Printf("[sync] push %s %s failed after %d attempt(s): %v", ev.Op, ev.Path, attempt, err)
+			e.logf("[sync] push %s %s failed after %d attempt(s): %v", ev.Op, ev.Path, attempt, err)
 			return
 		}
-		log.Printf("[sync] push %s %s attempt %d failed, retrying: %v", ev.Op, ev.Path, attempt, err)
+		e.logf("[sync] push %s %s attempt %d failed, retrying: %v", ev.Op, ev.Path, attempt, err)
 		if !sleepCtx(ctx, jitter(delay)) {
 			return
 		}
@@ -336,7 +352,7 @@ func (e *Engine) executeWithRetry(ctx context.Context, ev fsevent.Event) {
 // debouncer + worker pool instead.
 func (e *Engine) handle(ctx context.Context, ev fsevent.Event) {
 	if e.store == nil {
-		logEvent(ev)
+		e.logEvent(ev)
 		return
 	}
 	e.executeWithRetry(ctx, ev)
@@ -418,7 +434,7 @@ const hashSkipMinSize = ranges.DefaultBlockSize
 // never wrong — only slower.
 func (e *Engine) pushContent(ctx context.Context, p string, dirty *ranges.Set) error {
 	if e.holes != nil && e.holes.IsPlaceholder(p) {
-		log.Printf("[sync] skip %s: unhydrated placeholder (nothing local to push)", p)
+		e.logf("[sync] skip %s: unhydrated placeholder (nothing local to push)", p)
 		return nil
 	}
 	f, err := os.Open(filepath.Join(e.dataDir, filepath.FromSlash(p)))
@@ -481,7 +497,7 @@ func (e *Engine) pushShortcut(ctx context.Context, p string, f *os.File, size in
 
 	remote, exists, err := e.store.Stat(ctx, p)
 	if err != nil {
-		log.Printf("[sync] stat %s: %v (uploading whole file)", p, err)
+		e.logf("[sync] stat %s: %v (uploading whole file)", p, err)
 		return false, nil
 	}
 	if !exists {
@@ -492,10 +508,10 @@ func (e *Engine) pushShortcut(ctx context.Context, p string, f *os.File, size in
 		extents := dirty.Extents()
 		rf, err := rp.PutRange(ctx, p, f, size, extents)
 		if err != nil {
-			log.Printf("[sync] range write %s failed (%d extent(s), %d of %d B): %v (uploading whole file)",
+			e.logf("[sync] range write %s failed (%d extent(s), %d of %d B): %v (uploading whole file)",
 				p, len(extents), dirty.Bytes(), size, err)
 		} else {
-			log.Printf("[sync] range write %s: %d extent(s), %d of %d B", p, len(extents), dirty.Bytes(), size)
+			e.logf("[sync] range write %s: %d extent(s), %d of %d B", p, len(extents), dirty.Bytes(), size)
 			e.recordEcho(rf)
 			return true, nil
 		}
@@ -507,7 +523,7 @@ func (e *Engine) pushShortcut(ctx context.Context, p string, f *os.File, size in
 			return false, err
 		}
 		if unchanged {
-			log.Printf("[sync] skip %s: remote already holds these bytes (%d B not uploaded)", p, size)
+			e.logf("[sync] skip %s: remote already holds these bytes (%d B not uploaded)", p, size)
 			return true, nil
 		}
 	}
@@ -578,7 +594,7 @@ func (e *Engine) contentMatches(f *os.File, remote provider.RemoteFile) (bool, e
 	}
 	local, err := hasher.HashContent(f)
 	if err != nil {
-		log.Printf("[sync] hash %s: %v (uploading anyway)", remote.Path, err)
+		e.logf("[sync] hash %s: %v (uploading anyway)", remote.Path, err)
 		return false, nil
 	}
 	return local != "" && local == remote.Hash, nil
@@ -591,7 +607,7 @@ func (e *Engine) recordEcho(rf provider.RemoteFile) {
 		return
 	}
 	if err := e.state.SetEcho(rf.Path, state.Echo{Hash: rf.Hash, Version: rf.Version, At: time.Now()}); err != nil {
-		log.Printf("[sync] record echo %s: %v", rf.Path, err)
+		e.logf("[sync] record echo %s: %v", rf.Path, err)
 	}
 }
 
@@ -609,16 +625,16 @@ func (e *Engine) forgetPath(p string) {
 		return
 	}
 	if err := e.state.Forget(p); err != nil {
-		log.Printf("[sync] forget state %s: %v", p, err)
+		e.logf("[sync] forget state %s: %v", p, err)
 	}
 }
 
-func logEvent(ev fsevent.Event) {
+func (e *Engine) logEvent(ev fsevent.Event) {
 	if ev.Op == fsevent.OpRename {
-		log.Printf("[sync] %-7s %s -> %s", ev.Op, ev.Path, ev.NewPath)
+		e.logf("[sync] %-7s %s -> %s", ev.Op, ev.Path, ev.NewPath)
 		return
 	}
-	log.Printf("[sync] %-7s %s%s", ev.Op, ev.Path, describeDirty(ev.Dirty))
+	e.logf("[sync] %-7s %s%s", ev.Op, ev.Path, describeDirty(ev.Dirty))
 }
 
 // describeDirty renders an event's dirty extents for the log. Log-only mode is

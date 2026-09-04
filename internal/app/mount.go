@@ -1,0 +1,347 @@
+// Package app is drivel's composition root below main: it turns a description of
+// one or more mounts into running mounts and owns their lifecycle.
+//
+// It exists as a package rather than as the body of runMount for two reasons that
+// turned out to be the same refactor. One process must serve N mounts (M8), which
+// a function that owns the signal context and the process's defers cannot do. And
+// the wiring — flag plumbing, provider selection, the shutdown ordering — was the
+// one part of drivel no test could reach, so a flag that silently stopped being
+// read was invisible to every other test in the tree (DESIGN.md §9, M0).
+//
+// The layering rule is unchanged: nothing here knows what a Drive folder ID is.
+// A mount names a provider *kind* and carries that provider's configuration
+// undecoded, and internal/provider's registry does the rest.
+package app
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"io"
+	"log"
+	"os"
+	"path/filepath"
+	"time"
+
+	"github.com/zishmusic/drivel/internal/fsevent"
+	"github.com/zishmusic/drivel/internal/hydrate"
+	"github.com/zishmusic/drivel/internal/mount"
+	"github.com/zishmusic/drivel/internal/provider"
+	"github.com/zishmusic/drivel/internal/state"
+	"github.com/zishmusic/drivel/internal/syncengine"
+	"github.com/zishmusic/drivel/internal/vfs"
+)
+
+// eventBuffer is how many mount events may be in flight before the FUSE handler
+// blocks on the sync engine. Buffered so brief FS bursts don't stall on the
+// consumer; per mount, since one busy mount must not stall another.
+const eventBuffer = 1024
+
+// MountSpec describes one mount to run. It is plain data: whatever produced it —
+// the flag set, a config file, a test — is interchangeable, which is what keeps
+// the single-mount path and the N-mount path from drifting apart.
+type MountSpec struct {
+	// Name identifies this mount in logs and errors. With one mount it is
+	// cosmetic; with several it is the only way to tell whose message you are
+	// reading. Empty falls back to the mountpoint.
+	Name string
+
+	Mountpoint string // where the filesystem is mounted
+	DataDir    string // backing dir; "" selects in-place mode (Linux only)
+	StateDB    string // engine-level sync state (cursor + echo records)
+
+	// Provider names a kind registered in the provider.Registry. Empty runs the
+	// mount log-only (M1 behaviour): no network, no auth, no state store.
+	Provider string
+	// ProviderConfig carries that provider's own configuration, undecoded. See
+	// provider.Factory; provider.StaticDecoder builds one from a value in hand.
+	ProviderConfig func(any) error
+
+	Lazy  bool // M5 lazy hydration
+	Debug bool // FUSE-level tracing
+
+	// Logger is where everything this mount does reports. Nil uses the log
+	// package's default, which is what a single mount wants: its output is then
+	// byte-for-byte what drivel printed before there could be more than one.
+	// App.New fills it in with a name-prefixed logger as soon as there are two.
+	Logger *log.Logger
+
+	// M7b enumeration & reconcile.
+	Resync        bool
+	Materialize   bool
+	MaxDeletes    int
+	SweepInterval time.Duration
+}
+
+// label is what this mount is called in a message.
+func (s MountSpec) label() string {
+	if s.Name != "" {
+		return s.Name
+	}
+	return s.Mountpoint
+}
+
+// logName is label shortened for a log prefix. The flag path has no name and
+// its mountpoint may be an absolute path long enough to bury the message.
+func (s MountSpec) logName() string {
+	if s.Name != "" {
+		return s.Name
+	}
+	return filepath.Base(s.Mountpoint)
+}
+
+// Mount is one opened mount: every resource acquired, nothing yet running.
+//
+// The three-phase split (Open / Run / Close) is what N mounts need and one mount
+// never did. Open acquires and can fail; Run blocks until unmount and then
+// drains; Close releases. Keeping acquisition separate from serving is what lets
+// a process that fails to bring up mount 3 of 5 unmount and drain the two that
+// already came up, instead of exiting with them still mounted.
+type Mount struct {
+	spec    MountSpec
+	backing *mount.Backing
+	store   provider.Store
+	state   *state.Store
+	hyd     *hydrate.Hydrator
+	engine  *syncengine.Engine
+	down    *syncengine.Downloader
+	events  chan fsevent.Event
+
+	// closeStore is the provider's release hook, if it has one. provider.Store
+	// says nothing about closing — most backends have nothing to release — so a
+	// store that does announces it by implementing io.Closer.
+	closeStore func() error
+
+	lg     *log.Logger
+	closed bool
+}
+
+// logf writes one line for this mount.
+func (m *Mount) logf(format string, args ...any) {
+	if m.lg == nil {
+		log.Printf(format, args...)
+		return
+	}
+	m.lg.Printf(format, args...)
+}
+
+// Open acquires everything one mount needs and starts nothing. The returned
+// Mount must be Closed whether or not Run is ever called.
+func Open(ctx context.Context, spec MountSpec, reg *provider.Registry) (*Mount, error) {
+	if spec.Mountpoint == "" {
+		return nil, errors.New("mount has no mountpoint")
+	}
+	if spec.Lazy && spec.Provider == "" {
+		// A placeholder is a promise that the bytes can be fetched later; without a
+		// provider there is nothing to redeem it against.
+		return nil, fmt.Errorf("%s: lazy hydration needs a provider (there is nothing to hydrate from)", spec.label())
+	}
+	if spec.Provider != "" && spec.StateDB == "" {
+		// Not merely a bad path: an engine with no state store records no echoes,
+		// and §4 echo suppression is what stops every inbound change from being
+		// re-uploaded — and what M7b uses as its delete baseline. Refuse rather
+		// than quietly running without it.
+		return nil, fmt.Errorf("%s: a provider needs a state DB (cursor + echo records)", spec.label())
+	}
+	if err := os.MkdirAll(spec.Mountpoint, 0o755); err != nil {
+		return nil, fmt.Errorf("creating %s: %w", spec.Mountpoint, err)
+	}
+	if spec.DataDir != "" {
+		if err := os.MkdirAll(spec.DataDir, 0o755); err != nil {
+			return nil, fmt.Errorf("creating %s: %w", spec.DataDir, err)
+		}
+	}
+
+	m := &Mount{spec: spec, lg: spec.Logger, events: make(chan fsevent.Event, eventBuffer)}
+	// Anything acquired before a later failure has to be handed back, or a failed
+	// startup leaks a dirfd, a bbolt lock and an HTTP/3 transport per mount.
+	ok := false
+	defer func() {
+		if !ok {
+			_ = m.Close()
+		}
+	}()
+
+	// Resolve the backing store. In in-place mode this opens a dirfd to the
+	// mountpoint BEFORE we mount over it, so both the FUSE backend and the sync
+	// engine reach the underlying directory (via /proc/self/fd/N) instead of
+	// recursing through the overlay. Held open until after unmount.
+	backing, err := mount.ResolveBacking(spec.Mountpoint, spec.DataDir)
+	if err != nil {
+		return nil, err
+	}
+	m.backing = backing
+	if backing.InPlace {
+		m.logf("in-place mode: %s is its own backing store (via %s)", spec.Mountpoint, backing.Path)
+	} else {
+		m.logf("backing store: %s", backing.Path)
+	}
+
+	// Wire the provider if one was named; otherwise run log-only (M1 behaviour),
+	// which needs no network or auth.
+	if spec.Provider != "" {
+		store, err := reg.Open(ctx, spec.Provider, provider.Params{
+			Decode: spec.ProviderConfig,
+			Log:    m.logger(),
+		})
+		if err != nil {
+			return nil, err
+		}
+		m.store = store
+		if c, hasClose := store.(io.Closer); hasClose {
+			m.closeStore = c.Close
+		}
+		m.logf("%s sync enabled", spec.Provider)
+
+		// Engine-level sync state (cursor + echo records) lives in a control-plane
+		// DB outside the backing tree so it isn't itself synced to the provider.
+		st, err := state.Open(spec.StateDB)
+		if err != nil {
+			return nil, fmt.Errorf("open state db: %w", err)
+		}
+		m.state = st
+	} else {
+		m.logf("no provider configured: running log-only (no cloud sync)")
+	}
+
+	// Lazy hydration (M5). The hydrator is shared by all three consumers: the mount
+	// backend faults content in on open, the downloader writes placeholders instead
+	// of content, and the uploader consults it to avoid pushing a placeholder's
+	// zeros over the real remote file.
+	if spec.Lazy {
+		m.hyd = hydrate.New(backing.Path, m.store, m.state)
+		if !m.hyd.XattrsUsable() {
+			// Without xattrs the placeholder marker lives only in the state DB, so
+			// losing that DB makes placeholders look like empty files — which the
+			// uploader would then push over good remote content.
+			m.logf("WARNING: %s cannot store user xattrs; placeholder marks rely on the state DB alone (%s). Do not delete it while placeholders exist.", backing.Path, spec.StateDB)
+		}
+		m.logf("lazy hydration enabled (ranged reads: %t)", m.hyd.SupportsRanges())
+	}
+
+	m.engine = syncengine.New(syncengine.Config{
+		Store:   m.store,
+		DataDir: backing.Path,
+		State:   m.state,
+		Holes:   holesOf(m.hyd),
+		Logger:  m.lg,
+	})
+
+	// Inbound pull loop (M3), only if the store offers a change feed.
+	if src, isSrc := m.store.(provider.ChangeSource); isSrc {
+		dl := syncengine.NewDownloader(src, m.store, backing.Path, m.state, syncengine.DefaultCadence)
+		if m.hyd != nil {
+			dl = dl.Lazy(m.hyd)
+		}
+		// Initial enumeration & reconcile (M7b). The downloader owns it because it
+		// owns the cursor, and the ordering rule that makes a sweep safe — take the
+		// start token before the sweep, poll from it only after — is a statement
+		// about the cursor. It runs off the FUSE path, so the mount comes up and
+		// stays usable while a large remote is swept.
+		m.down = dl.Logger(m.lg).Reconcile(syncengine.ReconcileOptions{
+			Push:       m.engine,
+			Fetch:      spec.Materialize,
+			Force:      spec.Resync,
+			MaxDeletes: spec.MaxDeletes,
+			Interval:   spec.SweepInterval,
+		})
+	}
+
+	ok = true
+	return m, nil
+}
+
+// Run starts the sync loops, mounts the filesystem, and blocks until ctx is
+// cancelled (which unmounts) or the mount otherwise ends. It then drains the
+// engine and returns. Call Close afterwards.
+func (m *Mount) Run(ctx context.Context) error {
+	// The engine's lifecycle is bounded by close(events), NOT by ctx: on SIGINT the
+	// mount unmounts first (below), which flushes every pending FUSE event, and only
+	// then do we close(events). Running the engine on a background context lets it
+	// drain those buffered writes and its in-flight uploads (bounded internally)
+	// instead of aborting the moment Ctrl-C cancels ctx. A second Ctrl-C hard-exits.
+	engineDone := make(chan struct{})
+	//nolint:gosec // G118: detaching from ctx is the entire point, per the note above.
+	go func() {
+		m.engine.Run(context.Background(), m.events)
+		close(engineDone)
+	}()
+
+	if m.down != nil {
+		m.logf("inbound sync enabled (changes.list pull loop)")
+		go m.down.Run(ctx)
+	}
+
+	backend := vfs.NewBackend()
+	m.logf("mounting %s (%s backend, Ctrl-C to unmount)", m.spec.Mountpoint, backend.Name())
+	err := backend.Serve(ctx, mount.Options{
+		Mountpoint: m.spec.Mountpoint,
+		Backing:    m.backing.Path,
+		Events:     m.events,
+		FsName:     "drivel",
+		Debug:      m.spec.Debug,
+		Hydrator:   hydratorOf(m.hyd),
+		Logger:     m.lg,
+	})
+	if err != nil {
+		// Deliberately not fatal here. Serve returns after unmount as well as on
+		// a mount failure, and in the first case the engine may still be holding
+		// buffered uploads. Report the error, drain, then let the caller exit.
+		err = fmt.Errorf("serve: %w", err)
+	}
+	// Unmount has returned, so no more events will be emitted; closing the channel
+	// tells the engine to drain its queue (bounded) and exit. Wait for that drain
+	// so buffered uploads complete before the process exits (DESIGN.md §7).
+	close(m.events)
+	<-engineDone
+	m.logf("sync engine drained")
+	return err
+}
+
+// Close releases what Open acquired, in reverse order, and is safe to call
+// whether or not Run ever ran. It must not be called before Run returns: the
+// backing dirfd is what the mount reads through.
+func (m *Mount) Close() error {
+	if m.closed {
+		return nil
+	}
+	m.closed = true
+	var errs []error
+	if m.state != nil {
+		errs = append(errs, m.state.Close())
+	}
+	if m.closeStore != nil {
+		errs = append(errs, m.closeStore())
+	}
+	if m.backing != nil {
+		errs = append(errs, m.backing.Close())
+	}
+	return errors.Join(errs...)
+}
+
+// holesOf and hydratorOf convert a possibly-nil *hydrate.Hydrator into the
+// consumer-defined interfaces without handing over a non-nil interface wrapping a
+// nil pointer — the classic Go trap that would make every "is lazy mode on?" check
+// answer yes and every IsPlaceholder call panic.
+
+func holesOf(h *hydrate.Hydrator) syncengine.Placeholders {
+	if h == nil {
+		return nil
+	}
+	return h
+}
+
+func hydratorOf(h *hydrate.Hydrator) mount.Hydrator {
+	if h == nil {
+		return nil
+	}
+	return h
+}
+
+// logger is m.lg with a non-nil guarantee, for the seams that require one.
+func (m *Mount) logger() *log.Logger {
+	if m.lg == nil {
+		return log.Default()
+	}
+	return m.lg
+}

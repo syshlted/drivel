@@ -25,9 +25,9 @@ _drivel() {
     local subcommands="login mount help"
 
     # Flags that take a path/dir argument -> complete filenames.
-    local file_flags="-mount -data -credentials -token -state -index"
+    local file_flags="-mount -data -credentials -token -state -index -config"
     # Flags that take a free-form value -> no filename completion.
-    local value_flags="-drive-root -client-id -client-secret -project-id -scope -port"
+    local value_flags="-drive-root -client-id -client-secret -project-id -scope -port -account -sweep-interval"
 
     # Determine the active subcommand (first non-flag word after "drivel").
     local sub="" i
@@ -48,7 +48,7 @@ _drivel() {
             _filedir -d
             return
             ;;
-        -credentials|-token|-state|-index)
+        -credentials|-token|-state|-index|-config)
             _filedir
             return
             ;;
@@ -56,7 +56,7 @@ _drivel() {
             COMPREPLY=( $(compgen -W "drive drive.readonly drive.file" -- "$cur") )
             return
             ;;
-        -drive-root|-client-id|-client-secret|-project-id|-port)
+        -drive-root|-client-id|-client-secret|-project-id|-port|-account|-sweep-interval)
             # Opaque values; nothing to suggest.
             return
             ;;
@@ -75,8 +75,8 @@ _drivel() {
     # Flag completion within a subcommand.
     local flags=""
     case "$sub" in
-        mount) flags="-mount -data -credentials -token -state -index -drive-root -lazy -resync -materialize -max-deletes -debug -h -help" ;;
-        login) flags="-credentials -token -client-id -client-secret -project-id -scope -port -open -h -help" ;;
+        mount) flags="-config -mount -data -credentials -token -state -index -drive-root -lazy -resync -materialize -max-deletes -sweep-interval -debug -h -help" ;;
+        login) flags="-account -config -credentials -token -client-id -client-secret -project-id -scope -port -open -h -help" ;;
         help)  return ;;
     esac
     if [[ $cur == -* ]]; then

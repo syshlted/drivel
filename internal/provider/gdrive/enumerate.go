@@ -3,7 +3,6 @@ package gdrive
 import (
 	"context"
 	"fmt"
-	"log"
 	"path"
 
 	"google.golang.org/api/drive/v3"
@@ -84,7 +83,7 @@ func (d *Drive) Enumerate(ctx context.Context, cursor string) ([]provider.Remote
 		// pause). Nothing is lost by starting over — the sweep is idempotent and
 		// its consumer applies pages independently — so restart rather than
 		// leaving enumeration permanently stuck on a dead token.
-		log.Printf("[drive] enumeration: page token expired; restarting the sweep")
+		d.logf("[drive] enumeration: page token expired; restarting the sweep")
 		d.mu.Lock()
 		d.sweep = nil
 		sw, _ = d.beginSweepLocked(ctx, "")
@@ -121,16 +120,16 @@ func (d *Drive) Enumerate(ctx context.Context, cursor string) ([]provider.Remote
 			paths[i] = page.files[i].Path
 		}
 		if err := idx.SetMany(paths, page.ids); err != nil {
-			log.Printf("[drive] path index: recording enumeration page: %v", err)
+			d.logf("[drive] path index: recording enumeration page: %v", err)
 		}
 	}
 
 	if res.NextPageToken == "" {
-		log.Printf("[drive] enumeration complete: %d page(s), %d object(s) listed, %d under the mount root, %d outside it",
+		d.logf("[drive] enumeration complete: %d page(s), %d object(s) listed, %d under the mount root, %d outside it",
 			sw.pages, sw.objects, sw.emitted, sw.parked)
 		d.sweep = nil
 	} else {
-		log.Printf("[drive] enumeration: page %d, %d object(s) so far (%d under the mount root)",
+		d.logf("[drive] enumeration: page %d, %d object(s) so far (%d under the mount root)",
 			sw.pages, sw.objects, sw.emitted)
 	}
 	return page.files, res.NextPageToken, nil
@@ -163,7 +162,7 @@ func (d *Drive) listPage(ctx context.Context, cursor string) (*drive.FileList, e
 func (d *Drive) beginSweepLocked(ctx context.Context, cursor string) (*sweepState, string) {
 	if d.sweep == nil {
 		if cursor != "" && d.indexLocked(ctx) == nil {
-			log.Printf("[drive] enumeration: cannot resume without a usable path index; restarting the sweep")
+			d.logf("[drive] enumeration: cannot resume without a usable path index; restarting the sweep")
 			cursor = ""
 		}
 		d.sweep = &sweepState{

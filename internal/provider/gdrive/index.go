@@ -3,7 +3,6 @@ package gdrive
 import (
 	"context"
 	"fmt"
-	"log"
 	"path"
 	"strings"
 
@@ -85,9 +84,9 @@ func (d *Drive) indexLocked(ctx context.Context) *pathindex.Store {
 	d.idxState = indexReady
 	if n, err := d.idx.Len(); err == nil {
 		if reused {
-			log.Printf("[drive] path index: %d entries carried over from a previous run", n)
+			d.logf("[drive] path index: %d entries carried over from a previous run", n)
 		} else {
-			log.Printf("[drive] path index: new (different account or root folder); starting empty")
+			d.logf("[drive] path index: new (different account or root folder); starting empty")
 		}
 	}
 	return d.idx
@@ -98,7 +97,7 @@ func (d *Drive) warnIndexOnce(format string, args ...any) {
 		return
 	}
 	d.idxWarned = true
-	log.Printf("[drive] path index: "+format, args...)
+	d.logf("[drive] path index: "+format, args...)
 }
 
 // identityLocked names the (account, root folder) pair this index describes, so
@@ -191,7 +190,7 @@ func (d *Drive) fromIndexLocked(ctx context.Context, p string) (string, bool) {
 	}
 	id, ok, err := idx.Lookup(p)
 	if err != nil {
-		log.Printf("[drive] path index: reading %s: %v", p, err)
+		d.logf("[drive] path index: reading %s: %v", p, err)
 		return "", false
 	}
 	if !ok {
@@ -200,7 +199,7 @@ func (d *Drive) fromIndexLocked(ctx context.Context, p string) (string, bool) {
 	f, ok := d.verifyLocked(ctx, p, id)
 	if !ok {
 		if err := idx.Forget(p); err != nil {
-			log.Printf("[drive] path index: dropping stale %s: %v", p, err)
+			d.logf("[drive] path index: dropping stale %s: %v", p, err)
 		}
 		return "", false
 	}
@@ -221,13 +220,13 @@ func (d *Drive) verifyLocked(ctx context.Context, p, id string) (*drive.File, bo
 	// root is usually the "root" alias, which never appears in a file's parents.
 	// Unable to name our own root, we cannot verify anything.
 	if err := d.resolveRootLocked(ctx); err != nil {
-		log.Printf("[drive] path index: resolving root folder: %v", err)
+		d.logf("[drive] path index: resolving root folder: %v", err)
 		return nil, false
 	}
 	got, err := d.svc.Files.Get(id).Fields(fileFields).Context(ctx).Do()
 	if err != nil {
 		if !isNotFound(err) {
-			log.Printf("[drive] path index: verifying %s: %v", p, err)
+			d.logf("[drive] path index: verifying %s: %v", p, err)
 		}
 		return nil, false
 	}
@@ -276,7 +275,7 @@ func (d *Drive) lookupChildLocked(ctx context.Context, parentID, name string) (*
 		PageSize(100).
 		Context(ctx).Do()
 	if err != nil {
-		log.Printf("[drive] lookup %q: %v", name, err)
+		d.logf("[drive] lookup %q: %v", name, err)
 		return nil, false
 	}
 	switch len(res.Files) {
@@ -296,7 +295,7 @@ func (d *Drive) lookupChildLocked(ctx context.Context, parentID, name string) (*
 			best = f
 		}
 	}
-	log.Printf("[drive] %d remote files share the name %q in one folder; using the most recently modified (%s). The others are not visible at this path.",
+	d.logf("[drive] %d remote files share the name %q in one folder; using the most recently modified (%s). The others are not visible at this path.",
 		len(res.Files), name, best.Id)
 	return best, true
 }
@@ -315,7 +314,7 @@ func (d *Drive) rememberLocked(ctx context.Context, p string, f *drive.File) pro
 	d.linkLocked(p, f.Id)
 	if idx := d.indexLocked(ctx); idx != nil {
 		if err := idx.Set(p, f.Id); err != nil {
-			log.Printf("[drive] path index: recording %s: %v", p, err)
+			d.logf("[drive] path index: recording %s: %v", p, err)
 		}
 	}
 	return toRemoteFile(p, f)
@@ -374,7 +373,7 @@ func (d *Drive) forgetLocked(ctx context.Context, p string) {
 	d.unlinkKidLocked(p)
 	if idx := d.indexLocked(ctx); idx != nil {
 		if err := idx.Forget(p); err != nil {
-			log.Printf("[drive] path index: forgetting %s: %v", p, err)
+			d.logf("[drive] path index: forgetting %s: %v", p, err)
 		}
 	}
 }
@@ -488,7 +487,7 @@ func (d *Drive) reindexLocked(ctx context.Context, oldPath, newPath string) {
 	}
 	if idx := d.indexLocked(ctx); idx != nil {
 		if err := idx.Rename(oldPath, newPath); err != nil {
-			log.Printf("[drive] path index: renaming %s -> %s: %v", oldPath, newPath, err)
+			d.logf("[drive] path index: renaming %s -> %s: %v", oldPath, newPath, err)
 		}
 	}
 }
@@ -514,7 +513,7 @@ func (d *Drive) knownPathForIDLocked(ctx context.Context, id string) (string, bo
 	}
 	p, ok, err := idx.PathFor(id)
 	if err != nil {
-		log.Printf("[drive] path index: reverse lookup %s: %v", id, err)
+		d.logf("[drive] path index: reverse lookup %s: %v", id, err)
 		return "", false
 	}
 	return p, ok
@@ -534,7 +533,7 @@ func (d *Drive) pathForIDLocked(ctx context.Context, id string) (string, bool) {
 	// folder with no parents, and reports the object as outside our subtree. Every
 	// change to a top-level file was dropped that way.
 	if err := d.resolveRootLocked(ctx); err != nil {
-		log.Printf("[drive] resolving root folder: %v", err)
+		d.logf("[drive] resolving root folder: %v", err)
 	}
 	if id == "" || d.isRootID(id) {
 		return "", true
@@ -546,14 +545,14 @@ func (d *Drive) pathForIDLocked(ctx context.Context, id string) (string, bool) {
 		p, ok, err := idx.PathFor(id)
 		switch {
 		case err != nil:
-			log.Printf("[drive] path index: reverse lookup %s: %v", id, err)
+			d.logf("[drive] path index: reverse lookup %s: %v", id, err)
 		case ok:
 			if f, vok := d.verifyLocked(ctx, p, id); vok {
 				d.rememberLocked(ctx, p, f)
 				return p, true
 			}
 			if err := idx.Forget(p); err != nil {
-				log.Printf("[drive] path index: dropping stale %s: %v", p, err)
+				d.logf("[drive] path index: dropping stale %s: %v", p, err)
 			}
 		}
 	}

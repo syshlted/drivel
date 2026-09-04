@@ -28,6 +28,21 @@ type node struct {
 	*fs.LoopbackNode
 	events chan<- fsevent.Event
 	hyd    mount.Hydrator // nil => eager mode; content is always resident
+	lg     *log.Logger    // nil => the log package's default
+}
+
+// logf writes one line for this mount.
+func (n *node) logf(format string, args ...any) {
+	logTo(n.lg, format, args...)
+}
+
+// logTo is the shared nil-logger fallback for the node and its file handles.
+func logTo(lg *log.Logger, format string, args ...any) {
+	if lg == nil {
+		log.Printf(format, args...)
+		return
+	}
+	lg.Printf(format, args...)
 }
 
 // Interface assertions: these are the node capabilities we override. If a
@@ -60,17 +75,17 @@ func (n *node) WrapChild(_ context.Context, ops fs.InodeEmbedder) fs.InodeEmbedd
 		// go-fuse only ever hands us what LoopbackRoot constructed. If that ever
 		// changes, pass the child through unwrapped rather than dropping it: an
 		// uninstrumented node loses sync events, a nil one loses the file.
-		log.Printf("vfs: unexpected child type %T; passing through uninstrumented", ops)
+		n.logf("vfs: unexpected child type %T; passing through uninstrumented", ops)
 		return ops
 	}
-	return &node{LoopbackNode: ln, events: n.events, hyd: n.hyd}
+	return &node{LoopbackNode: ln, events: n.events, hyd: n.hyd, lg: n.lg}
 }
 
 // NewRoot builds the root InodeEmbedder for a loopback mount backed by dir (which
 // may be a /proc/self/fd/N path for in-place mounts). Every node created under it
 // reports mutations on events. hyd may be nil (eager mode); when set, opening a
 // file whose content is not resident faults it in first (M5).
-func NewRoot(dir string, events chan<- fsevent.Event, hyd mount.Hydrator) (fs.InodeEmbedder, error) {
+func NewRoot(dir string, events chan<- fsevent.Event, hyd mount.Hydrator, lg *log.Logger) (fs.InodeEmbedder, error) {
 	var st syscall.Stat_t
 	if err := syscall.Stat(dir, &st); err != nil {
 		return nil, err
@@ -86,6 +101,7 @@ func NewRoot(dir string, events chan<- fsevent.Event, hyd mount.Hydrator) (fs.In
 		LoopbackNode: &fs.LoopbackNode{RootData: root},
 		events:       events,
 		hyd:          hyd,
+		lg:           lg,
 	}
 	// Mirrors NewLoopbackRoot: relative-path computation prefers this over
 	// walking up to the FUSE mount root.
@@ -116,7 +132,7 @@ func (n *node) Create(ctx context.Context, name string, flags, mode uint32, out 
 	if n.hyd != nil {
 		if p := n.childPath(name); n.hyd.IsPlaceholder(p) {
 			if err := n.hyd.Discard(p); err != nil {
-				log.Printf("[hydrate] discard %s: %v", p, err)
+				n.logf("[hydrate] discard %s: %v", p, err)
 				return nil, nil, 0, syscall.EIO
 			}
 		}
@@ -127,7 +143,7 @@ func (n *node) Create(ctx context.Context, name string, flags, mode uint32, out 
 		n.emit(fsevent.Event{Op: fsevent.OpCreate, Path: path})
 		// The file was just created or truncated, so its content is resident by
 		// definition — mark the handle so no read on it tries to fault anything in.
-		h := &fileHandle{wrapped: fh, path: path, events: n.events, hyd: n.hyd}
+		h := &fileHandle{wrapped: fh, path: path, events: n.events, hyd: n.hyd, lg: n.lg}
 		h.resident.Store(true)
 		fh = h
 	}
@@ -152,13 +168,13 @@ func (n *node) Open(ctx context.Context, flags uint32) (fs.FileHandle, uint32, s
 	path := n.Path(nil)
 	if n.hyd != nil && flags&syscall.O_TRUNC != 0 && n.hyd.IsPlaceholder(path) {
 		if err := n.hyd.Discard(path); err != nil {
-			log.Printf("[hydrate] discard %s: %v", path, err)
+			n.logf("[hydrate] discard %s: %v", path, err)
 			return nil, 0, syscall.EIO
 		}
 	}
 	fh, fuseFlags, errno := n.LoopbackNode.Open(ctx, flags)
 	if errno == 0 {
-		fh = &fileHandle{wrapped: fh, path: path, events: n.events, hyd: n.hyd}
+		fh = &fileHandle{wrapped: fh, path: path, events: n.events, hyd: n.hyd, lg: n.lg}
 	}
 	return fh, fuseFlags, errno
 }
@@ -213,7 +229,7 @@ func (n *node) Setattr(ctx context.Context, fh fs.FileHandle, in *fuse.SetAttrIn
 				err = n.hyd.Hydrate(ctx, path)
 			}
 			if err != nil {
-				log.Printf("[hydrate] setattr %s: %v", path, err)
+				n.logf("[hydrate] setattr %s: %v", path, err)
 				return syscall.EIO
 			}
 		}

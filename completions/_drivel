@@ -46,7 +46,8 @@ _drivel() {
 
 _drivel_mount_args() {
     _arguments -s \
-        '-mount=[path to mount the filesystem (required)]:mountpoint:_files -/' \
+        '-config=[TOML file describing one or more mounts]:config file:_files' \
+        '-mount=[path to mount the filesystem (required unless -config)]:mountpoint:_files -/' \
         '-data=[backing directory (source of truth); omit for in-place mode]:backing dir:_files -/' \
         '-credentials=[OAuth client secret JSON; enables Drive sync]:credentials file:_files' \
         '-token=[cached OAuth token from `drivel login`]:token file:_files' \
@@ -57,12 +58,15 @@ _drivel_mount_args() {
         '-resync[enumerate the remote tree and reconcile it at startup]' \
         '-materialize[eager mode: download remote files that have no local copy]' \
         '-max-deletes=[cap on deletions one reconcile may infer; 0 for no limit]:count:' \
+        '-sweep-interval=[re-enumerate this often, from the last completed sweep; 0 disables]:duration:' \
         '-debug[enable FUSE debug logging]' \
         '(-h -help)'{-h,-help}'[show mount usage]'
 }
 
 _drivel_login_args() {
     _arguments -s \
+        '-account=[store this login as a named account under \$XDG_CONFIG_HOME/drivel]:account name:' \
+        '-config=[config file to add the account to]:config file:_files' \
         '-credentials=[path to read/write the OAuth client secret JSON]:credentials file:_files' \
         '-token=[path to write the OAuth token]:token file:_files' \
         '-client-id=[OAuth client ID]:client id:' \

@@ -9,20 +9,33 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
-	"github.com/zishmusic/drivel/internal/fsevent"
-	"github.com/zishmusic/drivel/internal/hydrate"
-	"github.com/zishmusic/drivel/internal/mount"
+	"github.com/zishmusic/drivel/internal/app"
+	"github.com/zishmusic/drivel/internal/config"
 	"github.com/zishmusic/drivel/internal/provider"
 	"github.com/zishmusic/drivel/internal/provider/gdrive"
-	"github.com/zishmusic/drivel/internal/state"
 	"github.com/zishmusic/drivel/internal/syncengine"
-	"github.com/zishmusic/drivel/internal/vfs"
 )
+
+// driveKind is the name the Drive backend is registered under. The mount flags
+// are Drive-shaped by history (-drive-root, -credentials), so the flag path
+// always selects this one; a config file may name any registered kind.
+const driveKind = "gdrive"
+
+// mountShapingFlags describe *what* to mount, which is exactly what a config file
+// is for. Mixing the two would need a precedence rule that nobody would remember,
+// so passing one alongside -config is an error instead. -debug is absent
+// deliberately: it changes how a mount reports, not what it is.
+var mountShapingFlags = []string{
+	"mount", "data", "credentials", "token", "state", "index",
+	"drive-root", "lazy", "resync", "materialize", "max-deletes", "sweep-interval",
+}
 
 func runMount(args []string) error {
 	fset := flag.NewFlagSet("mount", flag.ExitOnError)
-	mountpoint := fset.String("mount", "", "path to mount the filesystem (required)")
+	configPath := fset.String("config", "", "TOML config file describing one or more mounts; defaults to $XDG_CONFIG_HOME/drivel/config.toml when no mount flags are given")
+	mountpoint := fset.String("mount", "", "path to mount the filesystem (required unless -config is used)")
 	dataDir := fset.String("data", "", "backing directory (source of truth). If omitted, in-place mode uses the mount dir as its own backing (Linux only)")
 	credentials := fset.String("credentials", "", "OAuth client secret JSON; enables Drive sync (else log-only)")
 	token := fset.String("token", "token.json", "path to the cached OAuth token (from 'drivel login')")
@@ -37,172 +50,128 @@ func runMount(args []string) error {
 	debug := fset.Bool("debug", false, "enable FUSE debug logging")
 	_ = fset.Parse(args)
 
-	if *mountpoint == "" {
-		fset.Usage()
-		return errors.New("-mount is required")
-	}
-	if *lazy && *credentials == "" {
-		// A placeholder is a promise that the bytes can be fetched later; without a
-		// provider there is nothing to redeem it against.
-		return errors.New("-lazy requires -credentials (there is nothing to hydrate from)")
-	}
-	if err := os.MkdirAll(*mountpoint, 0o755); err != nil {
-		return fmt.Errorf("creating %s: %w", *mountpoint, err)
-	}
-	if *dataDir != "" {
-		if err := os.MkdirAll(*dataDir, 0o755); err != nil {
-			return fmt.Errorf("creating %s: %w", *dataDir, err)
-		}
-	}
+	given := map[string]bool{}
+	fset.Visit(func(f *flag.Flag) { given[f.Name] = true })
 
-	// Resolve the backing store. In in-place mode this opens a dirfd to the
-	// mountpoint BEFORE we mount over it, so both the FUSE backend and the sync
-	// engine reach the underlying directory (via /proc/self/fd/N) instead of
-	// recursing through the overlay. Held open until after unmount.
-	backing, err := mount.ResolveBacking(*mountpoint, *dataDir)
+	specs, err := mountSpecs(fset, given, specFlags{
+		configPath: *configPath, mountpoint: *mountpoint, dataDir: *dataDir,
+		credentials: *credentials, token: *token, stateDB: *stateDB, indexDB: *indexDB,
+		driveRoot: *driveRoot, lazy: *lazy, resync: *resync, materialize: *materialize,
+		maxDeletes: *maxDeletes, sweepInterval: *sweepInterval, debug: *debug,
+	})
 	if err != nil {
 		return err
 	}
-	defer backing.Close()
-	if backing.InPlace {
-		log.Printf("in-place mode: %s is its own backing store (via %s)", *mountpoint, backing.Path)
-	} else {
-		log.Printf("backing store: %s", backing.Path)
-	}
 
-	// Mutations observed at the mount flow through this channel to the sync
-	// engine. Buffered so brief FS bursts don't stall on the consumer.
-	events := make(chan fsevent.Event, 1024)
+	reg := provider.NewRegistry()
+	if err := reg.Register(driveKind, gdrive.Factory); err != nil {
+		return err
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	// Wire the Drive provider if credentials were supplied; otherwise run
-	// log-only (M1 behaviour), which needs no network or auth.
-	var (
-		store provider.Store
-		st    *state.Store
-	)
-	if *credentials != "" {
-		d, err := gdrive.Open(ctx, gdrive.Config{
-			Credentials: *credentials,
-			Token:       *token,
-			RootID:      *driveRoot,
-			IndexPath:   *indexDB,
-		})
-		if err != nil {
-			return fmt.Errorf("google drive auth: %w", err)
-		}
-		defer d.Close()
-		store = d
-		log.Printf("google drive sync enabled (root folder %s)", *driveRoot)
-
-		// Engine-level sync state (cursor + echo records) lives in a control-plane
-		// DB outside the backing tree so it isn't itself synced to Drive.
-		st, err = state.Open(*stateDB)
-		if err != nil {
-			return fmt.Errorf("open state db: %w", err)
-		}
-		defer st.Close()
-	} else {
-		log.Print("no -credentials: running in log-only mode (no cloud sync)")
-	}
-
-	// Lazy hydration (M5). The hydrator is shared by all three consumers: the mount
-	// backend faults content in on open, the downloader writes placeholders instead
-	// of content, and the uploader consults it to avoid pushing a placeholder's
-	// zeros over the real remote file.
-	var hyd *hydrate.Hydrator
-	if *lazy {
-		hyd = hydrate.New(backing.Path, store, st)
-		if !hyd.XattrsUsable() {
-			// Without xattrs the placeholder marker lives only in the state DB, so
-			// losing that DB makes placeholders look like empty files — which the
-			// uploader would then push over good remote content.
-			log.Printf("WARNING: %s cannot store user xattrs; placeholder marks rely on the state DB alone (%s). Do not delete it while placeholders exist.", backing.Path, *stateDB)
-		}
-		log.Printf("lazy hydration enabled (ranged reads: %t)", hyd.SupportsRanges())
-	}
-
-	engine := syncengine.New(syncengine.Config{
-		Store:   store,
-		DataDir: backing.Path,
-		State:   st,
-		Holes:   holesOf(hyd),
-	})
-	// The engine's lifecycle is bounded by close(events), NOT by ctx: on SIGINT the
-	// mount unmounts first (below), which flushes every pending FUSE event, and only
-	// then do we close(events). Running the engine on a background context lets it
-	// drain those buffered writes and its in-flight uploads (bounded internally)
-	// instead of aborting the moment Ctrl-C cancels ctx. A second Ctrl-C hard-exits.
-	engineDone := make(chan struct{})
-	go func() {
-		engine.Run(context.Background(), events)
-		close(engineDone)
-	}()
-
-	// Inbound pull loop (M3), only if the store offers a change feed.
-	if src, ok := store.(provider.ChangeSource); ok {
-		dl := syncengine.NewDownloader(src, store, backing.Path, st, syncengine.DefaultCadence)
-		if hyd != nil {
-			dl = dl.Lazy(hyd)
-		}
-		// Initial enumeration & reconcile (M7b). The downloader owns it because it
-		// owns the cursor, and the ordering rule that makes a sweep safe — take the
-		// start token before the sweep, poll from it only after — is a statement
-		// about the cursor. It runs in this goroutine, off the FUSE path, so the
-		// mount below comes up and stays usable while a large Drive is swept.
-		dl = dl.Reconcile(syncengine.ReconcileOptions{
-			Push:       engine,
-			Fetch:      *materialize,
-			Force:      *resync,
-			MaxDeletes: *maxDeletes,
-			Interval:   *sweepInterval,
-		})
-		log.Print("inbound sync enabled (changes.list pull loop)")
-		go dl.Run(ctx)
-	}
-
-	backend := vfs.NewBackend()
-	log.Printf("mounting %s (%s backend, Ctrl-C to unmount)", *mountpoint, backend.Name())
-	err = backend.Serve(ctx, mount.Options{
-		Mountpoint: *mountpoint,
-		Backing:    backing.Path,
-		Events:     events,
-		FsName:     "drivel",
-		Debug:      *debug,
-		Hydrator:   hydratorOf(hyd),
-	})
+	a, err := app.New(ctx, specs, reg)
 	if err != nil {
-		// Deliberately not fatal here. Serve returns after unmount as well as on
-		// a mount failure, and in the first case the engine may still be holding
-		// buffered uploads. Report the error, drain, then let the caller exit.
-		err = fmt.Errorf("serve: %w", err)
+		return err
 	}
-	// Unmount has returned, so no more events will be emitted; closing the channel
-	// tells the engine to drain its queue (bounded) and exit. Wait for that drain
-	// so buffered uploads complete before the process exits (DESIGN.md §7).
-	close(events)
-	<-engineDone
-	log.Print("sync engine drained; exiting")
-	return err
+	// Close only after Run returns: the backing dirfds are what the mounts read
+	// through, and the engines drain inside Run.
+	defer a.Close() //nolint:errcheck // the process is exiting; Run's error is the one that matters
+	if a.Len() > 1 {
+		log.Printf("serving %d mounts", a.Len())
+	}
+	return a.Run(ctx)
 }
 
-// holesOf and hydratorOf convert a possibly-nil *hydrate.Hydrator into the
-// consumer-defined interfaces without handing over a non-nil interface wrapping a
-// nil pointer — the classic Go trap that would make every "is lazy mode on?" check
-// answer yes and every IsPlaceholder call panic.
-
-func holesOf(h *hydrate.Hydrator) syncengine.Placeholders {
-	if h == nil {
-		return nil
-	}
-	return h
+// specFlags is the parsed flag set, gathered so mountSpecs stays testable.
+type specFlags struct {
+	configPath    string
+	mountpoint    string
+	dataDir       string
+	credentials   string
+	token         string
+	stateDB       string
+	indexDB       string
+	driveRoot     string
+	lazy          bool
+	resync        bool
+	materialize   bool
+	maxDeletes    int
+	sweepInterval time.Duration
+	debug         bool
 }
 
-func hydratorOf(h *hydrate.Hydrator) mount.Hydrator {
-	if h == nil {
-		return nil
+// mountSpecs decides between the config file and the flags, and returns what to
+// mount either way. Both paths end in the same []app.MountSpec, so everything
+// downstream — validation, opening, the shutdown ordering — has one
+// implementation rather than a single-mount one that drifts from the N-mount one.
+func mountSpecs(fset *flag.FlagSet, given map[string]bool, f specFlags) ([]app.MountSpec, error) {
+	path := f.configPath
+	if !given["config"] && !given["mount"] {
+		// No -mount and no -config: fall back to the config file if the user has
+		// one. Absent, we fall through to the -mount required error below.
+		if p, err := config.DefaultPath(); err == nil {
+			if _, statErr := os.Stat(p); statErr == nil {
+				path = p
+			}
+		}
 	}
-	return h
+
+	if path != "" {
+		for _, name := range mountShapingFlags {
+			if given[name] {
+				return nil, fmt.Errorf("-%s cannot be combined with -config (%s); describe the mount in the config file", name, path)
+			}
+		}
+		cfg, err := config.Load(path)
+		if err != nil {
+			return nil, err
+		}
+		specs, err := cfg.Specs()
+		if err != nil {
+			return nil, fmt.Errorf("%s: %w", path, err)
+		}
+		if f.debug {
+			for i := range specs {
+				specs[i].Debug = true
+			}
+		}
+		return specs, nil
+	}
+
+	if f.mountpoint == "" {
+		fset.Usage()
+		return nil, errors.New("-mount is required (or -config, or a config file at the default path)")
+	}
+	if f.lazy && f.credentials == "" {
+		// A placeholder is a promise that the bytes can be fetched later; without a
+		// provider there is nothing to redeem it against. Checked here as well as in
+		// app.Open so the message names the flag the user actually typed.
+		return nil, errors.New("-lazy requires -credentials (there is nothing to hydrate from)")
+	}
+
+	spec := app.MountSpec{
+		Mountpoint:    f.mountpoint,
+		DataDir:       f.dataDir,
+		StateDB:       f.stateDB,
+		Lazy:          f.lazy,
+		Debug:         f.debug,
+		Resync:        f.resync,
+		Materialize:   f.materialize,
+		MaxDeletes:    f.maxDeletes,
+		SweepInterval: f.sweepInterval,
+	}
+	// Credentials are what turn cloud sync on; without them the mount runs
+	// log-only (M1 behaviour) and never reaches a provider.
+	if f.credentials != "" {
+		spec.Provider = driveKind
+		spec.ProviderConfig = provider.StaticDecoder(gdrive.Config{
+			Credentials: f.credentials,
+			Token:       f.token,
+			RootID:      f.driveRoot,
+			IndexPath:   f.indexDB,
+		})
+	}
+	return []app.MountSpec{spec}, nil
 }
