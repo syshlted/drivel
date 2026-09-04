@@ -71,6 +71,21 @@ type ReconcileOptions struct {
 	// and when the change cursor has expired.
 	Force bool
 
+	// Interval re-runs the sweep this often; 0 disables it.
+	//
+	// The change feed only reports what happens while we are watching it, so
+	// everything that happened while drivel was NOT running — a file deleted
+	// offline, a push that exhausted its retries — stays unreconciled until
+	// something enumerates the tree again. Without an interval that is a first run,
+	// a resume, a dead cursor or -resync, which for a long-lived mount can be
+	// never. The baselines for those paths stay in the state DB too, describing
+	// content that exists on neither side; the sweep is the only pass that can
+	// establish that and drop them.
+	//
+	// The schedule is measured from the last COMPLETED sweep, persisted in the
+	// state store, not from process start — see state.SweepDone.
+	Interval time.Duration
+
 	// MaxDeletes caps how many deletions ONE sweep may infer, across both
 	// directions; 0 means unlimited. Exceeding it abandons the delete pass
 	// entirely rather than trimming it, because the shapes that produce a huge
@@ -86,6 +101,15 @@ type ReconcileOptions struct {
 // on Drive is permanent rather than a move to the trash — which is exactly why
 // there is a cap at all.
 const DefaultMaxDeletes = 100
+
+// DefaultSweepInterval is how often a running mount re-enumerates the remote.
+//
+// Daily rather than hourly because a sweep is the expensive operation here — one
+// files.list page per thousand objects, then a local stat and two state reads per
+// file — and what it recovers is by definition offline activity, which is not
+// urgent. Everything that happens while the mount is up already arrives through
+// the change feed within seconds.
+const DefaultSweepInterval = 24 * time.Hour
 
 // Reconcile enables the M7b sweep on this downloader and returns it for chaining.
 // It is a no-op unless the store also implements provider.Enumerator.
@@ -129,10 +153,73 @@ func (d *Downloader) startFeed(ctx context.Context) (string, error) {
 		log.Print("[sweep] no change cursor yet: enumerating the remote tree before tailing it")
 	case d.rec.Force:
 		log.Print("[sweep] -resync: re-enumerating the remote tree")
+	case d.sweepOverdue():
+		log.Printf("[sweep] no enumeration within -sweep-interval %s: re-enumerating the remote tree", d.rec.Interval)
 	default:
 		return cursor, nil
 	}
 	return d.beginSweep(ctx)
+}
+
+// sweepOverdue reports whether the periodic schedule is due, from the last sweep
+// that actually completed.
+//
+// No stamp at all counts as overdue. That is a state DB written before the stamp
+// existed, or one whose every sweep was interrupted; either way nothing has ever
+// finished reconciling this tree, which is the case the interval exists for. The
+// cost is one sweep on the first mount after enabling it.
+func (d *Downloader) sweepOverdue() bool {
+	if d.rec.Interval <= 0 || !d.canSweep() {
+		return false
+	}
+	last, ok, err := d.state.SweepDone()
+	if err != nil {
+		log.Printf("[sweep] reading the last sweep time: %v", err)
+		return false // unreadable state is not evidence; leave the schedule alone
+	}
+	return !ok || time.Since(last) >= d.rec.Interval
+}
+
+// sweepDeadline is when the next periodic sweep falls due. The zero time means
+// never, which is what a disabled interval and a provider that cannot enumerate
+// both amount to.
+func (d *Downloader) sweepDeadline() time.Time {
+	if d.rec.Interval <= 0 || !d.canSweep() {
+		return time.Time{}
+	}
+	last, ok, err := d.state.SweepDone()
+	if err != nil || !ok {
+		// startFeed has already run whatever sweep was due, so a missing stamp here
+		// means only that recording it failed. Counting from now costs at most one
+		// late sweep; counting from zero would sweep on every poll.
+		return time.Now().Add(d.rec.Interval)
+	}
+	return last.Add(d.rec.Interval)
+}
+
+// dueSweep runs the periodic sweep if the deadline has passed, returning the
+// cursor the feed continues from. It exists for the long-lived mount that never
+// restarts, which is exactly the process startFeed's checks cannot help.
+//
+// It goes through beginSweep, so the start token is taken before the listing just
+// as on a first run. The cursor it replaces is older than the one in hand, which
+// replays changes the feed already delivered — idempotent, and dropped by §4.
+func (d *Downloader) dueSweep(ctx context.Context) (string, bool) {
+	if d.nextSweep.IsZero() || time.Now().Before(d.nextSweep) {
+		return "", false
+	}
+	// Reschedule before running, not after. A sweep that fails must not retry in a
+	// tight poll loop, and one that takes an hour must not be due again on return.
+	d.nextSweep = time.Now().Add(d.rec.Interval)
+	log.Printf("[sweep] -sweep-interval %s elapsed: re-enumerating the remote tree", d.rec.Interval)
+	fresh, err := d.beginSweep(ctx)
+	if err != nil {
+		if ctx.Err() == nil {
+			log.Printf("[sweep] periodic re-enumeration failed: %v", err)
+		}
+		return "", false
+	}
+	return fresh, true
 }
 
 // beginSweep takes the start token FIRST, records it with the sweep, and only
@@ -226,9 +313,12 @@ func (d *Downloader) runSweep(ctx context.Context, sw state.Sweep) (string, erro
 	if err := d.state.SetCursor(sw.Token); err != nil {
 		return "", err
 	}
-	if err := d.state.ClearSweep(); err != nil {
-		log.Printf("[sweep] clearing sweep state: %v", err)
+	if err := d.state.FinishSweep(time.Now()); err != nil {
+		// Only the schedule suffers: the next mount reads no completion stamp and
+		// treats a sweep as overdue, which costs one extra sweep, not correctness.
+		log.Printf("[sweep] recording sweep completion: %v", err)
 	}
+	d.nextSweep = d.sweepDeadline()
 	log.Printf("[sweep] reconcile complete in %s: %s", time.Since(started).Round(time.Millisecond), st)
 	return sw.Token, nil
 }
@@ -244,6 +334,7 @@ type sweepStats struct {
 	localDel    int
 	remoteDel   int
 	kept        int // would have been deleted locally, but the local copy diverged
+	orphaned    int // baselines dropped without acting: gone locally, unlisted remotely
 }
 
 func (s sweepStats) String() string {
@@ -259,6 +350,9 @@ func (s sweepStats) String() string {
 	}
 	if s.kept > 0 {
 		out += fmt.Sprintf(", %d kept (locally modified after a remote delete)", s.kept)
+	}
+	if s.orphaned > 0 {
+		out += fmt.Sprintf(", %d stale record(s) dropped", s.orphaned)
 	}
 	return out
 }
@@ -352,14 +446,15 @@ func (d *Downloader) pushLocalOnly(ctx context.Context, sw state.Sweep, st *swee
 	}
 	err := filepath.WalkDir(d.dataDir, func(p string, e fs.DirEntry, err error) error {
 		if err != nil {
-			return nil // unreadable entry: skip it, never abandon the walk
+			return nil //nolint:nilerr // unreadable entry: skip it, never abandon the walk
 		}
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
 		rel, relErr := filepath.Rel(d.dataDir, p)
 		if relErr != nil || rel == "." {
-			return nil
+			// A path we cannot express relative to the root is not ours to push.
+			return nil //nolint:nilerr // see above
 		}
 		rel = filepath.ToSlash(rel)
 		if skipLocal(filepath.Base(p)) {
@@ -381,10 +476,10 @@ func (d *Downloader) pushLocalOnly(ctx context.Context, sw state.Sweep, st *swee
 			return nil
 		}
 		if _, ok, err := d.state.GetEcho(rel); err != nil || ok {
-			return nil // has a baseline: handled by the rows that need one
+			return nil //nolint:nilerr // has a baseline (or the store is unreadable, which means the same here): handled by the rows that need one
 		}
 		if seen, err := d.state.SeenPath(sw.Gen, rel); err != nil || seen {
-			return nil // exists remotely too: apply already reconciled it
+			return nil //nolint:nilerr // seen remotely (or the store is unreadable, which means the same here): apply already reconciled it
 		}
 		log.Printf("[sweep] push    %s (local only)", rel)
 		d.rec.Push.Push(ctx, fsevent.Event{Op: fsevent.OpWrite, Path: rel})
@@ -401,29 +496,42 @@ func (d *Downloader) pushLocalOnly(ctx context.Context, sw state.Sweep, st *swee
 // sweep that completed, only on paths with a baseline older than the sweep, and
 // only within MaxDeletes.
 func (d *Downloader) applyDeletes(ctx context.Context, sw state.Sweep, st *sweepStats) error {
-	gone, err := d.state.UnseenEchoes(sw.Gen)
-	if err != nil {
-		return err
-	}
-	cands := make([]string, 0, len(gone))
-	for p, e := range gone {
+	// The cap is applied DURING the walk, not after it. The shape that most needs
+	// refusing — a state DB whose paths are all absent from this remote — is also
+	// the biggest, so materialising every candidate before deciding would spend the
+	// memory on exactly the pass about to be thrown away. Past the limit we stop
+	// retaining and only keep counting: the count costs nothing inside a scan we
+	// are already performing, and it is what makes the refusal actionable, since
+	// "4231 deletions" reads very differently to an operator than "more than 100".
+	var cands []candidate
+	total := 0
+	err := d.state.EachUnseenEcho(sw.Gen, func(p string, e state.Echo) error {
 		// The baseline has to be older than the sweep. An echo written *during* the
 		// sweep describes a file that appeared after its page was listed — a local
 		// create pushed while we swept — and it is absent from the seen-set for that
 		// reason alone. Deleting it would destroy a file the user just made.
 		if !e.At.Before(sw.Started) {
-			continue
+			return nil
 		}
-		cands = append(cands, p)
+		total++
+		if d.rec.MaxDeletes > 0 && total > d.rec.MaxDeletes {
+			cands = nil
+			return nil
+		}
+		cands = append(cands, candidate{path: p, echo: e})
+		return nil
+	})
+	if err != nil {
+		return err
 	}
-	if len(cands) == 0 {
+	if total == 0 {
 		return nil
 	}
-	if d.rec.MaxDeletes > 0 && len(cands) > d.rec.MaxDeletes {
+	if d.rec.MaxDeletes > 0 && total > d.rec.MaxDeletes {
 		log.Printf("[sweep] REFUSING to delete: the sweep says %d previously-synced path(s) are gone from the remote, over the -max-deletes limit of %d. "+
 			"That many at once usually means the state DB, the backing dir or -drive-root do not match each other, rather than %d real deletions. "+
 			"Nothing was deleted; re-run with a higher -max-deletes (or 0 for no limit) if the deletions are genuine.",
-			len(cands), d.rec.MaxDeletes, len(cands))
+			total, d.rec.MaxDeletes, total)
 		return nil
 	}
 
@@ -431,18 +539,41 @@ func (d *Downloader) applyDeletes(ctx context.Context, sw state.Sweep, st *sweep
 	// been dealt with and it can be removed by an empty-dir rmdir. The name
 	// tie-break is only there to keep the log order stable between runs.
 	sort.Slice(cands, func(i, j int) bool {
-		if len(cands[i]) != len(cands[j]) {
-			return len(cands[i]) > len(cands[j])
+		if len(cands[i].path) != len(cands[j].path) {
+			return len(cands[i].path) > len(cands[j].path)
 		}
-		return cands[i] < cands[j]
+		return cands[i].path < cands[j].path
 	})
-	for _, rel := range cands {
+	// The records for paths this pass actually removes are dropped in one commit
+	// rather than two per path. Deferring them is safe because nothing re-reads a
+	// baseline within the pass, and a crash before the flush is self-correcting:
+	// the path is gone on both sides, so the next sweep sees it as already-deleted
+	// and the leftover record costs one no-op push.
+	forget := map[string]struct{}{}
+	defer func() {
+		paths := make([]string, 0, len(forget))
+		for p := range forget {
+			paths = append(paths, p)
+		}
+		if err := d.state.ForgetMany(paths); err != nil {
+			log.Printf("[sweep] clearing %d record(s): %v", len(paths), err)
+		}
+	}()
+	for _, c := range cands {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		d.deleteGone(ctx, rel, gone[rel], st)
+		d.deleteGone(ctx, c.path, c.echo, st, forget)
 	}
 	return nil
+}
+
+// candidate is one path with a baseline that the sweep did not observe remotely.
+// The echo travels with the path because deleteGone needs it to decide whether
+// the local copy is still the one the baseline describes.
+type candidate struct {
+	path string
+	echo state.Echo
 }
 
 // deleteGone handles one path that has a baseline but is no longer on the remote.
@@ -453,13 +584,21 @@ func (d *Downloader) applyDeletes(ctx context.Context, sw state.Sweep, st *sweep
 //	                describes. A local copy that has changed since is the only
 //	                remaining version of that work, and no inference is worth
 //	                losing it: keep it and push it back instead.
-func (d *Downloader) deleteGone(ctx context.Context, rel string, e state.Echo, st *sweepStats) {
+func (d *Downloader) deleteGone(ctx context.Context, rel string, e state.Echo, st *sweepStats, forget map[string]struct{}) {
 	dst := filepath.Join(d.dataDir, filepath.FromSlash(rel))
 	info, err := os.Lstat(dst)
 	switch {
 	case errors.Is(err, os.ErrNotExist):
 		if d.rec.Push == nil {
-			return // nothing wired to act on the remote; leave it alone
+			// Nothing wired to act on the remote, so whatever is left there stays.
+			// The baseline still has to go: it describes content that is absent
+			// locally and unlisted remotely, so keeping it makes this path a delete
+			// candidate again on every future sweep — forever, since no pass will
+			// ever resolve it. Dropping it is the safe direction: the path becomes
+			// new to the next sweep, and a path without a baseline is never deleted.
+			forget[rel] = struct{}{}
+			st.orphaned++
+			return
 		}
 		log.Printf("[sweep] delete  %s remotely (gone locally)", rel)
 		d.rec.Push.Push(ctx, fsevent.Event{Op: fsevent.OpUnlink, Path: rel})
@@ -478,7 +617,7 @@ func (d *Downloader) deleteGone(ctx context.Context, rel string, e state.Echo, s
 			log.Printf("[sweep] keep    %s (remote directory gone, but the local one is not empty)", rel)
 			return
 		}
-		_ = d.state.DeleteEcho(rel)
+		forget[rel] = struct{}{}
 		log.Printf("[sweep] rmdir   %s (gone remotely)", rel)
 		st.localDel++
 		return
@@ -490,7 +629,11 @@ func (d *Downloader) deleteGone(ctx context.Context, rel string, e state.Echo, s
 		// baseline that no longer describes anything, and put them back on the
 		// remote if there is anywhere to put them.
 		log.Printf("[sweep] keep    %s (gone remotely, but %s)", rel, why)
-		_ = d.state.DeleteEcho(rel)
+		// Dropped inline, not batched: the push below writes a fresh echo for this
+		// same path, and a deferred delete would land on top of it and erase it.
+		if err := d.state.DeleteEcho(rel); err != nil {
+			log.Printf("[sweep] clearing the baseline for %s: %v", rel, err)
+		}
 		if d.rec.Push != nil {
 			d.rec.Push.Push(ctx, fsevent.Event{Op: fsevent.OpWrite, Path: rel})
 		}
@@ -501,8 +644,7 @@ func (d *Downloader) deleteGone(ctx context.Context, rel string, e state.Echo, s
 		log.Printf("[sweep] removing %s: %v", rel, err)
 		return
 	}
-	_ = d.state.DeleteEcho(rel)
-	_ = d.state.DeleteHydration(rel)
+	forget[rel] = struct{}{}
 	log.Printf("[sweep] delete  %s locally (gone remotely)", rel)
 	st.localDel++
 }

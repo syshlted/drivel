@@ -258,13 +258,4 @@ func (d *Drive) sweepParentLocked(ctx context.Context, sw *sweepState, parentID 
 // rememberIDLocked records a path↔ID mapping in the in-memory maps only. The
 // persistent half is written per page in one batch (see Enumerate), which is the
 // difference between one commit per page and one per object.
-func (d *Drive) rememberIDLocked(p, id string) {
-	if old, ok := d.idByPath[p]; ok && old != id {
-		delete(d.pathByID, old)
-	}
-	if oldPath, ok := d.pathByID[id]; ok && oldPath != p {
-		delete(d.idByPath, oldPath)
-	}
-	d.idByPath[p] = id
-	d.pathByID[id] = p
-}
+func (d *Drive) rememberIDLocked(p, id string) { d.linkLocked(p, id) }

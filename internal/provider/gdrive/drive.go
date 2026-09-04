@@ -2,7 +2,7 @@ package gdrive
 
 import (
 	"context"
-	"crypto/md5"
+	"crypto/md5" //nolint:gosec // G501: Drive addresses content by MD5; see HashContent
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -95,6 +95,11 @@ type Drive struct {
 	idByPath map[string]string // root-relative slash path -> fileID ("" => root)
 	pathByID map[string]string // reverse, for resolving change-feed entries
 
+	// kids indexes idByPath by parent directory, so dropping or moving a subtree
+	// costs that subtree instead of a scan of every path we know. See the child
+	// index note in index.go — it is maintained only by linkLocked/unlinkLocked.
+	kids map[string]map[string]struct{}
+
 	// Persistent path↔ID index (M7): a cache of the two maps above that outlives
 	// the process. Never authoritative — see the note at the top of index.go.
 	idx       *pathindex.Store
@@ -161,6 +166,7 @@ func Open(ctx context.Context, cfg Config) (*Drive, error) {
 		root:     cfg.RootID,
 		idByPath: map[string]string{"": cfg.RootID},
 		pathByID: map[string]string{cfg.RootID: ""},
+		kids:     map[string]map[string]struct{}{},
 	}
 	if cfg.IndexPath != "" {
 		// A failure here is not fatal: the index only ever saves work, so we log it
@@ -329,7 +335,7 @@ func (d *Drive) GetRange(ctx context.Context, p string, off, length int64) (io.R
 // content against a checksum Drive already reported, never as a security
 // property, so MD5's collision weakness is not in play here.
 func (d *Drive) HashContent(r io.Reader) (string, error) {
-	h := md5.New()
+	h := md5.New() //nolint:gosec // G401: comparison against Drive's md5Checksum, not a security property
 	if _, err := io.Copy(h, r); err != nil {
 		return "", err
 	}

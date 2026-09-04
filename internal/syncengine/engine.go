@@ -371,7 +371,7 @@ func (e *Engine) push(ctx context.Context, ev fsevent.Event) error {
 		if err := e.store.Remove(ctx, ev.Path); err != nil {
 			return err
 		}
-		e.forgetEcho(ev.Path)
+		e.forgetPath(ev.Path)
 		return nil
 
 	case fsevent.OpRename:
@@ -384,7 +384,7 @@ func (e *Engine) push(ctx context.Context, ev fsevent.Event) error {
 		if err != nil {
 			return err
 		}
-		e.forgetEcho(ev.Path)
+		e.forgetPath(ev.Path)
 		e.recordEcho(rf)
 		return nil
 
@@ -595,12 +595,21 @@ func (e *Engine) recordEcho(rf provider.RemoteFile) {
 	}
 }
 
-func (e *Engine) forgetEcho(p string) {
+// forgetPath drops every state record for p, in one commit.
+//
+// It runs when the remote object at p is gone (removed) or has moved away
+// (renamed), which makes both records meaningless at once: the §4 echo describes
+// content that is no longer there, and the M5 hydration bitmap describes a file
+// that no longer exists. Dropping only the echo — which is what this did before —
+// leaked one hydration record per deleted path for the life of the state DB, and
+// in lazy mode that is every file, since a completed hydration writes a full
+// bitmap and nothing ever removes it.
+func (e *Engine) forgetPath(p string) {
 	if e.state == nil {
 		return
 	}
-	if err := e.state.DeleteEcho(p); err != nil {
-		log.Printf("[sync] forget echo %s: %v", p, err)
+	if err := e.state.Forget(p); err != nil {
+		log.Printf("[sync] forget state %s: %v", p, err)
 	}
 }
 
@@ -632,7 +641,9 @@ func jitter(d time.Duration) time.Duration {
 	if d <= 0 {
 		return 0
 	}
-	return d/2 + time.Duration(rand.Int63n(int64(d)/2+1))
+	// math/rand is correct here: this decorrelates retry timing, it does not
+	// protect anything. crypto/rand would add a syscall per retry for nothing.
+	return d/2 + time.Duration(rand.Int63n(int64(d)/2+1)) //nolint:gosec // G404: see above
 }
 
 // sleepCtx sleeps for d or until ctx is cancelled; it reports false if cancelled.

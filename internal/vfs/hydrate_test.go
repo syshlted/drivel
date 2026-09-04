@@ -3,6 +3,7 @@ package vfs
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sync"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/zishmusic/drivel/internal/fsevent"
 	"github.com/zishmusic/drivel/internal/mount"
+	"github.com/zishmusic/drivel/internal/testenv"
 )
 
 // testHydrator is a mount.Hydrator over a real backing dir: "placeholders" are
@@ -100,7 +102,7 @@ var _ mount.Hydrator = (*testHydrator)(nil)
 func mountTest(t *testing.T, backing string, hyd mount.Hydrator) (mnt string, events <-chan fsevent.Event) {
 	t.Helper()
 	if _, err := os.Stat("/dev/fuse"); err != nil {
-		t.Skip("no /dev/fuse")
+		testenv.Unavailable(t, testenv.FUSE, "no /dev/fuse: "+err.Error())
 	}
 
 	mnt = t.TempDir()
@@ -136,14 +138,14 @@ func mountTest(t *testing.T, backing string, hyd mount.Hydrator) (mnt string, ev
 		select {
 		case err := <-served:
 			cancel()
-			t.Skipf("mount unavailable in this environment: %v", err)
+			testenv.Unavailable(t, testenv.FUSE, fmt.Sprintf("Serve returned before the mount came up: %v", err))
 		default:
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
 	if !ready {
 		cancel()
-		t.Skip("mount did not become ready")
+		testenv.Unavailable(t, testenv.FUSE, "mount did not become ready within 10s")
 	}
 
 	t.Cleanup(func() {

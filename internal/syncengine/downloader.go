@@ -2,7 +2,7 @@ package syncengine
 
 import (
 	"context"
-	"crypto/md5"
+	"crypto/md5" //nolint:gosec // G501: Drive addresses content by MD5; see fileMD5
 	"encoding/hex"
 	"errors"
 	"io"
@@ -51,6 +51,11 @@ type Downloader struct {
 	// got wrong. See reconcile.go.
 	enum provider.Enumerator
 	rec  ReconcileOptions
+
+	// nextSweep is when the periodic sweep next falls due. It is read and written
+	// only by the Run goroutine (and by runSweep, which that goroutine drives), so
+	// it needs no lock. Zero means never.
+	nextSweep time.Time
 }
 
 // Materializer is the OPTIONAL lazy-hydration hook (M5), satisfied by
@@ -92,6 +97,7 @@ func (d *Downloader) Run(ctx context.Context) {
 	if !ok {
 		return
 	}
+	d.nextSweep = d.sweepDeadline()
 
 	wait := d.cad.Fast
 	for {
@@ -99,6 +105,13 @@ func (d *Downloader) Run(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-time.After(wait):
+		}
+
+		// Before polling, not after: a sweep replaces the cursor, so applying a page
+		// fetched with the old one and then sweeping would advance past changes the
+		// sweep's older token was about to replay.
+		if fresh, swept := d.dueSweep(ctx); swept {
+			cursor, wait = fresh, d.cad.Fast
 		}
 
 		changes, next, err := d.src.Changes(ctx, cursor)
@@ -128,13 +141,23 @@ func (d *Downloader) Run(ctx context.Context) {
 			continue
 		}
 
+		// Records for paths removed in this page are dropped in ONE commit at the
+		// end of it rather than two per path, which is what a mass delete arriving
+		// over the feed actually costs. The page is the right boundary because the
+		// cursor below defines it: flush first, so we never advance past a page
+		// whose records we failed to drop.
+		forget := map[string]struct{}{}
 		for _, ch := range changes {
-			if err := d.apply(ctx, ch); err != nil {
+			if err := d.applyTo(ctx, ch, forget); err != nil {
 				if ctx.Err() != nil {
 					return
 				}
 				log.Printf("[pull] apply %s: %v", ch.Path, err)
 			}
+		}
+		if err := d.flushForget(forget); err != nil {
+			log.Printf("[pull] clearing %d removed record(s): %v", len(forget), err)
+			continue // leave the cursor where it is; the page replays idempotently
 		}
 
 		if next != "" && next != cursor {
@@ -210,8 +233,34 @@ func (d *Downloader) resumeCursor(ctx context.Context) (string, error) {
 	return cursor, nil
 }
 
-// apply reconciles one remote change into the backing directory.
+// apply reconciles one remote change into the backing directory, committing its
+// record changes immediately. The poll loop calls applyTo instead, so a page's
+// removals share one commit.
 func (d *Downloader) apply(ctx context.Context, ch provider.RemoteChange) error {
+	forget := map[string]struct{}{}
+	err := d.applyTo(ctx, ch, forget)
+	if fErr := d.flushForget(forget); err == nil {
+		err = fErr
+	}
+	return err
+}
+
+// flushForget drops the accumulated records in one transaction.
+func (d *Downloader) flushForget(forget map[string]struct{}) error {
+	if len(forget) == 0 {
+		return nil
+	}
+	paths := make([]string, 0, len(forget))
+	for p := range forget {
+		paths = append(paths, p)
+	}
+	return d.state.ForgetMany(paths)
+}
+
+// applyTo reconciles one remote change into the backing directory, recording any
+// path whose state records should be dropped in forget rather than deleting them
+// on the spot.
+func (d *Downloader) applyTo(ctx context.Context, ch provider.RemoteChange, forget map[string]struct{}) error {
 	dst := filepath.Join(d.dataDir, filepath.FromSlash(ch.Path))
 
 	if ch.Removed || ch.File == nil {
@@ -221,9 +270,14 @@ func (d *Downloader) apply(ctx context.Context, ch provider.RemoteChange) error 
 			return err
 		}
 		log.Printf("[pull] delete  %s", ch.Path)
-		_ = d.state.DeleteHydration(ch.Path)
-		return d.state.DeleteEcho(ch.Path)
+		forget[ch.Path] = struct{}{}
+		return nil
 	}
+
+	// The path exists again, so a removal earlier in this same page is cancelled:
+	// flushing it would delete the echo this change is about to write, leaving the
+	// next report of the file unrecognisable as one we already have.
+	delete(forget, ch.Path)
 
 	f := ch.File
 
@@ -422,13 +476,15 @@ func conflictName(rel string, t time.Time) string {
 }
 
 // fileMD5 returns the hex md5 of the file at path (Drive's md5Checksum encoding).
+// The algorithm is dictated by the Drive API and is used only to compare bytes
+// against a checksum Drive already reported — never as a security property.
 func fileMD5(path string) (string, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return "", err
 	}
 	defer f.Close()
-	h := md5.New()
+	h := md5.New() //nolint:gosec // G401: dictated by Drive's md5Checksum, see above
 	if _, err := io.Copy(h, f); err != nil {
 		return "", err
 	}

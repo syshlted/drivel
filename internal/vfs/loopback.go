@@ -23,7 +23,9 @@ import (
 // mutating operation. It embeds fs.LoopbackNode so all non-overridden behaviour
 // (reads, lookups, attrs, xattrs, ...) passes straight through to the backing store.
 type node struct {
-	fs.LoopbackNode
+	// A pointer, not a value: WrapChild receives the *fs.LoopbackNode that
+	// go-fuse already built for the child and we wrap that instance.
+	*fs.LoopbackNode
 	events chan<- fsevent.Event
 	hyd    mount.Hydrator // nil => eager mode; content is always resident
 }
@@ -39,7 +41,30 @@ var (
 	_ fs.NodeUnlinker  = (*node)(nil)
 	_ fs.NodeRenamer   = (*node)(nil)
 	_ fs.NodeSetattrer = (*node)(nil)
+
+	// How children come to be nodes rather than plain LoopbackNodes.
+	_ fs.NodeWrapChilder = (*node)(nil)
 )
+
+// WrapChild implements fs.NodeWrapChilder. go-fuse builds a plain
+// *fs.LoopbackNode for every child it discovers and passes it here; wrapping it
+// is what makes the child intercept mutations too.
+//
+// This replaces LoopbackRoot.NewNode, which is deprecated. The substantive
+// difference is that wrapping is now driven by the parent node instead of by the
+// root, so it is reached from NewInode on every creation path — Lookup, Create,
+// Mkdir, Mknod, Symlink and Link alike.
+func (n *node) WrapChild(_ context.Context, ops fs.InodeEmbedder) fs.InodeEmbedder {
+	ln, ok := ops.(*fs.LoopbackNode)
+	if !ok {
+		// go-fuse only ever hands us what LoopbackRoot constructed. If that ever
+		// changes, pass the child through unwrapped rather than dropping it: an
+		// uninstrumented node loses sync events, a nil one loses the file.
+		log.Printf("vfs: unexpected child type %T; passing through uninstrumented", ops)
+		return ops
+	}
+	return &node{LoopbackNode: ln, events: n.events, hyd: n.hyd}
+}
 
 // NewRoot builds the root InodeEmbedder for a loopback mount backed by dir (which
 // may be a /proc/self/fd/N path for in-place mounts). Every node created under it
@@ -52,16 +77,20 @@ func NewRoot(dir string, events chan<- fsevent.Event, hyd mount.Hydrator) (fs.In
 	}
 	root := &fs.LoopbackRoot{
 		Path: dir,
-		Dev:  uint64(st.Dev),
+		// Required: syscall.Stat_t.Dev is int32 on darwin, uint64 on linux.
+		Dev: uint64(st.Dev), //nolint:unconvert // not redundant off linux
 	}
-	root.NewNode = func(rootData *fs.LoopbackRoot, _ *fs.Inode, _ string, _ *syscall.Stat_t) fs.InodeEmbedder {
-		return &node{
-			LoopbackNode: fs.LoopbackNode{RootData: rootData},
-			events:       events,
-			hyd:          hyd,
-		}
+	// The root is the one node go-fuse does not create for us, so build it here;
+	// every descendant arrives through WrapChild above.
+	rootNode := &node{
+		LoopbackNode: &fs.LoopbackNode{RootData: root},
+		events:       events,
+		hyd:          hyd,
 	}
-	return root.NewNode(root, nil, "", &st), nil
+	// Mirrors NewLoopbackRoot: relative-path computation prefers this over
+	// walking up to the FUSE mount root.
+	root.RootNode = rootNode
+	return rootNode, nil
 }
 
 // childPath returns the root-relative path of a child named name under n.

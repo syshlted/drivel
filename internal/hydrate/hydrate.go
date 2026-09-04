@@ -145,7 +145,7 @@ func (h *Hydrator) Marker(rel string) (m Marker, ok bool, err error) {
 		// Corrupt marker: treat as an unhydrated placeholder. The safe direction is
 		// to re-download content we may already have, never to upload content we
 		// may not have.
-		return Marker{V: markerVersion}, true, nil
+		return Marker{V: markerVersion}, true, nil //nolint:nilerr // fail safe: see above
 	}
 	return m, true, nil
 }

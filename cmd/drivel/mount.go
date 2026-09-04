@@ -2,7 +2,9 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
+	"fmt"
 	"log"
 	"os"
 	"os/signal"
@@ -18,7 +20,7 @@ import (
 	"github.com/zishmusic/drivel/internal/vfs"
 )
 
-func runMount(args []string) {
+func runMount(args []string) error {
 	fset := flag.NewFlagSet("mount", flag.ExitOnError)
 	mountpoint := fset.String("mount", "", "path to mount the filesystem (required)")
 	dataDir := fset.String("data", "", "backing directory (source of truth). If omitted, in-place mode uses the mount dir as its own backing (Linux only)")
@@ -31,24 +33,25 @@ func runMount(args []string) {
 	resync := fset.Bool("resync", false, "enumerate the whole remote tree and reconcile it against the backing dir at startup, even if a baseline already exists")
 	materialize := fset.Bool("materialize", false, "during a reconcile in eager mode, download remote files that have no local copy (implied by -lazy, where it costs only a placeholder)")
 	maxDeletes := fset.Int("max-deletes", syncengine.DefaultMaxDeletes, "cap on deletions one reconcile may infer, in either direction; 0 for no limit")
+	sweepInterval := fset.Duration("sweep-interval", syncengine.DefaultSweepInterval, "re-enumerate and reconcile the remote tree this often, timed from the last completed sweep; 0 disables it")
 	debug := fset.Bool("debug", false, "enable FUSE debug logging")
 	_ = fset.Parse(args)
 
 	if *mountpoint == "" {
 		fset.Usage()
-		log.Fatal("-mount is required")
+		return errors.New("-mount is required")
 	}
 	if *lazy && *credentials == "" {
 		// A placeholder is a promise that the bytes can be fetched later; without a
 		// provider there is nothing to redeem it against.
-		log.Fatal("-lazy requires -credentials (there is nothing to hydrate from)")
+		return errors.New("-lazy requires -credentials (there is nothing to hydrate from)")
 	}
 	if err := os.MkdirAll(*mountpoint, 0o755); err != nil {
-		log.Fatalf("creating %s: %v", *mountpoint, err)
+		return fmt.Errorf("creating %s: %w", *mountpoint, err)
 	}
 	if *dataDir != "" {
 		if err := os.MkdirAll(*dataDir, 0o755); err != nil {
-			log.Fatalf("creating %s: %v", *dataDir, err)
+			return fmt.Errorf("creating %s: %w", *dataDir, err)
 		}
 	}
 
@@ -58,7 +61,7 @@ func runMount(args []string) {
 	// recursing through the overlay. Held open until after unmount.
 	backing, err := mount.ResolveBacking(*mountpoint, *dataDir)
 	if err != nil {
-		log.Fatal(err)
+		return err
 	}
 	defer backing.Close()
 	if backing.InPlace {
@@ -88,7 +91,7 @@ func runMount(args []string) {
 			IndexPath:   *indexDB,
 		})
 		if err != nil {
-			log.Fatalf("google drive auth: %v", err)
+			return fmt.Errorf("google drive auth: %w", err)
 		}
 		defer d.Close()
 		store = d
@@ -98,7 +101,7 @@ func runMount(args []string) {
 		// DB outside the backing tree so it isn't itself synced to Drive.
 		st, err = state.Open(*stateDB)
 		if err != nil {
-			log.Fatalf("open state db: %v", err)
+			return fmt.Errorf("open state db: %w", err)
 		}
 		defer st.Close()
 	} else {
@@ -154,6 +157,7 @@ func runMount(args []string) {
 			Fetch:      *materialize,
 			Force:      *resync,
 			MaxDeletes: *maxDeletes,
+			Interval:   *sweepInterval,
 		})
 		log.Print("inbound sync enabled (changes.list pull loop)")
 		go dl.Run(ctx)
@@ -170,7 +174,10 @@ func runMount(args []string) {
 		Hydrator:   hydratorOf(hyd),
 	})
 	if err != nil {
-		log.Fatalf("serve: %v", err)
+		// Deliberately not fatal here. Serve returns after unmount as well as on
+		// a mount failure, and in the first case the engine may still be holding
+		// buffered uploads. Report the error, drain, then let the caller exit.
+		err = fmt.Errorf("serve: %w", err)
 	}
 	// Unmount has returned, so no more events will be emitted; closing the channel
 	// tells the engine to drain its queue (bounded) and exit. Wait for that drain
@@ -178,6 +185,7 @@ func runMount(args []string) {
 	close(events)
 	<-engineDone
 	log.Print("sync engine drained; exiting")
+	return err
 }
 
 // holesOf and hydratorOf convert a possibly-nil *hydrate.Hydrator into the

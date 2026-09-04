@@ -1,6 +1,7 @@
 package state
 
 import (
+	"errors"
 	"path/filepath"
 	"testing"
 	"time"
@@ -98,14 +99,33 @@ func TestSweepRecordRoundTripAndClear(t *testing.T) {
 	if err := s.MarkSeen("g1", []string{"a.txt"}); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.ClearSweep(); err != nil {
+	done := time.Now().Truncate(time.Second)
+	if err := s.FinishSweep(done); err != nil {
 		t.Fatal(err)
 	}
 	if _, ok, _ := s.Sweep(); ok {
-		t.Fatal("sweep record survived ClearSweep")
+		t.Fatal("sweep record survived FinishSweep")
 	}
 	if seen, _ := s.SeenPath("g1", "a.txt"); seen {
-		t.Fatal("seen mark survived ClearSweep")
+		t.Fatal("seen mark survived FinishSweep")
+	}
+	// The completion stamp is what the periodic schedule reads; a sweep that ends
+	// without one makes the next mount think it is overdue.
+	at, ok, err := s.SweepDone()
+	if err != nil || !ok {
+		t.Fatalf("SweepDone = ok %v, err %v", ok, err)
+	}
+	if !at.Equal(done) {
+		t.Fatalf("SweepDone = %s; want %s", at, done)
+	}
+}
+
+// A store that has never finished a sweep reports none, which the schedule reads
+// as overdue rather than as "just swept".
+func TestSweepDoneIsAbsentUntilASweepFinishes(t *testing.T) {
+	s := openTestStore(t)
+	if _, ok, err := s.SweepDone(); err != nil || ok {
+		t.Fatalf("SweepDone on a fresh store = ok %v, err %v; want false, nil", ok, err)
 	}
 }
 
@@ -128,10 +148,10 @@ func TestSeenMarksAreScopedToTheirGeneration(t *testing.T) {
 	}
 }
 
-// UnseenEchoes is the delete-candidate query: only paths that HAVE a baseline and
-// were NOT seen. A path with no baseline is new, not deleted — the rule that makes
-// the first-ever run delete nothing.
-func TestUnseenEchoesReturnsOnlyBaselinedAndUnseen(t *testing.T) {
+// EachUnseenEcho is the delete-candidate query: only paths that HAVE a baseline
+// and were NOT seen. A path with no baseline is new, not deleted — the rule that
+// makes the first-ever run delete nothing.
+func TestEachUnseenEchoVisitsOnlyBaselinedAndUnseen(t *testing.T) {
 	s := openTestStore(t)
 	for _, p := range []string{"kept.txt", "gone.txt"} {
 		if err := s.SetEcho(p, Echo{Hash: "h-" + p, At: time.Now()}); err != nil {
@@ -143,15 +163,42 @@ func TestUnseenEchoesReturnsOnlyBaselinedAndUnseen(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got, err := s.UnseenEchoes("g1")
-	if err != nil {
+	got := map[string]Echo{}
+	if err := s.EachUnseenEcho("g1", func(p string, e Echo) error {
+		got[p] = e
+		return nil
+	}); err != nil {
 		t.Fatal(err)
 	}
 	if len(got) != 1 {
-		t.Fatalf("UnseenEchoes = %v; want only gone.txt", got)
+		t.Fatalf("EachUnseenEcho visited %v; want only gone.txt", got)
 	}
 	if e, ok := got["gone.txt"]; !ok || e.Hash != "h-gone.txt" {
-		t.Fatalf("UnseenEchoes = %v; want gone.txt with its echo", got)
+		t.Fatalf("EachUnseenEcho visited %v; want gone.txt with its echo", got)
+	}
+}
+
+// The walk stops on the callback's error and hands it back unwrapped: that is how
+// the reconciler enforces -max-deletes without reading a bucket it is about to
+// refuse to act on.
+func TestEachUnseenEchoStopsOnCallbackError(t *testing.T) {
+	s := openTestStore(t)
+	for _, p := range []string{"a.txt", "b.txt", "c.txt"} {
+		if err := s.SetEcho(p, Echo{Hash: "h", At: time.Now()}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	stop := errors.New("enough")
+	visited := 0
+	err := s.EachUnseenEcho("g1", func(string, Echo) error {
+		visited++
+		return stop
+	})
+	if !errors.Is(err, stop) {
+		t.Fatalf("EachUnseenEcho err = %v; want %v", err, stop)
+	}
+	if visited != 1 {
+		t.Fatalf("visited %d entries; want 1 (the walk did not stop)", visited)
 	}
 }
 
@@ -167,5 +214,61 @@ func TestHasEchoes(t *testing.T) {
 	}
 	if has, err := s.HasEchoes(); err != nil || !has {
 		t.Fatalf("HasEchoes = %v, %v; want true", has, err)
+	}
+}
+
+// ForgetMany clears both per-path buckets in one transaction, and is a no-op for
+// paths that hold no records.
+func TestForgetManyClearsEchoAndHydration(t *testing.T) {
+	s := openTestStore(t)
+	for _, p := range []string{"a.txt", "b.txt", "keep.txt"} {
+		if err := s.SetEcho(p, Echo{Hash: "h-" + p, At: time.Now()}); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.SetHydration(p, []byte{0xff}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if err := s.ForgetMany([]string{"a.txt", "b.txt", "never-stored.txt"}); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, p := range []string{"a.txt", "b.txt"} {
+		if _, ok, err := s.GetEcho(p); err != nil || ok {
+			t.Errorf("echo for %s survived: ok=%v err=%v", p, ok, err)
+		}
+		if _, ok, err := s.Hydration(p); err != nil || ok {
+			t.Errorf("hydration for %s survived: ok=%v err=%v", p, ok, err)
+		}
+	}
+	if _, ok, _ := s.GetEcho("keep.txt"); !ok {
+		t.Error("ForgetMany dropped a path it was not given")
+	}
+	if _, ok, _ := s.Hydration("keep.txt"); !ok {
+		t.Error("ForgetMany dropped a hydration record it was not given")
+	}
+	if err := s.ForgetMany(nil); err != nil {
+		t.Errorf("empty ForgetMany: %v", err)
+	}
+}
+
+// Forget is the single-path spelling of the same thing.
+func TestForgetClearsOnePath(t *testing.T) {
+	s := openTestStore(t)
+	if err := s.SetEcho("x", Echo{Hash: "h", At: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetHydration("x", []byte{1}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Forget("x"); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok, _ := s.GetEcho("x"); ok {
+		t.Error("echo survived Forget")
+	}
+	if _, ok, _ := s.Hydration("x"); ok {
+		t.Error("hydration survived Forget")
 	}
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"os"
 
 	"golang.org/x/oauth2"
@@ -30,14 +31,21 @@ func SaveToken(path string, tok *oauth2.Token) error {
 		return err
 	}
 	defer f.Close()
-	return json.NewEncoder(f).Encode(tok)
+	// The whole purpose of this function is to persist the token; the 0600 mode
+	// above is the control that matters, not withholding the field.
+	return json.NewEncoder(f).Encode(tok) //nolint:gosec // G117: intentional, see above
 }
 
 // WhoAmI does a best-effort Drive about.get to confirm the token works and report
 // the account. Works with any Drive scope (no extra profile scope needed).
 func WhoAmI(ctx context.Context, c Credentials, scope string, tok *oauth2.Token) (string, error) {
+	const aboutURL = "https://www.googleapis.com/drive/v3/about?fields=user(emailAddress,displayName)"
 	client := c.Config("", scope).Client(ctx, tok)
-	resp, err := client.Get("https://www.googleapis.com/drive/v3/about?fields=user(emailAddress,displayName)")
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, aboutURL, nil)
+	if err != nil {
+		return "", err
+	}
+	resp, err := client.Do(req)
 	if err != nil {
 		return "", err
 	}

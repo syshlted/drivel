@@ -2,7 +2,10 @@
 
 package hydrate
 
-import "syscall"
+import (
+	"errors"
+	"syscall"
+)
 
 // xattrSupported reports whether this build can read/write user xattrs at all.
 const xattrSupported = true
@@ -36,10 +39,10 @@ func removexattr(path, attr string) error {
 // isNoAttr reports whether err means "this attribute is not set" as opposed to a
 // real I/O failure. ENODATA is the Linux spelling; ENOATTR is an alias for it.
 func isNoAttr(err error) bool {
-	return err == syscall.ENODATA || err == syscall.ENOENT
+	return errors.Is(err, syscall.ENODATA) || errors.Is(err, syscall.ENOENT)
 }
 
 // isNoSupport reports whether err means the filesystem cannot store user xattrs.
 func isNoSupport(err error) bool {
-	return err == syscall.ENOTSUP || err == syscall.EOPNOTSUPP
+	return errors.Is(err, syscall.ENOTSUP) || errors.Is(err, syscall.EOPNOTSUPP)
 }

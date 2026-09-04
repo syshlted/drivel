@@ -160,3 +160,53 @@ func assertCalls(t *testing.T, got, want []string) {
 		}
 	}
 }
+
+// Removing an object clears BOTH state records for its path. Dropping only the
+// echo leaked one hydration bitmap per deleted path for the life of the state DB
+// — and in lazy mode that is every file, because a completed hydration writes a
+// full bitmap and nothing else ever removes it.
+func TestRemoveClearsEveryStateRecordForThePath(t *testing.T) {
+	dataDir := t.TempDir()
+	st := newState(t)
+	e := New(Config{Store: newFakeStore(), DataDir: dataDir, State: st})
+	ctx := context.Background()
+
+	writeFile(t, dataDir, "a.txt", "hello")
+	e.handle(ctx, fsevent.Event{Op: fsevent.OpCreate, Path: "a.txt"})
+	if err := st.SetHydration("a.txt", []byte("bitmap")); err != nil {
+		t.Fatal(err)
+	}
+
+	e.handle(ctx, fsevent.Event{Op: fsevent.OpUnlink, Path: "a.txt"})
+
+	if _, ok, err := st.GetEcho("a.txt"); err != nil || ok {
+		t.Fatalf("echo still present after Remove (ok=%v, err=%v)", ok, err)
+	}
+	if _, ok, err := st.Hydration("a.txt"); err != nil || ok {
+		t.Fatalf("hydration record still present after Remove (ok=%v, err=%v)", ok, err)
+	}
+}
+
+// A rename leaves nothing behind at the old path either: its hydration bitmap
+// describes bytes that are no longer addressed by that name.
+func TestRenameClearsEveryStateRecordForTheOldPath(t *testing.T) {
+	dataDir := t.TempDir()
+	st := newState(t)
+	e := New(Config{Store: newFakeStore(), DataDir: dataDir, State: st})
+	ctx := context.Background()
+
+	writeFile(t, dataDir, "a.txt", "hello")
+	e.handle(ctx, fsevent.Event{Op: fsevent.OpCreate, Path: "a.txt"})
+	if err := st.SetHydration("a.txt", []byte("bitmap")); err != nil {
+		t.Fatal(err)
+	}
+
+	e.handle(ctx, fsevent.Event{Op: fsevent.OpRename, Path: "a.txt", NewPath: "b.txt"})
+
+	if _, ok, err := st.Hydration("a.txt"); err != nil || ok {
+		t.Fatalf("hydration record left at the old path (ok=%v, err=%v)", ok, err)
+	}
+	if _, ok, err := st.GetEcho("b.txt"); err != nil || !ok {
+		t.Fatalf("no baseline recorded at the new path (ok=%v, err=%v)", ok, err)
+	}
+}

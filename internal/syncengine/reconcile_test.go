@@ -1,8 +1,11 @@
 package syncengine
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"io"
+	"log"
 	"os"
 	"path/filepath"
 	"sort"
@@ -26,7 +29,8 @@ type enumStore struct {
 	*fakeStore
 	pages   [][]provider.RemoteFile
 	trace   *[]string
-	cursors []string // every cursor Enumerate was called with
+	cursors []string     // every cursor Enumerate was called with
+	swept   atomic.Int32 // sweeps started; atomic so a test can watch Run make progress
 }
 
 func newEnumStore(trace *[]string, pages ...[]provider.RemoteFile) *enumStore {
@@ -34,6 +38,9 @@ func newEnumStore(trace *[]string, pages ...[]provider.RemoteFile) *enumStore {
 }
 
 func (e *enumStore) Enumerate(_ context.Context, cursor string) ([]provider.RemoteFile, string, error) {
+	if cursor == "" {
+		e.swept.Add(1) // every sweep starts from the empty cursor
+	}
 	e.cursors = append(e.cursors, cursor)
 	if e.trace != nil {
 		*e.trace = append(*e.trace, "enumerate("+cursor+")")
@@ -550,5 +557,231 @@ func TestReconcilePushesThroughTheEngine(t *testing.T) {
 	// own echo when Drive reports it back.
 	if _, ok, _ := f.st.GetEcho("local.txt"); !ok {
 		t.Fatal("no echo recorded for the reconcile-triggered push")
+	}
+}
+
+// --- state records ----------------------------------------------------------
+
+// A sweep with nothing wired to push still has to drop the baseline for a path
+// that is gone locally and unlisted remotely. Keeping it made that path a delete
+// candidate on every subsequent sweep, forever — nothing else would ever resolve
+// it, so the record leaked for the life of the state DB.
+func TestReconcileDropsTheBaselineWhenNothingCanPush(t *testing.T) {
+	f := newSweepFixture(t, ReconcileOptions{Force: true, Fetch: true})
+	f.dl.rec.Push = nil
+	seedBaseline(t, f.st, "removed.txt", "was synced")
+
+	f.run(t)
+
+	if _, ok, err := f.st.GetEcho("removed.txt"); err != nil || ok {
+		t.Fatalf("baseline still present after the sweep (ok=%v, err=%v)", ok, err)
+	}
+	if got := f.push.ops(); len(got) != 0 {
+		t.Fatalf("pushes = %v; want none (nothing is wired to push)", got)
+	}
+}
+
+// The kept-and-pushed row drops its baseline inline, because the push that
+// follows writes a fresh one for the same path. Verify the drop actually happens:
+// a stale baseline here is what the next sweep reads as evidence of a delete.
+func TestReconcileDropsTheStaleBaselineOfAKeptFile(t *testing.T) {
+	f := newSweepFixture(t, ReconcileOptions{Force: true, Fetch: true})
+	writeFile(t, f.dir, "edited.txt", "changed since")
+	seedBaseline(t, f.st, "edited.txt", "was synced")
+
+	f.run(t)
+
+	if !f.exists("edited.txt") {
+		t.Fatal("the locally modified file was deleted")
+	}
+	if got, want := f.push.ops(), []string{"write edited.txt"}; !equal(got, want) {
+		t.Fatalf("pushes = %v; want %v", got, want)
+	}
+	if _, ok, err := f.st.GetEcho("edited.txt"); err != nil || ok {
+		t.Fatalf("stale baseline still present (ok=%v, err=%v)", ok, err)
+	}
+}
+
+// --- the periodic sweep -----------------------------------------------------
+
+// stampSweep backdates the last completed sweep, which is what the schedule reads.
+func stampSweep(t *testing.T, st *state.Store, ago time.Duration) {
+	t.Helper()
+	if err := st.FinishSweep(time.Now().Add(-ago)); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// A live cursor is no longer reason enough to skip the sweep: the feed cannot
+// report what happened while drivel was not running, so an interval past the last
+// completed sweep means enumerate again.
+func TestPeriodicSweepIsDueFromTheLastCompletedSweep(t *testing.T) {
+	f := newSweepFixture(t, ReconcileOptions{Fetch: true, Interval: time.Hour},
+		[]provider.RemoteFile{remote("a.txt", "alpha")})
+	f.store.content["a.txt"] = []byte("alpha")
+	if err := f.st.SetCursor("live-token"); err != nil {
+		t.Fatal(err)
+	}
+	stampSweep(t, f.st, 2*time.Hour)
+
+	if cursor := f.run(t); cursor != "token-before-sweep" {
+		t.Fatalf("cursor = %q; want the token taken before the periodic sweep", cursor)
+	}
+	if int(f.store.swept.Load()) != 1 {
+		t.Fatalf("sweeps = %d; want 1", int(f.store.swept.Load()))
+	}
+	if !f.exists("a.txt") {
+		t.Fatal("the periodic sweep did not reconcile the remote tree")
+	}
+}
+
+// Inside the interval the cursor is used as-is. A sweep on every mount would make
+// short-lived mounts re-enumerate the whole tree every time.
+func TestPeriodicSweepIsNotDueWithinTheInterval(t *testing.T) {
+	f := newSweepFixture(t, ReconcileOptions{Fetch: true, Interval: time.Hour},
+		[]provider.RemoteFile{remote("a.txt", "alpha")})
+	if err := f.st.SetCursor("live-token"); err != nil {
+		t.Fatal(err)
+	}
+	stampSweep(t, f.st, time.Minute)
+
+	if cursor := f.run(t); cursor != "live-token" {
+		t.Fatalf("cursor = %q; want the stored one", cursor)
+	}
+	if int(f.store.swept.Load()) != 0 {
+		t.Fatalf("sweeps = %d; want 0 — the interval had not elapsed", int(f.store.swept.Load()))
+	}
+}
+
+// No completion stamp means no sweep has ever finished against this state DB —
+// including every DB written before the stamp existed. That is the case the
+// interval is for, so it counts as overdue.
+func TestPeriodicSweepIsDueWhenNoneHasEverCompleted(t *testing.T) {
+	f := newSweepFixture(t, ReconcileOptions{Fetch: true, Interval: time.Hour},
+		[]provider.RemoteFile{remote("a.txt", "alpha")})
+	f.store.content["a.txt"] = []byte("alpha")
+	if err := f.st.SetCursor("live-token"); err != nil {
+		t.Fatal(err)
+	}
+
+	f.run(t)
+
+	if int(f.store.swept.Load()) != 1 {
+		t.Fatalf("sweeps = %d; want 1", int(f.store.swept.Load()))
+	}
+}
+
+// ...but only when the interval is on. With it disabled, a state DB with no stamp
+// behaves exactly as it did before the feature existed.
+func TestZeroIntervalNeverSweepsPeriodically(t *testing.T) {
+	f := newSweepFixture(t, ReconcileOptions{Fetch: true},
+		[]provider.RemoteFile{remote("a.txt", "alpha")})
+	if err := f.st.SetCursor("live-token"); err != nil {
+		t.Fatal(err)
+	}
+
+	if cursor := f.run(t); cursor != "live-token" {
+		t.Fatalf("cursor = %q; want the stored one", cursor)
+	}
+	if int(f.store.swept.Load()) != 0 {
+		t.Fatalf("sweeps = %d; want 0 — no interval is configured", int(f.store.swept.Load()))
+	}
+}
+
+// The completion stamp is written by the sweep itself, in the same commit that
+// clears the in-progress record.
+func TestSweepRecordsItsCompletion(t *testing.T) {
+	f := newSweepFixture(t, ReconcileOptions{Fetch: true},
+		[]provider.RemoteFile{remote("a.txt", "alpha")})
+	f.store.content["a.txt"] = []byte("alpha")
+	before := time.Now()
+
+	f.run(t)
+
+	at, ok, err := f.st.SweepDone()
+	if err != nil || !ok {
+		t.Fatalf("SweepDone = ok %v, err %v; want a stamp", ok, err)
+	}
+	if at.Before(before.Truncate(time.Second)) {
+		t.Fatalf("SweepDone = %s; want a time at or after %s", at, before)
+	}
+}
+
+// A mount that never restarts is exactly the process startFeed's checks cannot
+// help, so the poll loop re-sweeps on the interval too.
+func TestRunSweepsOnTheInterval(t *testing.T) {
+	dir, st := t.TempDir(), newState(t)
+	store := newEnumStore(nil, []provider.RemoteFile{remote("a.txt", "alpha")})
+	store.content["a.txt"] = []byte("alpha")
+	src := &recSource{start: "token-before-sweep"}
+	d := NewDownloader(src, store, dir, st, Cadence{Fast: time.Millisecond, Slow: 2 * time.Millisecond}).
+		Reconcile(ReconcileOptions{Push: &recPusher{}, Fetch: true, Interval: time.Millisecond})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	go func() {
+		for store.swept.Load() < 3 && ctx.Err() == nil {
+			time.Sleep(time.Millisecond)
+		}
+		cancel()
+	}()
+	d.Run(ctx)
+
+	if n := int(store.swept.Load()); n < 3 {
+		t.Fatalf("sweeps = %d; want the poll loop to have re-swept at least twice after the first", n)
+	}
+}
+
+// --- the delete cap ---------------------------------------------------------
+
+// captureLog redirects the standard logger for the duration of one test.
+func captureLog(t *testing.T, w io.Writer) {
+	t.Helper()
+	prev := log.Writer()
+	log.SetOutput(w)
+	t.Cleanup(func() { log.SetOutput(prev) })
+}
+
+// Past the cap the walk stops retaining candidates but keeps counting, so the
+// refusal names the real total. That number is the whole point of the message: it
+// is what tells an operator whether they are looking at 10 genuine deletions or a
+// state DB pointed at the wrong tree, and "more than 3" answers neither.
+func TestRefusalReportsTheTrueCandidateCount(t *testing.T) {
+	f := newSweepFixture(t, ReconcileOptions{Force: true, Fetch: true, MaxDeletes: 3})
+	for i := 0; i < 10; i++ {
+		rel := fmt.Sprintf("f%d.txt", i)
+		writeFile(t, f.dir, rel, "body")
+		seedBaseline(t, f.st, rel, "body")
+	}
+	var logs bytes.Buffer
+	captureLog(t, &logs)
+
+	f.run(t)
+
+	if !strings.Contains(logs.String(), "10 previously-synced path(s)") {
+		t.Fatalf("refusal did not count past the cap:\n%s", logs.String())
+	}
+	for i := 0; i < 10; i++ {
+		if !f.exists(fmt.Sprintf("f%d.txt", i)) {
+			t.Fatalf("f%d.txt was deleted despite the refusal", i)
+		}
+	}
+}
+
+// A candidate count at the cap is still applied; only exceeding it refuses.
+func TestDeletesExactlyAtTheCapStillRun(t *testing.T) {
+	f := newSweepFixture(t, ReconcileOptions{Force: true, Fetch: true, MaxDeletes: 3})
+	for i := 0; i < 3; i++ {
+		rel := fmt.Sprintf("f%d.txt", i)
+		writeFile(t, f.dir, rel, "body")
+		seedBaseline(t, f.st, rel, "body")
+	}
+
+	f.run(t)
+
+	for i := 0; i < 3; i++ {
+		if f.exists(fmt.Sprintf("f%d.txt", i)) {
+			t.Fatalf("f%d.txt survived a delete pass within the cap", i)
+		}
 	}
 }

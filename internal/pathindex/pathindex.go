@@ -31,12 +31,14 @@ package pathindex
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
 	"time"
 
 	bolt "go.etcd.io/bbolt"
+	bolterrors "go.etcd.io/bbolt/errors"
 )
 
 // schema is bumped whenever the key encoding changes; it is folded into the
@@ -50,6 +52,21 @@ var (
 	keyIdentity  = []byte("identity")
 )
 
+// boltOptions are the options this store opens with.
+//
+// FreelistType is set explicitly because the zero value is not the hashmap one:
+// bbolt's default is the array freelist, which it serialises in full on every
+// commit. A bbolt file never shrinks — deleted pages go on the freelist and are
+// reused, but the file keeps its high-water mark — so after a mass delete leaves
+// a few hundred thousand free pages, that array is megabytes written on every
+// subsequent single-key write. The hashmap freelist also allocates in better than
+// linear time when the free set is large and fragmented, which is exactly the
+// state a mass delete leaves behind.
+var boltOptions = &bolt.Options{
+	Timeout:      5 * time.Second,
+	FreelistType: bolt.FreelistMapType,
+}
+
 // Store is the bbolt-backed index. It is safe for concurrent use (bbolt
 // serialises writers and gives readers a snapshot).
 type Store struct {
@@ -62,7 +79,7 @@ type Store struct {
 // Open opens (creating if needed) the index DB at path and ensures its buckets
 // exist. The caller must Bind it before it returns anything, and must Close it.
 func Open(path string) (*Store, error) {
-	db, err := bolt.Open(path, 0o600, &bolt.Options{Timeout: 5 * time.Second})
+	db, err := bolt.Open(path, 0o600, boltOptions)
 	if err != nil {
 		return nil, fmt.Errorf("open index db %s: %w", path, err)
 	}
@@ -96,7 +113,7 @@ func (s *Store) Bind(identity string) (reused bool, err error) {
 			return nil
 		}
 		for _, b := range [][]byte{bucketByPath, bucketByID} {
-			if err := tx.DeleteBucket(b); err != nil && err != bolt.ErrBucketNotFound {
+			if err := tx.DeleteBucket(b); err != nil && !errors.Is(err, bolterrors.ErrBucketNotFound) {
 				return err
 			}
 			if _, err := tx.CreateBucket(b); err != nil {

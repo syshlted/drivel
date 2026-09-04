@@ -5,7 +5,9 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
+	"html"
 	"io"
 	"net"
 	"net/http"
@@ -14,6 +16,7 @@ import (
 	"os/exec"
 	"runtime"
 	"strings"
+	"time"
 
 	"golang.org/x/oauth2"
 )
@@ -42,7 +45,8 @@ func Login(ctx context.Context, c Credentials, scopes []string, opts LoginOption
 		in = os.Stdin
 	}
 
-	ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", opts.Port))
+	var lc net.ListenConfig
+	ln, err := lc.Listen(ctx, "tcp", fmt.Sprintf("127.0.0.1:%d", opts.Port))
 	if err != nil {
 		return nil, fmt.Errorf("starting loopback listener on port %d: %w", opts.Port, err)
 	}
@@ -63,9 +67,14 @@ func Login(ctx context.Context, c Credentials, scopes []string, opts LoginOption
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		// Everything this handler writes is plain text. Pinning the type stops
+		// the sniffer from ever deciding otherwise about a value that arrives
+		// in the query string.
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.Header().Set("X-Content-Type-Options", "nosniff")
 		q := r.URL.Query()
 		if e := q.Get("error"); e != "" {
-			fmt.Fprintf(w, "Drivel: authorization failed (%s). You can close this tab.", e)
+			fmt.Fprintf(w, "Drivel: authorization failed (%s). You can close this tab.", html.EscapeString(e))
 			trySend(errCh, fmt.Errorf("authorization denied: %s", e))
 			return
 		}
@@ -85,8 +94,20 @@ func Login(ctx context.Context, c Credentials, scopes []string, opts LoginOption
 		default:
 		}
 	})
-	srv := &http.Server{Handler: mux}
-	go srv.Serve(ln)
+	srv := &http.Server{
+		Handler: mux,
+		// Without this a peer that opens a connection and dribbles headers holds
+		// the loopback server open indefinitely (Slowloris).
+		ReadHeaderTimeout: 10 * time.Second,
+	}
+	go func() {
+		// ErrServerClosed is the expected outcome of the deferred Close; anything
+		// else means the redirect can never arrive, so fail instead of waiting
+		// for a code that is not coming.
+		if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			trySend(errCh, fmt.Errorf("loopback redirect server: %w", err))
+		}
+	}()
 	defer srv.Close()
 
 	fmt.Fprintf(out, "\nOpen this URL in your browser to authorize Drivel:\n\n  %s\n\n", authURL)
@@ -199,5 +220,8 @@ func openBrowser(rawURL string) error {
 	default:
 		name, args = "xdg-open", []string{rawURL}
 	}
-	return exec.Command(name, args...).Start()
+	// Deliberately not CommandContext: the browser must outlive the login flow,
+	// and CommandContext kills the child when ctx is cancelled — which is exactly
+	// what happens the moment the code arrives.
+	return exec.Command(name, args...).Start() //nolint:noctx // see above
 }

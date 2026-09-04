@@ -40,7 +40,11 @@ func New() (*http.Client, io.Closer) {
 	}
 
 	// HTTP/2 fallback: a stdlib transport that negotiates h2 via ALPN.
-	h2 := http.DefaultTransport.(*http.Transport).Clone()
+	// The stdlib always makes DefaultTransport a *http.Transport. If a program
+	// has replaced it globally, panicking is the honest outcome: a bare
+	// &http.Transport{} fallback would silently drop proxy and timeout settings
+	// that the default carries.
+	h2 := http.DefaultTransport.(*http.Transport).Clone() //nolint:errcheck // see above
 	h2.ForceAttemptHTTP2 = true
 
 	rt := &fallback{

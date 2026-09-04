@@ -15,6 +15,7 @@ import (
 
 	"github.com/zishmusic/drivel/internal/provider"
 	"github.com/zishmusic/drivel/internal/state"
+	"github.com/zishmusic/drivel/internal/testenv"
 )
 
 // The state store is the intended Cache implementation; this pins the contract so
@@ -67,7 +68,7 @@ func newHydrator(t *testing.T, content map[string]string) (*Hydrator, *fakeStore
 	fs := &fakeStore{content: content}
 	h := New(dir, fs, nil)
 	if !h.XattrsUsable() {
-		t.Skip("backing filesystem does not support user xattrs")
+		testenv.Unavailable(t, testenv.Xattr, "backing filesystem does not store user.* attributes")
 	}
 	return h, fs, dir
 }
@@ -201,7 +202,7 @@ func TestFailedHydrationKeepsPlaceholderMark(t *testing.T) {
 	fs := &fakeStore{content: map[string]string{}, err: errors.New("network is down")}
 	h := New(dir, fs, nil)
 	if !h.XattrsUsable() {
-		t.Skip("backing filesystem does not support user xattrs")
+		testenv.Unavailable(t, testenv.Xattr, "backing filesystem does not store user.* attributes")
 	}
 	if err := h.CreatePlaceholder("a.txt", remote("a.txt", "0123456789")); err != nil {
 		t.Fatal(err)
@@ -247,7 +248,7 @@ func TestHydrateSingleflight(t *testing.T) {
 	fs := &fakeStore{content: map[string]string{"a.txt": body}, delay: 50 * time.Millisecond}
 	h := New(dir, fs, nil)
 	if !h.XattrsUsable() {
-		t.Skip("backing filesystem does not support user xattrs")
+		testenv.Unavailable(t, testenv.Xattr, "backing filesystem does not store user.* attributes")
 	}
 	if err := h.CreatePlaceholder("a.txt", remote("a.txt", body)); err != nil {
 		t.Fatal(err)
@@ -334,7 +335,7 @@ func TestRangesTrackHydration(t *testing.T) {
 	fs := &fakeStore{content: map[string]string{"a.txt": body}}
 	h := New(dir, fs, st)
 	if !h.XattrsUsable() {
-		t.Skip("backing filesystem does not support user xattrs")
+		testenv.Unavailable(t, testenv.Xattr, "backing filesystem does not store user.* attributes")
 	}
 
 	if err := h.CreatePlaceholder("a.txt", remote("a.txt", body)); err != nil {

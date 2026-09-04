@@ -90,7 +90,9 @@ func TestFallbackRewindsReplayableBody(t *testing.T) {
 	const payload = "important-bytes"
 	var got string
 	f := &fallback{
-		h3: rtFunc(func(*http.Request) (*http.Response, error) { return nil, errors.New("quic: no recent network activity") }),
+		h3: rtFunc(func(*http.Request) (*http.Response, error) {
+			return nil, errors.New("quic: no recent network activity")
+		}),
 		h2: rtFunc(func(r *http.Request) (*http.Response, error) {
 			b, _ := io.ReadAll(r.Body)
 			got = string(b)
@@ -114,8 +116,11 @@ func TestFallbackRewindsReplayableBody(t *testing.T) {
 
 func TestFallbackRefusesUnreplayableBody(t *testing.T) {
 	f := &fallback{
-		h3:            rtFunc(func(*http.Request) (*http.Response, error) { return nil, errors.New("quic: handshake timeout") }),
-		h2:            rtFunc(func(*http.Request) (*http.Response, error) { t.Fatal("h2 must not be called with an unrewindable body"); return nil, nil }),
+		h3: rtFunc(func(*http.Request) (*http.Response, error) { return nil, errors.New("quic: handshake timeout") }),
+		h2: rtFunc(func(*http.Request) (*http.Response, error) {
+			t.Fatal("h2 must not be called with an unrewindable body")
+			return nil, nil
+		}),
 		isUnavailable: quicUnavailable,
 		down:          map[string]bool{},
 	}

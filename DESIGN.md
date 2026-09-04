@@ -110,7 +110,12 @@ Engine-level (provider-agnostic sync state):
 - `hydration`  : per-path present-ranges bitmaps (M5), opaque here — a cache over the
   authoritative xattr marker
 - `sweep`      : the in-progress enumeration sweep (M7b): the pre-sweep change-feed
-  token, how far the sweep got, and the generation the marks below belong to
+  token, how far the sweep got, and the generation the marks below belong to — plus,
+  under a separate key, when the last sweep *completed*, which is what the periodic
+  schedule (`-sweep-interval`) measures from. Persisted rather than counted from
+  process start because the gap a periodic sweep closes is the one where drivel was
+  not running: an interval measured from startup would never elapse for someone who
+  mounts for an hour a day
 - `seen`       : per-generation marks for the paths one sweep observed remotely. They
   are persistent rather than in-memory precisely so a sweep that resumed after a
   restart still knows about the pages its predecessor consumed — an in-memory set
@@ -218,7 +223,7 @@ bursty uploads) — repeated TLS/TCP handshakes are avoided, and head-of-line bl
 across concurrent transfers is eliminated.
 
 Implementation facts that shape the design:
-- **Go 1.26's `net/http` has no HTTP/3 client** (HTTP/1.1 + HTTP/2 only). HTTP/3 comes
+- **Go 1.27's `net/http` has no HTTP/3 client** (HTTP/1.1 + HTTP/2 only). HTTP/3 comes
   from [`github.com/quic-go/quic-go`](https://github.com/quic-go/quic-go) (`http3.Transport`,
   which implements `http.RoundTripper`). Pure Go, no CGO.
 - Google's `googleapis.com` endpoints advertise `h3` via Alt-Svc, so the server side
@@ -756,7 +761,7 @@ are both lossy and racy.
    exactly what the column means, and a second record would only be a second thing to
    keep in sync. What the echoes lacked was a way to ask "which of these did the
    sweep *not* see", so M7b adds the per-generation `seen` marks and the
-   `UnseenEchoes` join over them. The rule, unchanged: **a delete may be inferred
+   `EachUnseenEcho` join over them. The rule, unchanged: **a delete may be inferred
    only from a baseline, never from absence alone.**
 
    The remote-present rows needed no new code at all. They are exactly what the pull
@@ -785,6 +790,14 @@ are both lossy and racy.
       where there are genuinely 4000 deletions. This matters more on the remote side
       than the local one: `Store.Remove` on Drive is a permanent delete, not a move
       to the trash.
+
+      The cap is applied *during* the candidate walk, not after it, because the
+      input that most needs refusing is also the largest: a state DB whose every
+      path is absent from this remote would otherwise be materialised in full
+      before anything got to refuse it. Past the cap the walk stops retaining
+      candidates and only keeps counting — the count costs nothing inside a scan
+      already in progress, and it is what makes the refusal actionable, since
+      "4231 deletions" tells an operator something that "more than 100" does not.
 
    The fail-safe direction is the same one M5 and M6 use — when the baseline is
    missing or ambiguous, keep and materialise rather than delete, because deletion is
@@ -837,6 +850,39 @@ are both lossy and racy.
    when a sweep was interrupted, or when the cursor is dead, with `-resync` to force
    it.
 
+   **On a schedule, too (`-sweep-interval`, default 24h).** Those four triggers all
+   fire at startup, which leaves a long-lived mount never re-enumerating, and a
+   short-lived one re-enumerating only when something has already gone wrong. The
+   change feed reports only what happens while we are watching it, so everything
+   that happened while drivel was *not* running — a file deleted offline, a push
+   that exhausted its retries, a pass `-max-deletes` refused — stays unreconciled
+   until the next sweep, and the baselines for those paths stay in the state store
+   describing content that exists on neither side. **The sweep is the only pass that
+   can establish that, so it is also the only correct place to prune a baseline.**
+
+   That is worth stating as a rule, because the obvious alternative is wrong:
+   pruning a baseline and inferring a delete are the *same decision*, made from the
+   same evidence. A cheaper prune — walk the echoes, drop the ones whose path is
+   absent locally — cannot tell "deleted on both sides already" from "deleted
+   locally while we were down, remote still has it", and dropping the second loses a
+   pending delete: the next sweep finds a remote file with no baseline and puts it
+   back. Age-based (TTL) and recency-based (LRU) eviction fail for the same reason —
+   neither says anything about whether the path still exists — with the added
+   problem that they evict silently. Anything cheap enough to skip enumeration has
+   to guess at that fork; anything that resolves it *is* the delete pass, minus the
+   four guards above.
+
+   The schedule is measured from the last **completed** sweep, persisted in the
+   state store, rather than from process start: someone who mounts for an hour a day
+   would never reach an interval counted from startup, and offline activity is
+   precisely their case. A state store with no completion stamp counts as overdue —
+   that is a first run, a DB written before the stamp existed, or one whose every
+   sweep was interrupted, and in each nothing has ever finished reconciling this
+   tree. A periodic sweep goes through the same `beginSweep`, so "snapshot, then
+   tail" holds by construction; the cursor it replaces is older than the one in
+   hand, which replays changes the feed already delivered — idempotent, and dropped
+   by §4.
+
    **The other open questions, decided.** Google-native Docs/Sheets/Slides have no
    `md5Checksum` and no byte size because they have no byte stream — they are
    exported, not downloaded — so there is no honest apparent size for a placeholder
@@ -874,6 +920,52 @@ are both lossy and racy.
    should not inherit the mount's ambient credentials), failure isolation (a
    crashing plugin must not take down the mount), and versioning of the seam
    itself. Depends on M8 having proven the seam with a second registered provider.
+
+### M0 — Test & CI (cross-cutting, always open)
+
+Not a numbered milestone: it has no completion date and nothing waits on it. It is
+listed here because the test suite is load-bearing and was, until now, tracked
+nowhere.
+
+**Where it stands.** Every package except `cmd/drivel` and `internal/fsevent` has
+tests — roughly 6,100 lines of them against 5,700 lines of tested source, green
+under `go test -race ./...`. The invariants whose failure mode is *data loss*
+rather than inconvenience each have a dedicated file: `syncengine/lazy_test.go`
+(M5, never push a placeholder), `rangewrite_test.go` (M6's three gates, especially
+"decline on a diverged remote"), `conflict_test.go` (§6), `reconcile_test.go`
+(M7b's four delete guards), and `pathindex` + `gdrive/index_test.go` (M7
+verify-before-believe). Those are the tests to be most reluctant to weaken.
+
+**Done.** *No test may silently not run.* The M5 xattr tests and the real-FUSE
+mount test skip when the machine lacks user xattrs or `/dev/fuse` — correct on a
+laptop, dangerous anywhere automated, because a runner missing both reports green
+while the data-loss guards never execute. `internal/testenv` turns those skips
+into failures for any facility named in `DRIVEL_REQUIRE_TESTENV` (`fuse`, `xattr`,
+or `all`), which is what CI must set.
+
+**Open, roughly in order of what a regression would cost:**
+
+1. **CI.** Nothing currently enforces `go build`, `go vet`, `go test -race` on
+   push; the suite passes because someone remembers to run it. The job must set
+   `DRIVEL_REQUIRE_TESTENV=all` and install `fuse3` — otherwise it buys less than
+   it appears to. Add a `golangci-lint` config in the same pass.
+2. **`cmd/drivel` is untested** (~400 lines: flag parsing, subcommand dispatch,
+   mount wiring, and M7b's `-resync` / `-materialize` / `-max-deletes`). A flag
+   that silently stops being read is invisible to every other test in the tree.
+   Wants the wiring factored out of `main` far enough to be callable.
+3. **Property tests for `internal/ranges`.** The inward/outward rounding asymmetry
+   (`Mark` vs `MarkCovering`) and the coalescer's "unknown absorbs known" rule are
+   invariants, and invariants are better checked by generated cases than by
+   examples: a dirty set must always cover its input, a present set must never
+   exceed it, and a union across mismatched block grids must degrade to unknown.
+4. **One end-to-end test.** Each layer is tested against its own fake; nothing
+   threads mount → write → push → pull → reconcile through a single fake provider.
+   That seam-crossing path is exactly where the echo model (§4) is supposed to
+   hold, and it is currently only ever tested in halves.
+5. **`gauth` at 18%.** The interactive flow is not worth harnessing, but the
+   credentials/token file I/O around it is, and it is what fails on a bad install.
+6. **`internal/fsevent`** has no tests. Small and mostly types — lowest priority,
+   listed for completeness.
 
 ---
 

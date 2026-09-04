@@ -14,10 +14,12 @@ package state
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
 	bolt "go.etcd.io/bbolt"
+	bolterrors "go.etcd.io/bbolt/errors"
 )
 
 var (
@@ -28,6 +30,7 @@ var (
 	bucketSeen      = []byte("seen")
 	keyCursor       = []byte("changefeed")
 	keySweep        = []byte("current")
+	keySweepDone    = []byte("done")
 )
 
 // Echo is what we last synced for a path, from either direction. A remote change
@@ -51,6 +54,21 @@ func (e Echo) Matches(hash, version string) bool {
 	return e.Version != "" && e.Version == version
 }
 
+// boltOptions are the options this store opens with.
+//
+// FreelistType is set explicitly because the zero value is not the hashmap one:
+// bbolt's default is the array freelist, which it serialises in full on every
+// commit. A bbolt file never shrinks — deleted pages go on the freelist and are
+// reused, but the file keeps its high-water mark — so after a mass delete leaves
+// a few hundred thousand free pages, that array is megabytes written on every
+// subsequent single-key write. The hashmap freelist also allocates in better than
+// linear time when the free set is large and fragmented, which is exactly the
+// state a mass delete leaves behind.
+var boltOptions = &bolt.Options{
+	Timeout:      5 * time.Second,
+	FreelistType: bolt.FreelistMapType,
+}
+
 // Store is the bbolt-backed sync-state store.
 type Store struct {
 	db *bolt.DB
@@ -59,7 +77,7 @@ type Store struct {
 // Open opens (creating if needed) the state DB at path and ensures its buckets
 // exist. Callers must Close it.
 func Open(path string) (*Store, error) {
-	db, err := bolt.Open(path, 0o600, &bolt.Options{Timeout: 5 * time.Second})
+	db, err := bolt.Open(path, 0o600, boltOptions)
 	if err != nil {
 		return nil, fmt.Errorf("open state db %s: %w", path, err)
 	}
@@ -134,6 +152,44 @@ func (s *Store) SetEcho(path string, e Echo) error {
 func (s *Store) DeleteEcho(path string) error {
 	return s.db.Update(func(tx *bolt.Tx) error {
 		return tx.Bucket(bucketEcho).Delete([]byte(path))
+	})
+}
+
+// Forget drops every record for path — the echo baseline and the hydration
+// bitmap — in ONE transaction.
+//
+// The two used to be separate calls, which meant two commits and two fsyncs per
+// deleted path. See ForgetMany for why that matters.
+func (s *Store) Forget(path string) error { return s.ForgetMany([]string{path}) }
+
+// ForgetMany drops the records for many paths in one transaction.
+//
+// A bbolt commit is an fsync, so a delete-per-path costs one fsync per path:
+// measured here at ~1.35ms, which is ~27s for 20k paths and ~22 minutes for a
+// million. That is the shape of a mass delete arriving over the change feed, and
+// none of it is hidden behind network latency the way an outbound delete is —
+// the feed already delivered the whole page. Batching to the page turns it into
+// one commit, the same trade SetMany makes on the index side.
+//
+// Callers must not batch across a durability boundary they depend on: the point
+// where this is called is the point the records are gone, so it belongs with the
+// cursor commit that decides the page will not be replayed.
+func (s *Store) ForgetMany(paths []string) error {
+	if len(paths) == 0 {
+		return nil
+	}
+	return s.db.Update(func(tx *bolt.Tx) error {
+		echo, hydration := tx.Bucket(bucketEcho), tx.Bucket(bucketHydration)
+		for _, p := range paths {
+			k := []byte(p)
+			if err := echo.Delete(k); err != nil {
+				return err
+			}
+			if err := hydration.Delete(k); err != nil {
+				return err
+			}
+		}
+		return nil
 	})
 }
 
@@ -224,19 +280,56 @@ func (s *Store) SetSweep(sw Sweep) error {
 	})
 }
 
-// ClearSweep drops the sweep record and its seen-set, ending the sweep. It is
-// called only after the reconcile has finished with both.
-func (s *Store) ClearSweep() error {
+// FinishSweep ends a sweep: it drops the in-progress record and its seen-set, and
+// stamps when the sweep completed. It is called only after the reconcile has
+// finished with both.
+//
+// The three go in ONE transaction because the completion stamp is what the
+// periodic-sweep schedule reads: a stamp without the clear would let a resume and
+// a schedule disagree about whether a sweep is running, and a clear without the
+// stamp would make the next mount think a sweep is overdue and run another.
+func (s *Store) FinishSweep(done time.Time) error {
+	stamp, err := done.UTC().MarshalText()
+	if err != nil {
+		return err
+	}
 	return s.db.Update(func(tx *bolt.Tx) error {
-		if err := tx.Bucket(bucketSweep).Delete(keySweep); err != nil {
+		sweep := tx.Bucket(bucketSweep)
+		if err := sweep.Delete(keySweep); err != nil {
 			return err
 		}
-		if err := tx.DeleteBucket(bucketSeen); err != nil && err != bolt.ErrBucketNotFound {
+		if err := sweep.Put(keySweepDone, stamp); err != nil {
+			return err
+		}
+		if err := tx.DeleteBucket(bucketSeen); err != nil && !errors.Is(err, bolterrors.ErrBucketNotFound) {
 			return err
 		}
 		_, err := tx.CreateBucket(bucketSeen)
 		return err
 	})
+}
+
+// SweepDone returns when the last sweep completed. ok is false when none ever
+// has — a state DB that predates the stamp, or one whose every sweep was
+// interrupted.
+//
+// It is persisted rather than counted from process start because the gap a
+// periodic sweep exists to close is the one where drivel was NOT running. A user
+// who mounts for an hour a day would never reach any interval measured from
+// startup, and so would never sweep at all.
+func (s *Store) SweepDone() (at time.Time, ok bool, err error) {
+	err = s.db.View(func(tx *bolt.Tx) error {
+		v := tx.Bucket(bucketSweep).Get(keySweepDone)
+		if v == nil {
+			return nil
+		}
+		if uErr := at.UnmarshalText(v); uErr != nil {
+			return uErr
+		}
+		ok = true
+		return nil
+	})
+	return at, ok, err
 }
 
 // MarkSeen records that this generation's sweep observed these paths remotely.
@@ -276,20 +369,27 @@ func (s *Store) SeenPath(gen, path string) (ok bool, err error) {
 	return ok, err
 }
 
-// UnseenEchoes returns every baseline (echo) record whose path this generation's
-// sweep did NOT observe remotely — the candidates for "deleted remotely while we
-// were not running".
+// EachUnseenEcho calls fn for every baseline (echo) record whose path this
+// generation's sweep did NOT observe remotely — the candidates for "deleted
+// remotely while we were not running".
 //
 // They are candidates, not decisions: the caller still has to look at the local
 // side, and deletion is the irreversible direction, so anything ambiguous keeps
 // the file. Restricting the answer to paths that have a baseline at all is the
 // M7b rule in one line — absence alone never implies a delete.
-func (s *Store) UnseenEchoes(gen string) (map[string]Echo, error) {
-	out := map[string]Echo{}
+//
+// It streams instead of returning a map because the input that most needs
+// refusing is also the largest: a state DB pointed at the wrong -drive-root makes
+// every path unseen, so collecting them all first would spend the memory on
+// precisely the pass that is about to be abandoned. fn's error aborts the walk
+// and is returned unwrapped.
+//
+// fn runs inside a read transaction and must not write to this store.
+func (s *Store) EachUnseenEcho(gen string, fn func(path string, e Echo) error) error {
 	if gen == "" {
-		return out, nil
+		return nil
 	}
-	err := s.db.View(func(tx *bolt.Tx) error {
+	return s.db.View(func(tx *bolt.Tx) error {
 		seen := tx.Bucket(bucketSeen)
 		return tx.Bucket(bucketEcho).ForEach(func(k, v []byte) error {
 			if seen.Get(seenKey(gen, string(k))) != nil {
@@ -299,14 +399,9 @@ func (s *Store) UnseenEchoes(gen string) (map[string]Echo, error) {
 			if err := json.Unmarshal(v, &e); err != nil {
 				return err
 			}
-			out[string(k)] = e
-			return nil
+			return fn(string(k), e)
 		})
 	})
-	if err != nil {
-		return nil, err
-	}
-	return out, nil
 }
 
 // HasEchoes reports whether any baseline record exists at all. A store with none
@@ -322,7 +417,7 @@ func (s *Store) HasEchoes() (has bool, err error) {
 }
 
 // seenKey namespaces a mark by generation, so the marks of an abandoned sweep are
-// invisible to the next one even before ClearSweep empties the bucket.
+// invisible to the next one even before FinishSweep empties the bucket.
 func seenKey(gen, path string) []byte {
 	return []byte(gen + "\x00" + path)
 }

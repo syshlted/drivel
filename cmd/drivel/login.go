@@ -5,7 +5,6 @@ import (
 	"context"
 	"flag"
 	"fmt"
-	"log"
 	"os"
 	"os/signal"
 	"strings"
@@ -17,7 +16,7 @@ import (
 // runLogin is an rclone-style interactive OAuth wizard: it collects the client
 // id/secret (from flags, an existing credentials.json, or prompts), writes
 // credentials.json, runs the loopback/paste login flow, and caches the token.
-func runLogin(args []string) {
+func runLogin(args []string) error {
 	fs := flag.NewFlagSet("login", flag.ExitOnError)
 	credPath := fs.String("credentials", "credentials.json", "path to read/write the OAuth client secret JSON")
 	tokenPath := fs.String("token", "token.json", "path to write the OAuth token")
@@ -36,10 +35,10 @@ func runLogin(args []string) {
 
 	creds, err := resolveCredentials(in, *credPath, *clientID, *clientSecret, *projectID)
 	if err != nil {
-		log.Fatal(err)
+		return err
 	}
 	if err := gauth.WriteCredentials(*credPath, creds); err != nil {
-		log.Fatalf("writing %s: %v", *credPath, err)
+		return fmt.Errorf("writing %s: %w", *credPath, err)
 	}
 	fmt.Printf("Wrote client credentials to %s\n", *credPath)
 
@@ -54,10 +53,10 @@ func runLogin(args []string) {
 		In: in,
 	})
 	if err != nil {
-		log.Fatalf("login: %v", err)
+		return fmt.Errorf("login: %w", err)
 	}
 	if err := gauth.SaveToken(*tokenPath, tok); err != nil {
-		log.Fatalf("saving token to %s: %v", *tokenPath, err)
+		return fmt.Errorf("saving token to %s: %w", *tokenPath, err)
 	}
 	fmt.Printf("\nSaved token to %s\n", *tokenPath)
 
@@ -73,6 +72,7 @@ func runLogin(args []string) {
 	}
 	fmt.Printf("\nDone. Mount with:\n\n  drivel mount -mount ./mnt -data ./data \\\n    -credentials %s -token %s -drive-root %s\n\n",
 		*credPath, *tokenPath, driveRoot)
+	return nil
 }
 
 // resolveCredentials fills the client id/secret from flags, then an existing

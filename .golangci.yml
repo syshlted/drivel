@@ -1,0 +1,117 @@
+# golangci-lint configuration for drivel.
+#
+# Philosophy: enable linters that find *bugs*, not linters that find opinions.
+# A rule that fires constantly on correct code gets the whole tool switched off,
+# so anything structurally inapplicable to a filesystem is excluded here with a
+# stated reason rather than tolerated as noise.
+#
+#   make lint       report
+#   make lint-fix   report and apply what it can fix itself
+#   make lint-new   report only what this branch introduced
+#   make fmt        format
+#
+# Notably NOT enabled, and why:
+#   govet/shadow  — fires on every idiomatic `if err := f(); err != nil`.
+#   gocritic/performance — hugeParam/stringXbytes are style calls, not defects.
+#   revive, stylecheck naming — no agreed house style to enforce yet.
+
+version: "2"
+
+run:
+  tests: true
+
+linters:
+  # standard = errcheck, govet, ineffassign, staticcheck, unused
+  default: standard
+
+  enable:
+    # --- correctness -------------------------------------------------------
+    - errorlint      # err == Sentinel, %v-wrapped errors: both break errors.Is
+    - nilerr         # returns nil on a path where err is non-nil
+    - bodyclose      # unclosed http.Response.Body — leaks conns in transport/
+    - noctx          # requests built without a context: unstoppable on unmount
+    - durationcheck  # Duration multiplications that silently mean nanoseconds
+    - makezero       # append to make([]T, n) — leading zero values
+    - wastedassign   # assigned, then overwritten before use
+    - reassign       # reassignment of another package's package-level var
+
+    # --- security ----------------------------------------------------------
+    - gosec
+
+    # --- clarity / dead weight ---------------------------------------------
+    - unconvert      # redundant type conversions
+    - unparam        # always-same argument, or a return nobody reads
+    - predeclared    # shadowing len, cap, new, min, max...
+    - misspell
+    - gocritic
+
+  settings:
+    errcheck:
+      # A dropped Close()/Sync() on a backing file is lost data, not a nit.
+      check-type-assertions: true
+
+    govet:
+      enable:
+        # Both off by default. A leaked CancelFunc keeps a goroutine and a
+        # timer alive for the lifetime of a long-running mount.
+        - lostcancel
+        - nilness
+
+    gosec:
+      excludes:
+        # These four describe what the program does; they are not findings.
+        - G301  # directory permissions — drivel reproduces the modes it is given
+        - G302  # file permissions — likewise
+        - G304  # file opened from a variable path — that IS the filesystem
+        - G306  # WriteFile permissions — likewise
+        # Noisiest rule in the tool, and the FUSE boundary is full of legitimate
+        # int64<->uint64 offset and size conversions. Reconsider if arithmetic
+        # on remote-supplied sizes ever lands.
+        - G115
+
+    gocritic:
+      # `diagnostic` finds bugs (exitAfterDefer, commentedOutCode, sloppyLen).
+      # `performance` and `style` are opinions; left off deliberately.
+      enabled-tags:
+        - diagnostic
+
+    staticcheck:
+      checks:
+        - all
+        - -ST1000  # package comment formatting: DESIGN.md carries the prose
+        - -ST1003  # initialisms: fileID/permissionId mirror the Drive API
+
+  exclusions:
+    generated: lax
+    presets:
+      - comments
+      - common-false-positives
+      - legacy
+      - std-error-handling
+
+    rules:
+      # Tests may take shortcuts production code may not: a leaked body or an
+      # unchecked error in a test fails the test, it does not ship.
+      - path: _test\.go
+        linters:
+          - errcheck
+          - gosec
+          - unparam
+          - noctx
+          - bodyclose
+          # commentedOutCode fires on table-test fields whose comment names the
+          # expression under test, e.g. `want bool // provider.IsRetryable(...)`.
+          - gocritic
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
+
+  settings:
+    goimports:
+      local-prefixes:
+        - github.com/zishmusic/drivel
+
+  exclusions:
+    generated: lax

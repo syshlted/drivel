@@ -55,6 +55,10 @@ bidirectional sync — don't regress it.
   M5's present-ranges and M6's dirty-ranges. Pure, no I/O. It lives outside
   `hydrate` on purpose: M6 runs in eager mode too, and the default path must not
   import the lazy package to describe a write.
+- `internal/testenv` — test-only leaf: turns "this machine has no user xattrs / no
+  `/dev/fuse`" from a silent `t.Skip` into a failure when `DRIVEL_REQUIRE_TESTENV`
+  names the facility (`fuse`, `xattr`, `all`). Skipping is right on a laptop and
+  wrong in CI, where the tests that skip are the M5 data-loss guards.
 
 ## CLI
 
@@ -69,7 +73,8 @@ readers on os.Stdin race and swallow buffered lines.
 M7b flags on `mount`: `-resync` (force an enumeration sweep), `-materialize` (eager
 mode only — download remote files that have no local copy; `-lazy` always
 materialises, as placeholders), `-max-deletes N` (cap on reconcile-inferred
-deletions, default 100, 0 = unlimited).
+deletions, default 100, 0 = unlimited), `-sweep-interval D` (re-enumerate this
+often, default 24h, 0 disables).
 
 ## Milestones
 
@@ -91,6 +96,14 @@ sweep runs automatically on a first run, a resumed sweep or a dead cursor, with
 multi-provider (framework only; proven with a pseudo-provider that is `gdrive`
 registered under a second name) · **M9** plugin architecture (out-of-process or
 WASM; Go's `plugin` package is a poor fit).
+
+**M0 — Test & CI** is a cross-cutting, always-open track (DESIGN.md §9), not a
+numbered milestone. Every package but `cmd/drivel` and `fsevent` has tests, green
+under `-race`. CI enforces that on every push, together with `golangci-lint` and
+`govulncheck`; every gate is a `make` target that the git hooks and the workflow
+both call, so "passed locally" and "passed in CI" cannot drift apart. Open:
+`cmd/drivel` untested · property tests for `ranges` · one end-to-end
+mount→push→pull→reconcile test · `gauth` at 18%.
 
 DESIGN.md §10 is a design note on carrying POSIX metadata (mode, ACLs, xattrs,
 SELinux) over Drive — unscheduled. If you touch it, the rule is that permission
@@ -196,6 +209,15 @@ Everything here degrades to memory-only on any failure. The store is
 provider-private and lives in its own DB file, *not* in `internal/state` (which
 stays engine-level and provider-agnostic).
 
+The in-memory half carries a third map, `kids` (parent path → child paths), so
+dropping or moving a subtree costs that subtree instead of a scan of every path
+we know — under `rm -rf` the scan was one full-map pass per unlinked file, with
+`d.mu` held, and measured as clean O(n²). Its invariant is that everything in
+`idByPath` is reachable by walking `kids` from the root; it is maintained *only*
+by `linkLocked`/`unlinkLocked`, because a `kids` set that drifts from `idByPath`
+makes a delete miss a descendant and leave the stale mapping that row 1 above
+exists to prevent.
+
 Also: a file's `parents` carry the **concrete** root ID, never the `root` alias
 that `-drive-root` defaults to. Comparing against the alias is what made the parent
 walk climb past the mount root and drop every inbound change to a top-level file
@@ -211,7 +233,8 @@ The change feed only reports what changed *after* a cursor was taken, so a Drive
 that existed before the first mount was invisible. `Enumerate` (optional
 `provider.Enumerator`, one flat `files.list`) makes the tree present;
 `syncengine/reconcile.go` decides what to do with it. It runs off the FUSE path,
-automatically on a first run / a resumed sweep / a dead cursor, and on `-resync`.
+automatically on a first run / a resumed sweep / a dead cursor / `-sweep-interval`
+elapsed, and on `-resync`.
 
 1. **Snapshot, then tail.** Take the change-feed start token *before* the sweep and
    give it to the pull loop only *after* the sweep finishes. The overlap replays
@@ -231,9 +254,20 @@ automatically on a first run / a resumed sweep / a dead cursor, and on `-resync`
    move to the trash.
 3. **The marks are persistent, and the reason is resume.** An in-memory seen-set
    would report every page a *previous* process consumed as remotely deleted.
+   The sweep *completion* stamp is persistent for a different reason: the periodic
+   schedule measures from it, and someone who mounts for an hour a day would never
+   reach an interval counted from process start.
 4. **A sweep that reports an empty tree is the dangerous shape** — every synced path
    then looks deleted — so `gdrive.Enumerate` *errors* when it cannot resolve the
    concrete root ID rather than returning nothing. Same alias trap as M7.
+5. **The sweep is the only correct place to prune a baseline**, because pruning one
+   and inferring a delete are the same decision from the same evidence. Do not add a
+   cheaper prune pass: "absent locally" cannot distinguish *already gone on both
+   sides* from *deleted locally while we were down, remote still has it*, and
+   dropping the second loses a pending delete — the next sweep then finds a remote
+   file with no baseline and puts it back. TTL and LRU eviction fail the same way and
+   silently. `-sweep-interval` exists because the other four triggers all fire at
+   startup, so nothing ever pruned a long-lived mount.
 
 Below the seam: a flat listing has no parent-before-child guarantee, so an object
 whose parent is unseen is parked on that parent's ID and released when it arrives;
@@ -259,7 +293,7 @@ Drive's 410) recovers through this same path: fresh token, then a sweep.
 
 ## Transport
 
-All Drive traffic goes over **HTTP/3** (QUIC), required by project decision. Go 1.26
+All Drive traffic goes over **HTTP/3** (QUIC), required by project decision. Go 1.27
 stdlib has no HTTP/3 client — use `github.com/quic-go/quic-go` (`http3.Transport`).
 It's HTTP/3-*preferred*: fall back to HTTP/2 when the QUIC/UDP dial fails. The
 transport sits **below** OAuth — pass the client via `option.WithHTTPClient` and fold
@@ -281,8 +315,14 @@ everything below the seam provider- and FUSE-agnostic.
 ## Build / test / run
 
 ```sh
+make help                                      # every gate, as a target
+make check                                     # everything CI runs, in CI's order
+make hooks                                     # install the git hooks (once per clone)
+
 go build ./...
 go vet ./...
+go test -race ./...                            # what `make test` runs
+DRIVEL_REQUIRE_TESTENV=all go test -race ./... # ...and nothing silently skipped
 go build -o ./bin/drivel ./cmd/drivel
 ./bin/drivel mount -mount ./mnt -data ./data   # separate backing dir; -debug for FUSE tracing
 ./bin/drivel mount -mount ./dir                # in-place: ./dir is its own backing (Linux)

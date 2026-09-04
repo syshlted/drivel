@@ -29,16 +29,151 @@ dependency graph.
 
 ## Build and test
 
+Every gate has a make target, and `make help` lists them. The Makefile is the
+single definition of each one: the git hooks and CI both call these targets, so
+"it passed locally" and "it passed in CI" cannot mean different things.
+
+```sh
+make build        # the CLI binary, into bin/
+make test         # go test -race ./...
+make lint         # golangci-lint
+make fmt          # apply formatting
+make check        # everything CI runs, in CI's order
+```
+
+The underlying commands are still just the toolchain, and nothing stops you
+running them directly:
+
 ```sh
 go build ./...                          # compile everything
 go vet ./...                            # static checks — keep clean
-go test ./...                           # unit tests (no network required)
+go test -race ./...                     # unit tests (no network required)
 go build -o ./bin/drivel ./cmd/drivel   # the CLI binary
 ```
 
 `go test ./...` runs offline: the transport, event→API mapping, provider, and
-sync helpers are unit-tested without hitting Drive. Run it (and `go vet`) before
-every commit.
+sync helpers are unit-tested without hitting Drive.
+
+### Tests that need the kernel
+
+Two groups of tests need something the machine may not have: `internal/hydrate`
+needs a backing filesystem that stores `user.*` xattrs (M5's authoritative
+placeholder marker), and `internal/vfs` mounts a real FUSE filesystem. Both
+`t.Skip` when the facility is absent, which is right on a developer's laptop and
+wrong anywhere automated — a runner without either reports green while the tests
+guarding M5's data-loss invariants never execute.
+
+`DRIVEL_REQUIRE_TESTENV` turns those skips into failures:
+
+```sh
+DRIVEL_REQUIRE_TESTENV=all go test -race ./...   # fuse + xattr must both work
+DRIVEL_REQUIRE_TESTENV=xattr go test ./...       # require only xattrs
+```
+
+Accepted facility names are `fuse`, `xattr`, and `all` (see
+[internal/testenv](../internal/testenv/testenv.go)). Any CI job should set `all`
+and install the `fuse3` package; without that the job tests less than it looks
+like it does. On a machine that genuinely cannot mount, leave the variable unset
+and expect the skips.
+
+### Upgrading the Go toolchain
+
+Three things move together, and the Makefile enforces the first:
+
+1. **The tool binaries in `bin/`** are stamped with the Go version that built
+   them, because a source-processing tool built by an older toolchain cannot
+   parse a newer one's sources — it fails with `file requires newer Go version`
+   rather than with a finding. Changing toolchains rebuilds them automatically.
+2. **The `go` directive in `go.mod`** is what CI installs. Bump it, or CI
+   silently keeps building and scanning with the old toolchain.
+3. **`make vuln`**, which is usually the reason to upgrade in the first place:
+   most of what it reports is stdlib, and a toolchain bump clears it in one move.
+
+The one exception to (1) is `lefthook`, whose build toolchain is pinned
+separately (`LEFTHOOK_GOTOOLCHAIN`) because it does not compile on Go 1.27. That
+pin is safe precisely because lefthook never parses Go source — it only shells
+out to make targets. Drop it when a lefthook release builds on current Go.
+
+### Lint
+
+`make lint` runs [golangci-lint](https://golangci-lint.run) with the suite
+configured in [.golangci.yml](../.golangci.yml). The selection principle stated
+there is worth repeating: enable linters that find *bugs*, not linters that find
+opinions. A rule that fires constantly on correct code gets the whole tool
+switched off, so the checks that are structurally inapplicable to a filesystem —
+`gosec`'s file-permission and variable-path rules, `govet`'s `shadow` — are
+excluded with a reason rather than endured.
+
+The tree reports clean, and `make lint` is the blocking gate in both the
+pre-push hook and CI. Keep it that way: a backlog is far more expensive to pay
+down a second time than to never accumulate.
+
+Where a finding is deliberate, suppress it *narrowly and with a reason* rather
+than disabling the linter — `//nolint:gosec // G401: dictated by Drive's
+md5Checksum, not a security property`. Those comments are the useful output of
+the exercise; several of them document decisions that were previously only
+implicit, including one conversion that looks redundant on Linux and is required
+on darwin.
+
+`make lint-new` reports only what the current branch introduced, which is handy
+when triaging a large branch in isolation:
+
+```sh
+make lint-new                        # vs. the merge base with master
+make lint-new MAIN_BRANCH=origin/master
+```
+
+### Git hooks
+
+```sh
+make hooks     # once per clone, and again after bumping a tool version
+```
+
+`make hooks` also writes `.lefthook-rc.sh` (gitignored), which points
+`LEFTHOOK_BIN` at the pinned binary in `bin/`. It is not optional: without it the
+generated hook searches PATH, `node_modules`, bundler and half a dozen other
+package managers, and when it finds none of them it prints "Can't find lefthook
+in PATH" and **exits 0** — a hook that silently passes.
+
+Installs [lefthook](https://lefthook.dev) from [lefthook.yml](../lefthook.yml).
+Split by cost, deliberately: **pre-commit** stays under a few seconds
+(`fmt-check`, `vet`, `build`) because a hook slow enough to be annoying gets
+bypassed with `--no-verify`, and a hook everyone bypasses is worse than no hook —
+it manufactures false confidence.
+
+The expensive gates run at push time instead: `make lint` over the whole tree
+and the race suite.
+
+pre-push runs `make test`, not `make test-full`: `/dev/fuse` and user xattrs are
+a CI guarantee, not a laptop one, so requiring them here would fail pushes from
+machines where skipping is the correct behaviour.
+
+### CI
+
+[.github/workflows/ci.yml](../.github/workflows/ci.yml) is a thin scheduler
+around the same make targets. Three jobs, all blocking: `static` (tidy, format,
+vet, build, lint), `test` (`test-full` on a runner with `fuse3` installed), and
+`govulncheck`.
+
+CI takes its Go version from the `go` directive in `go.mod`, so that directive —
+not whatever is on your machine — is what CI builds and scans with. Bump it when
+you upgrade, or CI keeps testing the toolchain you left behind.
+
+The `test` job asserts `/dev/fuse`, `fusermount3` and working `user.*` xattrs
+*before* running the suite. Without that assertion a runner missing any of them
+reports green while the tests guarding M5's data-loss invariants never execute —
+the same failure `DRIVEL_REQUIRE_TESTENV` exists to prevent, one layer out.
+
+Run the workflow locally with [act](https://github.com/nektos/act). The `test`
+job mounts a real filesystem, so it needs a privileged container:
+
+```sh
+act --privileged                 # whole workflow
+act --privileged -j test         # one job
+```
+
+Weekly `schedule:` runs exist for `govulncheck`: new CVEs land against unchanged
+code, so that job needs a heartbeat independent of commits.
 
 ### Running the binary
 

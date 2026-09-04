@@ -312,19 +312,7 @@ func escapeQuery(s string) string {
 // rememberLocked records the path↔ID mapping in memory and in the persistent
 // index, and returns the RemoteFile view.
 func (d *Drive) rememberLocked(ctx context.Context, p string, f *drive.File) provider.RemoteFile {
-	// Evict the stale halves a rewrite leaves behind, so the two maps stay exact
-	// inverses: the ID this path used to name (the object was replaced) and the
-	// path this ID used to live at (it moved). A leftover reverse entry would
-	// resolve a change-feed ID to a path it no longer occupies.
-	if old, ok := d.idByPath[p]; ok && old != f.Id {
-		delete(d.pathByID, old)
-	}
-	if oldPath, ok := d.pathByID[f.Id]; ok && oldPath != p {
-		delete(d.idByPath, oldPath)
-	}
-	d.idByPath[p] = f.Id
-	d.pathByID[f.Id] = p
-
+	d.linkLocked(p, f.Id)
 	if idx := d.indexLocked(ctx); idx != nil {
 		if err := idx.Set(p, f.Id); err != nil {
 			log.Printf("[drive] path index: recording %s: %v", p, err)
@@ -333,15 +321,57 @@ func (d *Drive) rememberLocked(ctx context.Context, p string, f *drive.File) pro
 	return toRemoteFile(p, f)
 }
 
+// linkLocked records p↔id in the in-memory maps and the child index.
+//
+// It evicts the stale halves a rewrite leaves behind, so the two maps stay exact
+// inverses: the ID this path used to name (the object was replaced) and the path
+// this ID used to live at (it moved). A leftover reverse entry would resolve a
+// change-feed ID to a path it no longer occupies.
+//
+// Every in-memory mutation goes through here and unlinkLocked, so the child index
+// below cannot drift from the maps it describes.
+func (d *Drive) linkLocked(p, id string) {
+	if old, ok := d.idByPath[p]; ok && old != id {
+		delete(d.pathByID, old)
+	}
+	if oldPath, ok := d.pathByID[id]; ok && oldPath != p {
+		d.unlinkLocked(oldPath)
+	}
+	d.idByPath[p] = id
+	d.pathByID[id] = p
+	d.linkKidLocked(p)
+}
+
+// unlinkLocked drops exactly one path, leaving any descendants in place. It is
+// the eviction half of linkLocked, not the delete a caller wants — see
+// forgetLocked for that.
+func (d *Drive) unlinkLocked(p string) {
+	id, ok := d.idByPath[p]
+	if !ok {
+		return
+	}
+	delete(d.idByPath, p)
+	delete(d.pathByID, id)
+	d.unlinkKidLocked(p)
+}
+
 // forgetLocked drops p (and, for a directory, all descendants) from both indexes.
+//
+// Forgetting the root ("") therefore empties the whole in-memory index. That is a
+// change from the full-scan version, which matched descendants by the "p/" prefix
+// and so dropped only the root's own entry while leaving every path beneath it —
+// even though pathindex.Forget("") has always wiped the persistent half. The two
+// halves now agree, in the safe direction: a dropped cache entry costs a lookup,
+// a stale one can resolve an ID to the wrong object.
 func (d *Drive) forgetLocked(ctx context.Context, p string) {
-	prefix := p + "/"
-	for q, id := range d.idByPath {
-		if q == p || strings.HasPrefix(q, prefix) {
+	for _, q := range d.subtreeLocked(p) {
+		if id, ok := d.idByPath[q]; ok {
 			delete(d.idByPath, q)
 			delete(d.pathByID, id)
 		}
+		delete(d.kids, q)
 	}
+	d.unlinkKidLocked(p)
 	if idx := d.indexLocked(ctx); idx != nil {
 		if err := idx.Forget(p); err != nil {
 			log.Printf("[drive] path index: forgetting %s: %v", p, err)
@@ -349,21 +379,112 @@ func (d *Drive) forgetLocked(ctx context.Context, p string) {
 	}
 }
 
+// --- child index ------------------------------------------------------------
+//
+// kids maps a directory path to the set of paths recorded directly beneath it,
+// which is the whole reason forgetLocked and reindexLocked are not quadratic.
+//
+// Before it existed both scanned the entire idByPath map to find descendants, on
+// every single call. Under `rm -rf` that is one full-map scan per unlinked file
+// with the mount's whole tree in the map, and it runs with d.mu held — the one
+// lock every Drive operation takes. Measured, it was clean N^2: 5k deletes over a
+// 5k-entry map took 224ms, 10k took 968ms, 20k took 3.9s, which extrapolates to
+// hours for a large Drive. A leaf is now O(1) and a directory costs its own
+// subtree.
+//
+// The invariant is that a path reachable in idByPath is reachable by walking kids
+// from the root, so the two never disagree about what lies beneath a path. That
+// is why linkKidLocked links the whole ancestor chain (a path may be recorded
+// before its parents are) and unlinkKidLocked cascades upward (an interior node
+// that holds no mapping and has no children left must not keep its own parent's
+// set alive).
+
+// linkKidLocked adds p to its parent's child set, and its parent to its
+// grandparent's, up to the first ancestor already linked.
+func (d *Drive) linkKidLocked(p string) {
+	if d.kids == nil {
+		d.kids = map[string]map[string]struct{}{}
+	}
+	for p != "" {
+		parent := parentOf(p)
+		set := d.kids[parent]
+		if set == nil {
+			set = map[string]struct{}{}
+			d.kids[parent] = set
+		}
+		if _, ok := set[p]; ok {
+			return // this chain is already linked all the way up
+		}
+		set[p] = struct{}{}
+		p = parent
+	}
+}
+
+// unlinkKidLocked removes p from its parent's child set once nothing beneath p
+// is recorded any more, cascading upward through ancestors that become empty.
+func (d *Drive) unlinkKidLocked(p string) {
+	for {
+		if len(d.kids[p]) > 0 {
+			return // descendants still recorded; the chain has to stay reachable
+		}
+		delete(d.kids, p)
+		if p == "" {
+			return // the root has no parent to be removed from
+		}
+		if _, ok := d.idByPath[p]; ok {
+			return // p holds a mapping of its own; its parent must still point at it
+		}
+		parent := parentOf(p)
+		set := d.kids[parent]
+		if set == nil {
+			return
+		}
+		delete(set, p)
+		p = parent
+	}
+}
+
+// subtreeLocked returns p followed by every path recorded beneath it.
+func (d *Drive) subtreeLocked(p string) []string {
+	out := []string{p}
+	for i := 0; i < len(out); i++ {
+		for q := range d.kids[out[i]] {
+			out = append(out, q)
+		}
+	}
+	return out
+}
+
+// parentOf returns the containing directory of a root-relative path. The root's
+// parent is itself the empty string, which is why callers stop at "".
+func parentOf(p string) string {
+	if i := strings.LastIndexByte(p, '/'); i >= 0 {
+		return p[:i]
+	}
+	return ""
+}
+
 // reindexLocked rewrites index keys after moving oldPath -> newPath, including any
 // descendants of a moved directory.
 func (d *Drive) reindexLocked(ctx context.Context, oldPath, newPath string) {
-	oldPrefix := oldPath + "/"
-	moves := map[string]string{oldPath: newPath}
-	for q := range d.idByPath {
-		if strings.HasPrefix(q, oldPrefix) {
-			moves[q] = newPath + "/" + strings.TrimPrefix(q, oldPrefix)
-		}
+	moved := d.subtreeLocked(oldPath)
+	ids := make([]string, len(moved))
+	for i, from := range moved {
+		ids[i] = d.idByPath[from]
 	}
-	for from, to := range moves {
-		id := d.idByPath[from]
-		delete(d.idByPath, from)
-		d.idByPath[to] = id
-		d.pathByID[id] = to
+	// Drop every old key before writing any new one: the two key sets can overlap
+	// (a sibling rename like a -> ab), and unlinking after linking would remove
+	// what was just written. Same reasoning as pathindex.Rename.
+	for _, from := range moved {
+		d.unlinkLocked(from)
+		delete(d.kids, from)
+	}
+	d.unlinkKidLocked(oldPath)
+	for i, from := range moved {
+		if ids[i] == "" {
+			continue // no mapping of its own; it was only an interior node
+		}
+		d.linkLocked(newPath+strings.TrimPrefix(from, oldPath), ids[i])
 	}
 	if idx := d.indexLocked(ctx); idx != nil {
 		if err := idx.Rename(oldPath, newPath); err != nil {

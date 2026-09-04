@@ -212,3 +212,63 @@ func TestResumeCursorFirstRunUsesStartToken(t *testing.T) {
 		t.Fatalf("start token not persisted: %q ok=%v", persisted, ok)
 	}
 }
+
+// A page's removals are dropped in one commit at the end of the page, so a path
+// removed and then re-created within that same page must not have the fresh echo
+// deleted by the deferred flush. Getting this wrong makes the next report of the
+// file unrecognisable as one we already hold.
+func TestApplyToCancelsPendingForgetOnRecreate(t *testing.T) {
+	dir := t.TempDir()
+	fs := newFakeStore()
+	fs.content["doc.txt"] = []byte("second")
+	st := newState(t)
+	writeFile(t, dir, "doc.txt", "first")
+	_ = st.SetEcho("doc.txt", state.Echo{Hash: md5hex("first"), At: time.Now()})
+	d := NewDownloader(nil, fs, dir, st, DefaultCadence)
+
+	forget := map[string]struct{}{}
+	ctx := context.Background()
+	if err := d.applyTo(ctx, provider.RemoteChange{Path: "doc.txt", Removed: true}, forget); err != nil {
+		t.Fatal(err)
+	}
+	if _, pending := forget["doc.txt"]; !pending {
+		t.Fatal("removal did not queue the record for dropping")
+	}
+	if err := d.applyTo(ctx, provider.RemoteChange{Path: "doc.txt", File: remoteFile("doc.txt", "second")}, forget); err != nil {
+		t.Fatal(err)
+	}
+	if _, pending := forget["doc.txt"]; pending {
+		t.Fatal("re-creation left the path queued for dropping; the flush would erase its new echo")
+	}
+	if err := d.flushForget(forget); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok, _ := st.GetEcho("doc.txt"); !ok {
+		t.Fatal("echo for the re-created file was erased by the flush")
+	}
+	if got, _ := readBacking(t, dir, "doc.txt"); got != "second" {
+		t.Fatalf("backing file = %q; want %q", got, "second")
+	}
+}
+
+// The batched path has to leave exactly the state the per-change path did.
+func TestFlushForgetClearsBothBuckets(t *testing.T) {
+	st := newState(t)
+	for _, p := range []string{"a.txt", "b.txt"} {
+		_ = st.SetEcho(p, state.Echo{Hash: md5hex(p), At: time.Now()})
+		_ = st.SetHydration(p, []byte{1, 2, 3})
+	}
+	d := NewDownloader(nil, newFakeStore(), t.TempDir(), st, DefaultCadence)
+
+	if err := d.flushForget(map[string]struct{}{"a.txt": {}, "b.txt": {}}); err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range []string{"a.txt", "b.txt"} {
+		if _, ok, _ := st.GetEcho(p); ok {
+			t.Errorf("echo for %s survived the flush", p)
+		}
+		if _, ok, _ := st.Hydration(p); ok {
+			t.Errorf("hydration bitmap for %s survived the flush", p)
+		}
+	}
+}

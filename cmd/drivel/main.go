@@ -11,6 +11,7 @@ package main
 
 import (
 	"fmt"
+	"log"
 	"os"
 	"strings"
 )
@@ -23,17 +24,28 @@ func main() {
 	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
 		cmd, args = args[0], args[1:]
 	}
+	// The subcommands return their errors instead of calling log.Fatal, so the
+	// defers they set up — unmounting, closing the state DBs, draining the sync
+	// engine — actually run before the process exits.
 	switch cmd {
 	case "", "mount":
-		runMount(args)
+		fail(runMount(args))
 	case "login":
-		runLogin(args)
+		fail(runLogin(args))
 	case "help", "-h", "--help":
 		usage(os.Stdout)
 	default:
 		fmt.Fprintf(os.Stderr, "unknown command %q\n\n", cmd)
 		usage(os.Stderr)
 		os.Exit(2)
+	}
+}
+
+// fail exits non-zero after a subcommand returns an error. It is the only
+// place that terminates the process on a failure, so no defer is ever skipped.
+func fail(err error) {
+	if err != nil {
+		log.Fatal(err)
 	}
 }
 

@@ -1,0 +1,113 @@
+# CI for drivel.
+#
+# Every step shells out to a make target so this file stays a thin scheduler:
+# what "lint" or "test" means lives in the Makefile, which the git hooks call
+# too. Porting to another CI system is therefore a rewrite of the YAML around
+# the make calls, not a rewrite of the gates.
+#
+# Run it locally:  act --privileged  (see docs/development.md)
+
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  # New CVEs land without anyone touching the code, so the vuln job needs a
+  # heartbeat of its own.
+  schedule:
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  static:
+    name: lint, vet, build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+
+      - uses: actions/cache@v6
+        with:
+          path: bin
+          # Keyed on the Makefile (which pins the tool versions) AND go.mod
+          # (from which setup-go takes the toolchain). Both matter: a linter
+          # built by an older Go cannot parse a newer Go's sources, and fails
+          # with "file requires newer Go version" instead of a lint finding.
+          #
+          # Computed here, not in a workflow-level env: hashFiles() sees an
+          # empty workspace before checkout and would silently return "".
+          key: ${{ runner.os }}-tools-${{ hashFiles('Makefile', 'go.mod') }}
+
+      - run: make tidy-check
+      - run: make fmt-check
+      - run: make vet
+      - run: make build
+
+      - run: make lint
+
+  test:
+    name: test (race, no skips)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+
+      # fusermount3 is the setuid helper an unprivileged FUSE mount needs;
+      # libfuse3-dev alone is only headers.
+      - name: install fuse3
+        run: sudo apt-get update && sudo apt-get install -y fuse3 attr
+
+      # If either of these is missing, the M5 data-loss tests would skip and
+      # the run would still be green. Fail here instead, where the cause is
+      # obvious, rather than inside a test.
+      - name: verify the kernel facilities the suite requires
+        run: |
+          set -euo pipefail
+          test -c /dev/fuse || { echo "::error::/dev/fuse missing"; exit 1; }
+          command -v fusermount3 >/dev/null || { echo "::error::fusermount3 missing"; exit 1; }
+          d=$(mktemp -d)
+          setfattr -n user.drivel.citest -v 1 "$d" || {
+            echo "::error::$d does not support user.* xattrs"; exit 1; }
+          echo "ok: /dev/fuse, fusermount3, user xattrs"
+
+      # quic-go warns, and can misbehave, on the default UDP buffer size.
+      - name: widen UDP buffers for QUIC
+        run: sudo sysctl -w net.core.rmem_max=7500000 net.core.wmem_max=7500000
+
+      # DRIVEL_REQUIRE_TESTENV=all turns "facility absent" from a skip into a
+      # failure. That inversion is the entire reason this job exists.
+      - run: make test-full
+
+  vuln:
+    name: govulncheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - uses: actions/cache@v6
+        with:
+          path: bin
+          # Keyed on the Makefile (which pins the tool versions) AND go.mod
+          # (from which setup-go takes the toolchain). Both matter: a linter
+          # built by an older Go cannot parse a newer Go's sources, and fails
+          # with "file requires newer Go version" instead of a lint finding.
+          #
+          # Computed here, not in a workflow-level env: hashFiles() sees an
+          # empty workspace before checkout and would silently return "".
+          key: ${{ runner.os }}-tools-${{ hashFiles('Makefile', 'go.mod') }}
+      - run: make vuln

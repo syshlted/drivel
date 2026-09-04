@@ -1,0 +1,61 @@
+# Git hooks for drivel.   Install once per clone:  make hooks
+#
+# Every job shells out to a make target. The Makefile is the single definition
+# of each gate, so a hook can never test something different from CI.
+#
+# Split by cost, deliberately: pre-commit stays under a few seconds because a
+# hook slow enough to be annoying gets bypassed with --no-verify, and a hook
+# everyone bypasses is worse than no hook — it manufactures false confidence.
+# The expensive gates (race detector, full lint) run at push time instead.
+
+min_version: 1.10.0
+
+# Sourced by the generated hook scripts before lefthook runs. `make hooks` writes
+# it, pointing LEFTHOOK_BIN at the pinned binary in bin/. Without it the hook
+# searches PATH, node_modules, bundler, yarn... and when it finds nothing it
+# prints "Can't find lefthook in PATH" and exits 0 — a hook that silently passes.
+#
+# The leading ./ is required, not cosmetic: sh's `.` builtin searches PATH when
+# its argument contains no slash, so a bare filename is never found in dash.
+rc: ./.lefthook-rc.sh
+
+pre-commit:
+  parallel: true
+  jobs:
+    - name: format
+      run: make fmt-check
+      fail_text: "unformatted code — run: make fmt"
+
+    - name: vet
+      run: make vet
+
+    - name: build
+      run: make build
+
+pre-push:
+  parallel: false
+  jobs:
+    # The whole tree, not just the diff: the tree reports clean, and keeping it
+    # that way is cheaper than paying down a backlog a second time. `make
+    # lint-new` still exists for triaging a branch in isolation.
+    - name: lint
+      run: make lint
+      fail_text: "lint findings — see them with: make lint"
+
+    # Race detector on. Not -full: /dev/fuse and user xattrs are a CI
+    # guarantee, not a laptop one, so requiring them here would fail pushes
+    # from machines where skipping is the correct behaviour.
+    - name: test
+      run: make test
+
+commit-msg:
+  jobs:
+    - name: subject length
+      run: |
+        subject=$(head -1 "{1}")
+        # Allow fixup!/squash! through untouched.
+        case "$subject" in fixup!*|squash!*) exit 0 ;; esac
+        if [ "${#subject}" -gt 72 ]; then
+          echo "commit subject is ${#subject} chars; keep it under 72"
+          exit 1
+        fi

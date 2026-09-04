@@ -4,6 +4,8 @@
   credentials (OAuth client ID/secret), step by step, with troubleshooting.
 - [architecture.md](architecture.md) — Mermaid diagrams: runtime components and
   the package dependency graph. Pairs with [../DESIGN.md](../DESIGN.md).
+- [schema.md](schema.md) — Mermaid diagrams: what the two bbolt databases hold,
+  bucket by bucket, and which of it is authoritative.
 - [development.md](development.md) — contributor guidelines: build, test, debug,
   and how to add a new storage backend or mount frontend.
 - [publishing.md](publishing.md) — what's needed to list the module on
