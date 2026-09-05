@@ -529,7 +529,8 @@ func (d *Downloader) applyDeletes(ctx context.Context, sw state.Sweep, st *sweep
 	if d.rec.MaxDeletes > 0 && total > d.rec.MaxDeletes {
 		d.logf("[sweep] REFUSING to delete: the sweep says %d previously-synced path(s) are gone from the remote, over the -max-deletes limit of %d. "+
 			"That many at once usually means the state DB, the backing dir or -drive-root do not match each other, rather than %d real deletions. "+
-			"Nothing was deleted; re-run with a higher -max-deletes (or 0 for no limit) if the deletions are genuine.",
+			"Nothing was deleted. If the deletions are genuine, re-run with -resync AND a higher -max-deletes (or 0 for no limit): "+
+			"this sweep still counts as complete, so raising the limit alone changes nothing until the next -sweep-interval falls due.",
 			total, d.rec.MaxDeletes, total)
 		return nil
 	}

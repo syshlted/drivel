@@ -65,7 +65,7 @@ _drivel() {
     # Complete the subcommand slot.
     if [[ -z $sub ]]; then
         if [[ $cur == -* ]]; then
-            COMPREPLY=( $(compgen -W "$file_flags $value_flags -lazy -resync -materialize -max-deletes -debug -open -h -help" -- "$cur") )
+            COMPREPLY=( $(compgen -W "$file_flags $value_flags -lazy -xattr -resync -materialize -max-deletes -debug -open -h -help" -- "$cur") )
         else
             COMPREPLY=( $(compgen -W "$subcommands" -- "$cur") )
         fi
@@ -75,7 +75,7 @@ _drivel() {
     # Flag completion within a subcommand.
     local flags=""
     case "$sub" in
-        mount) flags="-config -mount -data -credentials -token -state -index -drive-root -lazy -resync -materialize -max-deletes -sweep-interval -debug -h -help" ;;
+        mount) flags="-config -mount -data -credentials -token -state -index -drive-root -lazy -xattr -resync -materialize -max-deletes -sweep-interval -debug -pprof -h -help" ;;
         login) flags="-account -config -credentials -token -client-id -client-secret -project-id -scope -port -open -h -help" ;;
         help)  return ;;
     esac

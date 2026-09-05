@@ -370,6 +370,15 @@ func (e *Engine) Push(ctx context.Context, ev fsevent.Event) { e.handle(ctx, ev)
 
 // push maps one event to store calls. The store creates ancestor directories and
 // resolves paths to its native addressing itself, so this stays path-only.
+//
+// Every branch that reaches the remote says so, in the same shape the pull side
+// uses ("[pull] download", "[pull] delete"). Until M0's multi-client campaign
+// went looking for the numbers, a successful push logged *nothing* — the only
+// "[sync] push" lines in a log were failures — so from the outside a working
+// upload and an upload that never happened were the same silence. That is a bad
+// property for a filesystem whose whole job is to move bytes somewhere else, and
+// it made the transfer-volume half of docs/multiclient-test-plan.md §2.7
+// unmeasurable.
 func (e *Engine) push(ctx context.Context, ev fsevent.Event) error {
 	switch ev.Op {
 	case fsevent.OpMkdir:
@@ -378,6 +387,7 @@ func (e *Engine) push(ctx context.Context, ev fsevent.Event) error {
 			return err
 		}
 		e.recordEcho(rf)
+		e.logf("[sync] mkdir    %s", ev.Path)
 		return nil
 
 	case fsevent.OpCreate, fsevent.OpWrite:
@@ -388,6 +398,7 @@ func (e *Engine) push(ctx context.Context, ev fsevent.Event) error {
 			return err
 		}
 		e.forgetPath(ev.Path)
+		e.logf("[sync] delete   %s", ev.Path)
 		return nil
 
 	case fsevent.OpRename:
@@ -402,6 +413,7 @@ func (e *Engine) push(ctx context.Context, ev fsevent.Event) error {
 		}
 		e.forgetPath(ev.Path)
 		e.recordEcho(rf)
+		e.logf("[sync] rename   %s -> %s", ev.Path, ev.NewPath)
 		return nil
 
 	case fsevent.OpSetattr:
@@ -469,6 +481,10 @@ func (e *Engine) pushContent(ctx context.Context, p string, dirty *ranges.Set) e
 		return err
 	}
 	e.recordEcho(rf)
+	// Only here, never on the routes above: a range write and both skips log their
+	// own lines, and counting this one as well would report an upload that did not
+	// happen — which is exactly what MC-21 (a touch must cost nothing) asserts.
+	e.logf("[sync] upload   %s (%d B)", p, size)
 	return nil
 }
 

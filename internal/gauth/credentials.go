@@ -7,6 +7,7 @@ package gauth
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 
 	"golang.org/x/oauth2"
@@ -90,7 +91,10 @@ func WriteCredentials(path string, c Credentials) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, b, 0o600)
+	return writeSecret(path, func(w io.Writer) error {
+		_, err := w.Write(b)
+		return err
+	})
 }
 
 // Config builds an oauth2.Config. redirectURL may be "" for plain API/refresh use.

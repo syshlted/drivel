@@ -39,6 +39,7 @@ type mountEntry struct {
 	data          string
 	state         string
 	lazy          bool
+	xattr         bool
 	debug         bool
 	resync        bool
 	materialize   bool
@@ -66,6 +67,7 @@ type mountTOML struct {
 	Data          string         `toml:"data"`
 	State         string         `toml:"state"`
 	Lazy          bool           `toml:"lazy"`
+	Xattr         bool           `toml:"xattr"`
 	Debug         bool           `toml:"debug"`
 	Resync        bool           `toml:"resync"`
 	Materialize   bool           `toml:"materialize"`
@@ -123,6 +125,7 @@ func Load(path string) (*Config, error) {
 			data:          m.Data,
 			state:         m.State,
 			lazy:          m.Lazy,
+			xattr:         m.Xattr,
 			debug:         m.Debug,
 			resync:        m.Resync,
 			materialize:   m.Materialize,
@@ -220,6 +223,7 @@ func (c *Config) spec(m mountEntry) (app.MountSpec, error) {
 	}
 
 	spec.Lazy = m.lazy
+	spec.Xattr = m.xattr
 	spec.Debug = m.debug
 	spec.Resync = m.resync
 	spec.Materialize = m.materialize

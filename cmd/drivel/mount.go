@@ -25,11 +25,12 @@ const driveKind = "gdrive"
 
 // mountShapingFlags describe *what* to mount, which is exactly what a config file
 // is for. Mixing the two would need a precedence rule that nobody would remember,
-// so passing one alongside -config is an error instead. -debug is absent
-// deliberately: it changes how a mount reports, not what it is.
+// so passing one alongside -config is an error instead. -debug and -pprof are
+// absent deliberately: they change how a mount reports and how the process can be
+// inspected, not what any of it is.
 var mountShapingFlags = []string{
 	"mount", "data", "credentials", "token", "state", "index",
-	"drive-root", "lazy", "resync", "materialize", "max-deletes", "sweep-interval",
+	"drive-root", "lazy", "xattr", "resync", "materialize", "max-deletes", "sweep-interval",
 }
 
 func runMount(args []string) error {
@@ -43,11 +44,13 @@ func runMount(args []string) error {
 	indexDB := fset.String("index", "drivel-index.db", "path to the provider's path↔ID index (a cache; safe to delete); \"\" disables it")
 	driveRoot := fset.String("drive-root", "root", "Drive folder ID mapped to the mount root")
 	lazy := fset.Bool("lazy", false, "lazy hydration (M5): materialise remote files as placeholders and fetch content on first read (requires -credentials)")
+	xattr := fset.Bool("xattr", false, "serve extended attributes through the mountpoint by passing them to the backing store; off by default because it exposes drivel's own placeholder marker to anything that can write to the mount")
 	resync := fset.Bool("resync", false, "enumerate the whole remote tree and reconcile it against the backing dir at startup, even if a baseline already exists")
 	materialize := fset.Bool("materialize", false, "during a reconcile in eager mode, download remote files that have no local copy (implied by -lazy, where it costs only a placeholder)")
 	maxDeletes := fset.Int("max-deletes", syncengine.DefaultMaxDeletes, "cap on deletions one reconcile may infer, in either direction; 0 for no limit")
 	sweepInterval := fset.Duration("sweep-interval", syncengine.DefaultSweepInterval, "re-enumerate and reconcile the remote tree this often, timed from the last completed sweep; 0 disables it")
 	debug := fset.Bool("debug", false, "enable FUSE debug logging")
+	pprofAddr := fset.String("pprof", "", "serve net/http/pprof on this address (e.g. localhost:6060) for goroutine and heap profiling; empty disables it")
 	_ = fset.Parse(args)
 
 	given := map[string]bool{}
@@ -56,7 +59,7 @@ func runMount(args []string) error {
 	specs, err := mountSpecs(fset, given, specFlags{
 		configPath: *configPath, mountpoint: *mountpoint, dataDir: *dataDir,
 		credentials: *credentials, token: *token, stateDB: *stateDB, indexDB: *indexDB,
-		driveRoot: *driveRoot, lazy: *lazy, resync: *resync, materialize: *materialize,
+		driveRoot: *driveRoot, lazy: *lazy, xattr: *xattr, resync: *resync, materialize: *materialize,
 		maxDeletes: *maxDeletes, sweepInterval: *sweepInterval, debug: *debug,
 	})
 	if err != nil {
@@ -70,6 +73,16 @@ func runMount(args []string) error {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+
+	// Before the mounts, so a bad address fails while nothing is mounted yet, and
+	// so a mount that hangs during startup is itself profilable.
+	if *pprofAddr != "" {
+		_, stopPprof, err := startPprof(ctx, *pprofAddr)
+		if err != nil {
+			return err
+		}
+		defer stopPprof()
+	}
 
 	a, err := app.New(ctx, specs, reg)
 	if err != nil {
@@ -95,6 +108,7 @@ type specFlags struct {
 	indexDB       string
 	driveRoot     string
 	lazy          bool
+	xattr         bool
 	resync        bool
 	materialize   bool
 	maxDeletes    int
@@ -156,6 +170,7 @@ func mountSpecs(fset *flag.FlagSet, given map[string]bool, f specFlags) ([]app.M
 		DataDir:       f.dataDir,
 		StateDB:       f.stateDB,
 		Lazy:          f.lazy,
+		Xattr:         f.xattr,
 		Debug:         f.debug,
 		Resync:        f.resync,
 		Materialize:   f.materialize,

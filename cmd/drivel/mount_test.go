@@ -47,6 +47,7 @@ func TestFlagsReachTheSpec(t *testing.T) {
 	f.indexDB = "/index.db"
 	f.driveRoot = "0Bfolder"
 	f.lazy = true
+	f.xattr = true
 	f.debug = true
 	f.resync = true
 	f.materialize = true
@@ -64,7 +65,7 @@ func TestFlagsReachTheSpec(t *testing.T) {
 	if s.Mountpoint != "/m" || s.DataDir != "/d" || s.StateDB != "/state.db" {
 		t.Errorf("paths not carried: %+v", s)
 	}
-	if !s.Lazy || !s.Debug || !s.Resync || !s.Materialize {
+	if !s.Lazy || !s.Xattr || !s.Debug || !s.Resync || !s.Materialize {
 		t.Errorf("booleans not carried: %+v", s)
 	}
 	if s.MaxDeletes != 7 {
@@ -85,6 +86,22 @@ func TestFlagsReachTheSpec(t *testing.T) {
 	want := gdrive.Config{Credentials: "/creds.json", Token: "/tok.json", RootID: "0Bfolder", IndexPath: "/index.db"}
 	if got != want {
 		t.Errorf("provider config = %+v; want %+v", got, want)
+	}
+}
+
+// Xattr passthrough is off unless asked for. Stated as its own test because it is
+// a security default rather than a preference: the passthrough exposes M5's
+// placeholder marker at the mountpoint, where anything that can write to the mount
+// can strip it.
+func TestXattrPassthroughIsOffByDefault(t *testing.T) {
+	f := defaults()
+	f.mountpoint = "/m"
+	specs, err := mountSpecs(quietFlagSet(), map[string]bool{"mount": true}, f)
+	if err != nil {
+		t.Fatalf("mountSpecs: %v", err)
+	}
+	if specs[0].Xattr {
+		t.Error("Xattr is on without -xattr")
 	}
 }
 

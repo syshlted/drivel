@@ -184,7 +184,13 @@ func (s *memStore) Changes(_ context.Context, cursor string) ([]provider.RemoteC
 	defer s.mu.Unlock()
 	n, err := strconv.Atoi(cursor)
 	if err != nil || n < 0 || n > len(s.changes) {
-		n = len(s.changes)
+		// A cursor this store cannot place is a dead cursor, and it says so rather
+		// than quietly restarting from "now". Drive answers a token it no longer
+		// retains with 410 and a malformed one with 400/pageToken, and gdrive
+		// classifies both as ErrCursorExpired; treating it as "start from now"
+		// instead would paper over the exact case M7b's re-enumeration exists for,
+		// and would leave that recovery path unreachable from a test.
+		return nil, "", provider.ErrCursorExpired
 	}
 	out := append([]provider.RemoteChange(nil), s.changes[n:]...)
 	return out, strconv.Itoa(len(s.changes)), nil
@@ -245,4 +251,43 @@ func (s *memStore) seed(p string, body []byte) {
 	// Seeded content predates the feed, so drop whatever the ancestors recorded:
 	// a sweep, not the change feed, is the only thing that can find it.
 	s.changes = s.changes[:before]
+}
+
+// manifest is the remote's content: path -> digest, files only. It is the fourth
+// party to a fleet's convergence check — three clients agreeing with each other
+// proves they converged, not that they converged on what the provider holds.
+func (s *memStore) manifest() map[string]string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make(map[string]string, len(s.files))
+	for p, f := range s.files {
+		if f.isDir {
+			continue
+		}
+		out[p] = hashOf(f.data)
+	}
+	return out
+}
+
+// totalPuts and totalGets are the whole fleet's traffic, for the assertion that
+// it stopped. Per-path counts answer "how did this file get here"; the totals
+// answer "is anything still moving", which is the question a fixed point is.
+func (s *memStore) totalPuts() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	n := 0
+	for _, c := range s.puts {
+		n += c
+	}
+	return n
+}
+
+func (s *memStore) totalGets() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	n := 0
+	for _, c := range s.gets {
+		n += c
+	}
+	return n
 }

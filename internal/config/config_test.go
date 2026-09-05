@@ -63,6 +63,7 @@ account = "personal"
 path    = "./mnt/personal"
 data    = "./data/personal"
 lazy    = true
+xattr   = true
 
 [mount.provider]
 root = "0BpersonalFolder"
@@ -97,6 +98,14 @@ func TestSpecsResolvesTwoAccounts(t *testing.T) {
 	}
 	if !specs[0].Lazy {
 		t.Error("lazy not carried through")
+	}
+	// Xattr passthrough is a security default, so both directions are asserted:
+	// the mount that asked for it gets it, and the one that did not stays off.
+	if !specs[0].Xattr {
+		t.Error("xattr not carried through")
+	}
+	if specs[1].Xattr {
+		t.Error("xattr is on for a mount that never mentioned it")
 	}
 	if specs[0].Provider != "gdrive" {
 		t.Errorf("provider = %q", specs[0].Provider)

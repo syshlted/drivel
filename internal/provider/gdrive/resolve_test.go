@@ -122,8 +122,12 @@ func TestEnsureDirCreatesWhenGenuinelyMissing(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ensureDir: %v", err)
 	}
-	if id != "created-fresh" {
-		t.Fatalf("ensureDir = %q; want created-fresh", id)
+	// The ID is opaque — the fake mints a fresh one per create, as Drive does —
+	// so the assertion is that the folder it named is the one now sitting under
+	// the root, not that it has any particular spelling.
+	kids := fake.namedChildren(fakeRootID, "fresh")
+	if len(kids) != 1 || kids[0].Id != id {
+		t.Fatalf("ensureDir = %q; the root holds %v under that name", id, kids)
 	}
 	if _, _, creates, _ := fake.counts(); creates != 1 {
 		t.Fatalf("creates = %d; want 1", creates)

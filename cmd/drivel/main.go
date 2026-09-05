@@ -7,6 +7,10 @@
 //	drivel mount  [flags]   # mount and sync (default if no subcommand given)
 //
 // See DESIGN.md for the architecture.
+//
+// Copyright (C) 2026 SystemHalted and Jeremy Melanson. Drivel is free software
+// under the GNU Affero General Public License, version 3; see the LICENSE file
+// at the repository root.
 package main
 
 import (
@@ -51,6 +55,9 @@ func fail(err error) {
 
 func usage(w *os.File) {
 	fmt.Fprint(w, `Drivel - a Drive-backed FUSE interceptor filesystem
+Copyright (C) 2026 SystemHalted and Jeremy Melanson
+License AGPLv3: GNU Affero GPL v3 <https://www.gnu.org/licenses/agpl-3.0.html>
+This is free software with NO WARRANTY, to the extent permitted by law.
 
 Usage:
   drivel login [flags]   Interactive Google OAuth setup (credentials.json + token.json)

@@ -28,6 +28,21 @@ dependency graph.
 - **Secrets** (`credentials.json`, `token.json`, `*.local.json`,
   `drivel-state.db`) are gitignored. Never commit them.
 
+## License
+
+Drivel is copyright (C) 2026 SystemHalted and Jeremy Melanson and licensed under
+the GNU Affero General Public License, version 3 — the verbatim text is in
+[LICENSE](../LICENSE) at the repo root. Contributions are accepted under that
+same license; there is no CLA and no separate proprietary edition, so a patch you
+send stays free software for everyone who receives it.
+
+Two practical consequences. **Network use counts as distribution** (AGPL §13): if
+you run a modified Drivel as part of a service others interact with over a
+network, they are entitled to your modified source. And `LICENSE` is the FSF's
+text unmodified — put the copyright notice in the documentation and the program's
+own output instead, never in the license file, and keep the four copies listed in
+[CLAUDE.md](../CLAUDE.md) in sync.
+
 ## Build and test
 
 Every gate has a make target, and `make help` lists them. The Makefile is the
@@ -213,6 +228,14 @@ and event layers.
 
 - **`-debug`** on `mount` turns on go-fuse's FUSE-level tracing — every VFS call
   in and out. Verbose, but the fastest way to see what the kernel is asking for.
+- **`-pprof localhost:6060`** on `mount` serves Go's profiling endpoints for the
+  whole process: `go tool pprof http://localhost:6060/debug/pprof/heap` for what
+  is retaining memory, `.../goroutine?debug=1` for a leak (a count that climbs
+  over a long run is the signature), `.../profile?seconds=30` for CPU. Off unless
+  an address is given — it serves the heap, which holds synced file paths and
+  contents, to anyone who can reach it. A non-loopback bind is warned about; a
+  port it cannot bind is a startup error, so a run you started in order to
+  measure never quietly produces nothing.
 - **Log-only mode** (omit `-credentials`) isolates the FS/event layers from sync:
   if a bug reproduces here, it's not in the provider or network path.
 - **Sync bugs** are usually echo/loop-suppression (DESIGN.md §4). Inspect the
@@ -234,6 +257,16 @@ Windows cgofuse binding) is rarer and covered briefly at the end.
 
 The whole point of the `internal/provider` seam is that the sync engine, FS layer,
 and CLI don't change when you add a provider — you write one package.
+
+A backend does not have to be a cloud. [DESIGN.md §9](../DESIGN.md) sketches three
+that are not: a deduplicating local store (M11), an encrypting layer (M12) and a
+block-level filesystem over a distributed database (M13). Two notes for anyone
+starting one. A local store fits this interface as it stands — it is the optional
+interfaces below (an exact `ChangeSource`, a real `RangePutter`) that make it
+interesting. A *decorator* that wraps another provider does not: it would need to
+open its inner store through the registry, and `provider.Params` carries no way to
+do that yet. That hook is M12's one new piece of framework, so if you need it, it
+is a design discussion before it is a patch.
 
 ### 1. Implement `provider.Store`
 

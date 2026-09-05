@@ -21,13 +21,17 @@ import (
 
 // node is a loopback node that emits a change Event after each successful
 // mutating operation. It embeds fs.LoopbackNode so all non-overridden behaviour
-// (reads, lookups, attrs, xattrs, ...) passes straight through to the backing store.
+// (reads, lookups, attrs, ...) passes straight through to the backing store.
+// Xattr operations are the exception: they are refused rather than proxied unless
+// the mount opted in (mount.Options.Xattr), which takes a guard here as well as a
+// server option — see xattr.go.
 type node struct {
 	// A pointer, not a value: WrapChild receives the *fs.LoopbackNode that
 	// go-fuse already built for the child and we wrap that instance.
 	*fs.LoopbackNode
 	events chan<- fsevent.Event
 	hyd    mount.Hydrator // nil => eager mode; content is always resident
+	xattr  bool           // false => xattr ops are refused, not proxied (see xattr.go)
 	lg     *log.Logger    // nil => the log package's default
 }
 
@@ -78,14 +82,20 @@ func (n *node) WrapChild(_ context.Context, ops fs.InodeEmbedder) fs.InodeEmbedd
 		n.logf("vfs: unexpected child type %T; passing through uninstrumented", ops)
 		return ops
 	}
-	return &node{LoopbackNode: ln, events: n.events, hyd: n.hyd, lg: n.lg}
+	return &node{LoopbackNode: ln, events: n.events, hyd: n.hyd, xattr: n.xattr, lg: n.lg}
 }
 
-// NewRoot builds the root InodeEmbedder for a loopback mount backed by dir (which
-// may be a /proc/self/fd/N path for in-place mounts). Every node created under it
-// reports mutations on events. hyd may be nil (eager mode); when set, opening a
-// file whose content is not resident faults it in first (M5).
-func NewRoot(dir string, events chan<- fsevent.Event, hyd mount.Hydrator, lg *log.Logger) (fs.InodeEmbedder, error) {
+// NewRoot builds the root InodeEmbedder for a loopback mount backed by
+// opts.Backing (which may be a /proc/self/fd/N path for in-place mounts). Every
+// node created under it reports mutations on opts.Events. opts.Hydrator may be
+// nil (eager mode); when set, opening a file whose content is not resident faults
+// it in first (M5).
+//
+// It takes the whole mount.Options rather than the four fields it reads so that a
+// new option reaches the nodes without another positional parameter — the mount
+// point and FsName are simply not the node layer's business.
+func NewRoot(opts mount.Options) (fs.InodeEmbedder, error) {
+	dir := opts.Backing
 	var st syscall.Stat_t
 	if err := syscall.Stat(dir, &st); err != nil {
 		return nil, err
@@ -99,9 +109,10 @@ func NewRoot(dir string, events chan<- fsevent.Event, hyd mount.Hydrator, lg *lo
 	// every descendant arrives through WrapChild above.
 	rootNode := &node{
 		LoopbackNode: &fs.LoopbackNode{RootData: root},
-		events:       events,
-		hyd:          hyd,
-		lg:           lg,
+		events:       opts.Events,
+		hyd:          opts.Hydrator,
+		xattr:        opts.Xattr,
+		lg:           opts.Logger,
 	}
 	// Mirrors NewLoopbackRoot: relative-path computation prefers this over
 	// walking up to the FUSE mount root.

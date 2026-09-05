@@ -41,6 +41,22 @@ type Options struct {
 	FsName     string               // display name for the mount
 	Debug      bool                 // backend-level tracing
 	Hydrator   Hydrator             // nil => eager mode (content always resident)
+
+	// Xattr enables extended-attribute passthrough to the backing store. The zero
+	// value — off — is what every mount gets unless it asks otherwise, and a
+	// backend must then answer xattr operations as unsupported rather than
+	// forwarding them.
+	//
+	// Off by default because this mount is an interceptor, not a plain loopback.
+	// M5 keeps its authoritative placeholder marker in a user xattr on the backing
+	// file, so passthrough publishes drivel's own control metadata at the
+	// mountpoint and lets anyone with write access there forge or strip it.
+	// Stripping the marker from an unhydrated placeholder makes the uploader push
+	// its zeros over the real remote file; attaching one to a resident file makes
+	// the next read fetch the remote copy over local content. Neither needs
+	// privilege and both are silent, so the exposure is opt-in.
+	Xattr bool
+
 	// Logger is where the backend reports; nil uses the log package's default.
 	// With several mounts in one process it carries the mount's identity, without
 	// which a hydration failure does not say whose file failed.

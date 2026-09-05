@@ -54,6 +54,21 @@ no space; content is fetched the first time something reads (or partially writes
 the file. A directory listing costs nothing. Opt-in — without `-lazy` the backing
 directory holds full content, exactly as before.
 
+### Extended attributes (`-xattr`, off by default)
+
+A Drivel mount answers extended-attribute operations the way a filesystem without
+xattr support does — `EOPNOTSUPP` — unless you pass `-xattr` (config:
+`xattr = true`).
+
+The reason is that Drivel keeps its own placeholder marker in a `user.*` attribute
+on the backing file, and that marker is what stops a not-yet-downloaded file being
+uploaded as zero bytes over the real one in your Drive. Passing attributes through
+the mount would publish it and let anything with write access to the mount strip
+it or forge it, with no privilege and no trace. Nothing in Drivel needs the
+passthrough, so it is there for applications on the mountpoint that want
+attributes of their own — and either way, extended attributes are not synced to
+Drive.
+
 ### Smarter uploads (M6)
 
 Always on, no flag. When a large file changes and the provider supports writing
@@ -108,7 +123,9 @@ local file that changed since the baseline is kept and pushed back rather than
 deleted; a directory is only removed once it is empty; and `-max-deletes` (default
 100) abandons the whole delete pass if the count looks like a broken setup rather
 than a real cleanup — a state database pointed at the wrong Drive folder, say, or a
-fresh empty backing directory.
+fresh empty backing directory. A refused pass still counts as a completed sweep, so
+if the deletions really were genuine, re-run with `-resync` alongside the higher
+cap; raising the cap on its own does nothing until the next scheduled sweep.
 
 The same machinery fixes a silent failure: Google expires change cursors, and
 Drivel used to retry a dead one forever with inbound sync quietly stopped. It now
@@ -156,7 +173,10 @@ startup errors naming both mounts, rather than a hang or a file synced to the
 wrong account.
 
 Roadmap (v2), in [DESIGN.md §9](DESIGN.md): **M9** plugin architecture for
-third-party providers.
+third-party providers, **M10** native macOS and FreeBSD support, and three backends
+that are not a cloud — **M11** a deduplicating local store, **M12** an encrypting
+layer that stacks over any other backend (client-side encryption for Drive), and
+**M13** a block-level filesystem over a distributed database. All unscheduled.
 
 ## Build
 
@@ -252,8 +272,10 @@ unmount. Linux-only for now; elsewhere use a separate `-data` dir.
 The `mount` subcommand is the default, so the older `drivel -mount … -data …` form
 still works.
 
-**Requires the FUSE mount helper** (`fusermount3`), which ships with the system
-`fuse3` package. If you see `exec: "/bin/fusermount": no such file`, install it:
+**Requires a FUSE mount helper.** On Linux that is `fusermount3`, which ships with
+the system `fuse3` package; if you see `exec: "/bin/fusermount": no such file`,
+install it. (macOS needs macFUSE and FreeBSD the `fusefs` module — see
+[Platform support](#platform-support).)
 
 ```sh
 # Fedora
@@ -262,7 +284,65 @@ sudo dnf install fuse3
 sudo apt install fuse3
 ```
 
+## Platform support
+
+| Platform | Status | Notes |
+| --- | --- | --- |
+| **Linux** (all architectures) | **Supported** — built and tested | The only platform CI exercises. |
+| **macOS** (Intel and Apple Silicon) | **Builds, untested** | Needs macFUSE. `-data` required; `-lazy` is unsafe — see below. |
+| **FreeBSD** | **Builds, untested** | Needs the `fusefs` kernel module and `vfs.usermount=1`. Same `-lazy` caveat. |
+| **Windows** | **Not supported, and not planned** | Use WSL2, or Google Drive for Desktop. |
+| Other Unixes (OpenBSD, NetBSD, Solaris, illumos, AIX) | Not supported | No Go FUSE binding exists; everything except the mount layer already compiles. |
+
+"Builds, untested" means exactly that: `GOOS=darwin` and `GOOS=freebsd` produce
+working binaries and nobody has run them against a real Drive. Treat them as
+unverified rather than as supported.
+
+### Caveats off Linux
+
+**In-place mode is Linux-only.** It works by routing backing I/O through
+`/proc/self/fd/N`, and macOS and FreeBSD have no procfs. Pass `-data` there.
+
+**`-lazy` is not safe off Linux yet.** Lazy hydration marks not-yet-downloaded files
+with a `user.drivel.placeholder` extended attribute, and that marker is what stops
+Drivel from uploading an empty placeholder over your real file in the cloud. Drivel
+does not implement extended attributes on macOS or FreeBSD yet, so the marker lives
+only in `drivel-state.db` — and if that database is lost or deleted, placeholders
+become indistinguishable from ordinary empty files. **Use the default (eager) mode on
+macOS and FreeBSD.** Native support is tracked as M10 in [DESIGN.md](DESIGN.md); on
+macOS it is a small change, on FreeBSD a larger one.
+
+Drivel detects this and says so at mount time — `WARNING: … cannot store user
+xattrs; placeholder marks rely on the state DB alone`. That warning is expected off
+Linux, not a bug, and it is telling you not to delete the state database.
+
+The same trap applies on **WSL2**: `/mnt/c` and friends do not carry Linux extended
+attributes, so keep `-data` on the Linux filesystem inside WSL rather than on a
+mounted Windows drive.
+
+### macOS: macFUSE, FUSE-T, and licensing
+
+Drivel needs a FUSE implementation on macOS, and today that means **macFUSE** —
+go-fuse looks for `mount_macfuse` or `mount_osxfuse` and nothing else, so **FUSE-T
+does not work** even though it is otherwise an attractive option (it needs no kernel
+extension, which matters on Apple Silicon and on managed fleets where kexts are
+forbidden). Adding FUSE-T support is upstream work in go-fuse, not a build flag.
+
+Note that macFUSE 4.x is **not** open source and its licence restricts commercial
+use. That is a decision between you and macFUSE — Drivel does not bundle it, ship an
+installer for it, or distribute it in any form.
+
+**On AGPLv3:** there is no conflict, and Drivel's AGPLv3 licence is unaffected by
+your using it with macFUSE. Drivel does not link macFUSE — go-fuse is pure Go and
+speaks the FUSE protocol directly, launching macFUSE's mount helper as a separate
+program and talking to it over a file descriptor. Separate programs communicating at
+arms length are not a combined work, so no copyleft obligation crosses in either
+direction, and nothing about macFUSE's licence restricts what you may do with
+Drivel. (Not legal advice; see [DESIGN.md §2.9.2](DESIGN.md) for the full reasoning.)
+
 ## License
+
+Copyright (C) 2026 SystemHalted and Jeremy Melanson.
 
 Drivel is free software licensed under the **GNU Affero General Public License,
 version 3** — see [LICENSE](LICENSE). In short: you may use, modify, and redistribute

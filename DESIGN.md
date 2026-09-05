@@ -6,7 +6,9 @@ all operations to an underlying directory (the source of truth / local cache), a
 provider. First (and currently only) provider: **Google Drive**.
 
 > GPU-accelerated deduplication is explicitly **out of scope for v1** (the repo name
-> is historical). v1 is a clean interceptor → Drive sync engine.
+> is historical). v1 is a clean interceptor → Drive sync engine. Deduplication
+> without the GPU returns in §9 as M11, as a *provider* rather than as a layer
+> inside the mount — unscheduled, and the hashing stays CPU-side.
 
 ---
 
@@ -77,6 +79,38 @@ provider. First (and currently only) provider: **Google Drive**.
   underlying dir holds full file content — no lazy hydration yet).
 - On each mutating op, after it succeeds against the underlying dir, it enqueues a
   **local change event** to the Sync Engine. FS ops never block on the network.
+- **Extended attributes are refused, not proxied** — `ENOSYS`, which the kernel
+  reports to the caller as `EOPNOTSUPP` and then stops asking. `drivel mount
+  -xattr` (config: `xattr = true`) turns the passthrough on; the default is off.
+
+**Why xattrs are the one thing that does not pass through.** Everything else about
+the FUSE layer is a loopback, and a loopback that dropped xattrs would just be
+lossy. This one is not lossy, it is *load-bearing*: drivel's own control metadata
+lives in an xattr on the backing file (`user.drivel.placeholder`, §9/M5, whose
+authority over the state DB is invariant 1 of that milestone). Proxying xattrs
+publishes that marker at the mountpoint and makes it writable by anything that can
+write there, which turns two of M5's invariants into ordinary user commands:
+
+- `setfattr -x user.drivel.placeholder` on an unhydrated file removes the mark, so
+  the next push replaces the *remote* file with the placeholder's zero bytes —
+  M5 invariant 2, reached without touching drivel.
+- `setfattr -n user.drivel.placeholder -v …` on a resident file adds one, so the
+  next read hydrates the remote copy over local content.
+
+Neither needs privilege and neither leaves a trace, so the exposure is opt-in
+rather than a caveat. Nothing inside drivel wants the passthrough either — the
+hydrator reads and writes the marker on the backing path, *below* the mount, so
+the option changes nothing about how M5 works; and no xattr is carried to the
+provider in either mode (§10 is the unscheduled design note on doing that).
+
+Mechanically it is two guards, because one is not enough. `fuse.MountOptions.
+DisableXAttrs` stops the kernel issuing GETXATTR and LISTXATTR at all — one
+`ENOSYS` per mount rather than one per file — but go-fuse's `doSetXAttr` and
+`doRemoveXAttr` have no such check, so SETXATTR and REMOVEXATTR would still reach
+`LoopbackNode` and land on the backing file. That is the *write* side, i.e. the
+dangerous one, so `internal/vfs/xattr.go` also overrides all four node ops. A test
+asserts the second guard by itself: removing it lets an attribute set through the
+mountpoint appear on the backing file with `DisableXAttrs` still in force.
 
 ### 2.2 Underlying directory
 - The real bytes live here. It is both the passthrough target and the local cache.
@@ -215,6 +249,25 @@ means "rename" is not universally atomic or identity-preserving. Providers docum
 behaviour; the engine does not branch on it. (`Move` on an unknown source returns
 `provider.ErrNotExist`, which the engine recovers by uploading the destination as fresh
 content — the one place only the engine has the bytes.)
+
+**Reporting a move *inbound* is the seam's hardest case, and it is the provider's
+job.** `RemoteChange` is `{Path, File, Removed}` — no identity — so the only way a
+change feed can say an object moved is a removal of the path it left plus an
+addition of the path it now occupies. A provider whose native feed is keyed by
+object identity (Drive's `changes.list` is: one entry per fileID, carrying that
+object's metadata *now*) is never told the old path by the API, and never says it
+either unless it works it out from its own path↔ID mapping. Left unsaid, a rename
+on one client duplicates the file on every other, because the new path is
+downloaded and nothing ever removes the old one — until an enumeration sweep
+infers the delete, up to `-sweep-interval` later. `gdrive.vacatedPathLocked` is
+where that is worked out, with two deliberate limits: **directories are excluded**
+(a removal above the seam is a recursive local delete, and Drive reports no
+changes for the children of a moved folder, so the subtree would be deleted and
+not come back until a sweep — leaving the stale copy is the lesser failure), and
+**only the in-memory mapping is consulted, never the persistent index** (acting on
+it here means deleting a local file, and M7's first rule is that a persisted entry
+is a hint to be verified before it is believed). Both fall back to the sweep,
+which is slower and never wrong.
 
 ### 2.6 Transport — HTTP/3 (QUIC) with HTTP/2 fallback
 All Drive API traffic goes over **HTTP/3**. Rationale: QUIC's connection reuse and
@@ -382,6 +435,145 @@ pseudo-provider proof is a test), hot-reloading the config, and any daemon or IP
 control surface.
 
 ---
+### 2.9 Platform support
+
+Everything below the mount seam is portable by construction, and the seam is where
+portability actually stops. The whole tree cross-compiles for `darwin/{amd64,arm64}`,
+`freebsd/{386,amd64,arm,arm64}` and every `linux/*` arch; on `windows/amd64` every
+package builds *except* `internal/vfs` (and `app`/`config`/`cmd` only because they
+import it transitively). Every cross-compile failure on every target traces to
+go-fuse and nothing else. That is a stronger statement of §2.5/§2.7 than M8's
+two-Drive-stores test: adding a platform is a `mount.Backend`, never a port.
+
+**Tier 1 — builds today.** Linux (all 13 arches), macOS (amd64/arm64), FreeBSD.
+Only Linux is *tested*; macOS and FreeBSD are compile-verified only, and are
+documented as such rather than as supported.
+
+**Tier 2 — one `mount.Backend` away.** Windows, OpenBSD, NetBSD, DragonFly, Solaris,
+illumos, AIX, Plan 9. The sync core alone (`syncengine`, `provider`, `gdrive`,
+`state`, `pathindex`, `transport`, `hydrate`, `gauth`, `ranges`, `fsevent`) builds
+clean on OpenBSD and Solaris, so a headless no-mount daemon is a far smaller lift
+than any mount frontend. On `wasip1`/`js` and Plan 9 the core stops at bbolt, which
+needs mmap and flock.
+
+**Tier 3 — no Go port exists.** OS/2, QNX, Haiku. Porting Go to a new OS is a
+*runtime* port (per-OS assembly for threads, signals, memory; a linker story), not a
+recompile. gccgo is the usual escape hatch and is not one here: GCC's Go frontend is
+years behind, and `go.mod` requires a toolchain far newer than it provides.
+
+**Embedded** splits into two unrelated questions. Embedded *Linux* (OpenWrt, Yocto,
+Buildroot on arm/mips/riscv) is Tier 1 already; the binding constraint is size —
+19–22 MB stripped, mostly `google.golang.org/api` + gRPC + OpenTelemetry — not
+portability. Bare-metal/RTOS is out of reach and not for a fixable reason: TinyGo
+cannot build bbolt (mmap/flock), quic-go (`crypto/tls`) or the reflection-heavy Drive
+client, and more fundamentally there is no kernel VFS to interpose on. The premise of
+the program is intercepting a mount point.
+
+#### 2.9.1 What degrades off Linux
+
+Two things, and the second is a correctness matter rather than a missing feature.
+
+1. **In-place mode is unavailable** (`mount.openInPlace` refuses off Linux).
+   `/proc/self/fd/N` is the Linux shortcut that lets the path-based loopback work
+   unchanged; macOS and FreeBSD have no procfs and would need an fd-relative loopback
+   built on the `*at` family. `-data` is mandatory there.
+
+2. **M5's placeholder marker has no authority.** `hydrate/xattr_other.go` stubs
+   `get/set/removexattr` to `ENOTSUP`, so off Linux the `RangeSet` in `internal/state`
+   is not a cache of the truth — it *is* the truth. That inverts M5 invariant 1, and
+   the consequence is invariant 2's data-loss case: lose `drivel-state.db` in `-lazy`
+   mode and placeholders become indistinguishable from real files, which the uploader
+   will push as zero bytes over good remote content. Eager mode is unaffected.
+
+   This is a missing implementation, not a platform limit. macOS has native
+   `getxattr`/`setxattr` and is a small, well-understood change; FreeBSD's `extattr_*`
+   is a genuinely different, namespaced API and a larger one. Both are tracked in §9
+   under M10. **Until M10 lands, `-lazy` off Linux should be treated as unsupported.**
+
+#### 2.9.2 macOS: AGPLv3 and macFUSE
+
+There is **no license incompatibility**, and the reason is structural rather than a
+judgement call. go-fuse contains no cgo and does not link libfuse — it implements the
+FUSE kernel protocol in pure Go. Its entire interaction with macFUSE is to `exec` the
+`mount_macfuse` helper and then read and write a file descriptor received over a unix
+socketpair (`fuse/mount_darwin.go`). Two programs communicating at arms length over a
+pipe are separate works under long-standing GPL doctrine, not a combined one, so no
+copyleft obligation propagates in either direction. AGPLv3's §13 network clause is
+about *our* users interacting with *our* program remotely and is not implicated at
+all; §1's System Library carve-out would cover an OS-level component regardless,
+though nothing here needs to rely on it.
+
+The obligation that does exist is a distribution rule, and it is easy to honour:
+**never bundle macFUSE, never ship an installer that fetches it, never publish a
+combined image.** Distributing our AGPL binaries is unaffected by what the user
+separately chooses to install, exactly as GPL software running on a proprietary OS is.
+
+What is *not* a license conflict but is a real adoption problem: macFUSE 4.x is no
+longer open source (osxfuse 3.x was BSD-2-clause), and its own terms restrict
+commercial use. That burden falls on the user, not on us — but it is a reason to
+document the dependency prominently and a reason FUSE-T matters. Confirm macFUSE's
+current terms before making any claim about them; none of the above is legal advice.
+
+#### 2.9.3 macOS: FUSE-T
+
+Two corrections to the obvious framing.
+
+**FUSE-T is not "the user-only install".** Both need admin rights. The real
+difference is that macFUSE installs a *kernel extension* — which on Apple Silicon
+means reduced-security boot, an explicit approval and a reboot, and which MDM-managed
+fleets frequently forbid outright — while FUSE-T runs a userspace NFS server and
+needs none of that. FUSE-T is the option for machines where a kext is not permitted,
+which is a policy distinction, not a privilege one.
+
+**It is not a build-time choice, because go-fuse cannot use FUSE-T at all.** Verified
+in both v2.10.1 and v2.11.0: `fusermountBinary()` probes exactly two paths
+(`mount_macfuse`, `mount_osxfuse`) and fails otherwise, and go-fuse speaks the raw
+protocol over the macFUSE device rather than linking libfuse — which is precisely
+FUSE-T's integration point. Supporting it is upstream work in go-fuse or a separate
+`mount.Backend`; no `-tags` combination reaches it today.
+
+When it is reachable, the choice must be **runtime detection, never build tags**:
+which helper exists is a property of the machine the binary runs on, not the one it
+was built on, and a single darwin binary should probe and say clearly which it found.
+
+On performance, macFUSE should win and we have not measured it. The architecture
+predicts it — an in-kernel VFS against a loopback NFS server that adds protocol
+translation and a network-stack traversal, with metadata-heavy workloads suffering
+most — but that is a prediction, and a benchmark belongs in the M10 work rather than
+in this paragraph. One unknown outranks it anyway: FUSE-T is NFS-backed, and whether
+it carries `user.*` xattrs at all is unverified. If it does not, the macOS half of
+M10 buys nothing under FUSE-T and `-lazy` stays DB-only there. Settle that before
+promising either.
+
+#### 2.9.4 Windows: an explicit non-goal
+
+Not "unsupported pending effort" — decided against, for four reasons that are worth
+writing down so the question stops recurring.
+
+- **WSL2 already covers the audience.** drivel's users are people who want a POSIX
+  filesystem interface; on Windows they have one.
+- **Google Drive for Desktop covers everyone else**, natively and free. There is no
+  user left who is served better by a Windows port of this.
+- **The cost is a new dependency class.** WinFsp/cgofuse means cgo, which forfeits
+  the pure-Go build the whole tree currently enjoys. ProjFS is architecturally the
+  better fit — it is Microsoft's API for exactly this placeholder/hydrate-on-first-IO
+  model and would map onto M5 nearly 1:1 — but it is a ground-up backend, not a port.
+- **NTFS case-insensitivity is a new correctness surface, not just labour.** Drive is
+  case-sensitive, so `Foo.txt` and `foo.txt` are distinct remote objects that collide
+  into one local path. That is a fresh variant of the same-name-sibling problem of
+  §2.5 / MC-30, on a layer that has no policy for it.
+
+The seam costs nothing to keep clean — the cross-compile above proves it stays clean
+for free — so this is a decision not to build a frontend, not a decision to let the
+option close.
+
+**WSL2 caveat, and it is the M5 one again:** files under `/mnt/c` are drvfs, which
+does not carry Linux user xattrs. A `-lazy` mount whose `-data` lives there loses the
+placeholder marker exactly as macOS does. Keep the backing directory on the ext4
+filesystem inside the WSL2 VHD.
+
+---
+
 
 ## 3. The sync loop (inbound / pull)
 
@@ -493,12 +685,25 @@ are both lossy and racy.
 ---
 
 ## 8. Open questions / future
-- **Deduplication / GPU**: content-defined chunking + hashing; shelved (the repo
-  name is historical).
+- **Deduplication**: no longer shelved as an idea, but as a *provider* rather than
+  as a layer inside the mount — see M11 in §9. GPU-accelerated hashing stays
+  shelved (the repo name is historical); it is an optimisation of a component that
+  does not exist yet.
+- **Virtual xattrs**: emulate extended attributes out of a file in the backing
+  store, so they work on backing filesystems that have none and travel with the
+  content. Unscheduled, and gated behind a build tag if it is ever built — the
+  design note and the reasons for the compiler-level default are §11.
 - **`changes.watch` push** as a latency optimization behind an optional relay.
 - **POSIX metadata preservation** (mode bits, POSIX/extended ACLs, xattrs, SELinux
   contexts) carried alongside content — see §10. Not scheduled; the security
-  analysis is the blocker, not the plumbing.
+  analysis is the blocker, not the plumbing. Note that §11 would carry xattrs over
+  the same provider by a different route, which is one mechanism too many if both
+  are ever built.
+- **Backends that are not a cloud**: a deduplicating local store (M11), an
+  encrypting decorator over any other provider (M12), and a block-level filesystem
+  over a distributed database (M13). The first two are `provider.Store`
+  implementations that need no new seam; the third is only partly one, and §9 says
+  where it stops fitting.
 - **Google-native docs** (Docs/Sheets/Slides) have no binary content and no
   `md5Checksum`. They fall back to the opaque `Version` for echo matching, and since
   M7b they are marked `RemoteFile.ExportOnly`: reported by the sweep (so their
@@ -894,6 +1099,15 @@ are both lossy and racy.
       already in progress, and it is what makes the refusal actionable, since
       "4231 deletions" tells an operator something that "more than 100" does not.
 
+      **A refused pass does not retry itself, and the message has to say so.** The
+      sweep around it still completed — it enumerated the whole tree and ran every
+      other row — so it records its completion stamp and clears its resume record.
+      The next mount therefore finds a valid cursor, no interrupted sweep and, until
+      `-sweep-interval` falls due, no reason to enumerate again; raising the cap and
+      restarting changes nothing observable, which from the operator's side is
+      indistinguishable from having fixed it. Recovery is `-resync` *and* a higher
+      cap, so the refusal names both.
+
    The fail-safe direction is the same one M5 and M6 use — when the baseline is
    missing or ambiguous, keep and materialise rather than delete, because deletion is
    the irreversible half. One consequence is worth stating as a rule rather than
@@ -1045,6 +1259,329 @@ are both lossy and racy.
    should not inherit the mount's ambient credentials), failure isolation (a
    crashing plugin must not take down the mount), and versioning of the seam
    itself. Depends on M8 having proven the seam with a second registered provider.
+11. **M10 — Platform parity (macOS, then FreeBSD).** Independent of M9; nothing
+   waits on either. The tree already cross-compiles for both (§2.9), so this is not
+   a port — it is closing the two gaps that make a build that *runs* differ from a
+   build that *works*. Ordered by ratio of user value to effort:
+
+   - **macOS native xattrs.** Implement `get/set/removexattr` in a
+     `hydrate/xattr_darwin.go` against `golang.org/x/sys/unix`, replacing the
+     `ENOTSUP` stubs `xattr_other.go` currently supplies. This is the item that
+     makes `-lazy` safe on macOS: without it the state DB is the sole authority for
+     the placeholder marker and M5 invariant 1 is inverted (§2.9.1). Small and
+     well-understood — macOS's API is close enough to Linux's that the shape of
+     `xattr_linux.go` carries over, modulo the extra `position` argument and the
+     absence of a namespace prefix requirement. The existing `hydrate` and
+     `syncengine/lazy_test.go` suites are the acceptance criteria; `internal/testenv`
+     already knows how to make a missing-xattr environment a failure rather than a
+     skip, so CI can hold the line once a darwin runner exists. Note the *detection*
+     side already works everywhere: `Hydrator.XattrsUsable` short-circuits on
+     `xattrSupported`, so `app.Mount` emits its state-DB warning correctly on macOS
+     and FreeBSD today. M10 is about removing the condition, not about noticing it.
+   - **FreeBSD `extattr_*`.** Longer-term, and a real port rather than a
+     translation: FreeBSD's interface is `extattr_get_file`/`extattr_set_file`/
+     `extattr_delete_file` over an explicit namespace (`EXTATTR_NAMESPACE_USER`),
+     with no `user.` name prefix and different error semantics. The marker name must
+     therefore be *derived* per platform rather than hardcoded, which is the one
+     design decision this item forces on `internal/hydrate`. Worth doing after macOS
+     both because the user population is smaller and because doing macOS first
+     establishes the per-platform naming seam that FreeBSD then fills in.
+   - **Verify FUSE-T's xattr behaviour before either lands** (§2.9.3). FUSE-T is
+     NFS-backed; if it does not carry `user.*` xattrs, the macOS item delivers
+     nothing under FUSE-T and the documentation has to say which macOS FUSE
+     implementations `-lazy` is actually safe on. This is a research task with a
+     one-line answer, and it gates what M10 is allowed to claim.
+   - **Then measure, then decide about FUSE-T support at all.** §2.9.3 predicts
+     macFUSE is faster and explicitly does not assert it. If FUSE-T is close enough,
+     kext-free operation is worth upstream work in go-fuse; if it is not, the honest
+     documentation is "macFUSE, and here is why."
+
+   Explicit non-goals: in-place mode off Linux (it needs an fd-relative `*at`
+   loopback — §2.7, still future work) and Windows in any form (§2.9.4).
+
+12. **M11 — Deduplicating local backend (`dedup`).** A `provider.Store` whose
+   "cloud" is a directory on this machine: content-addressed chunks plus a manifest
+   per path, with the sync engine driving it exactly as it drives Drive. Mount a
+   directory, write to it, and what lands in the store is one copy of each distinct
+   chunk. This is the repo's original name arriving through the provider seam
+   rather than through a rewrite of the mount — which is also why it is a milestone
+   and not a re-scoping: nothing above §2.5 changes.
+
+   **Decided: it is a provider, not a layer under the mount.** The obvious
+   framing — an arbitrator sitting between the mount and the directory it writes
+   to — puts it in `internal/vfs`, on the FUSE path. Everything drivel already has
+   argues against
+   that. On the provider side it inherits debounce and coalescing (M4), the M6
+   gates, echo suppression, conflict copies, the M7b sweep and the drain on
+   shutdown — and it stays off the FUSE path, which is the §2.1 rule that keeps
+   `write(2)` from waiting on a hash. On the mount side it would inherit none of
+   it, would have to re-implement crash consistency for a store that is now in the
+   write path, and would make every read a chunk-assembly. The cost of the provider
+   framing is that eager mode stores the bytes twice — once in the backing dir,
+   once in the store — which is the next paragraph.
+
+   **`-lazy` is what makes it a deduplicating filesystem rather than a backup
+   target.** With M5 the backing dir holds placeholders and the store holds the only
+   full copy, so "mount 4 TB of deduplicated data on a 200 GB disk" is the existing
+   lazy path over a local provider, with no network. A local provider also makes
+   the two things that are awkward against Drive trivial: `RangeGetter` is a seek,
+   so hydration is genuinely partial, and `RangePutter` *is* implementable (splice
+   the changed extents by re-chunking that span and rewriting the manifest), which
+   makes M11 the first backend that exercises the M6 range-write path that Drive
+   deliberately declines. `ContentHasher` is native — the store hashes everything
+   anyway — so M6's unchanged-content gate becomes exact and free.
+
+   **Data model, and the parts that are decided by physics rather than taste.**
+
+   - *Chunking.* Content-defined (FastCDC/Rabin, e.g. 512 KiB min / 1 MiB avg /
+     8 MiB max) rather than fixed blocks: fixed blocks lose all dedup after a
+     single-byte insertion shifts a file, which is the case dedup exists for.
+     Note the interaction with M6, which describes dirty extents on a fixed block
+     grid: the manifest translates an extent to the chunks it touches, and a write
+     re-chunks that span plus the tail up to the next boundary the chunker
+     re-synchronises on. Nothing about M6's contract changes — `Dirty == nil` still
+     means "push everything" — but the store must round *outward* to chunk
+     boundaries, the same asymmetry `ranges.MarkCovering` already encodes.
+   - *Manifest.* path → ordered chunk hashes + sizes. Flat in bbolt is enough for a
+     local store. Making the manifest itself content-addressed (file = hash of its
+     chunk list, directory = hash of its entries) is the Merkle DAG, and it buys
+     things a flat table cannot: whole-subtree dedup, "did anything under here
+     change?" as one hash comparison, and integrity verification that covers the
+     structure and not just the bytes. It costs a rewrite of the spine to the root
+     on every write, which is contention on exactly one key. **Recommendation:**
+     flat manifests first; adopt the Merkle spine when something needs to *compare
+     two trees it cannot both hold*, which is M13's problem, not M11's.
+   - *The chunk index is not a hand-built trie.* The natural way to write "branch on
+     the next N bytes of the hash" is a radix trie or a HAMT, and it is the right
+     structure — but bbolt is already a B+tree over ordered keys and badger is
+     already an LSM over ordered keys, so keying either directly by the chunk hash
+     gets the prefix locality a trie would provide, with the crash consistency
+     written and tested. A hand-rolled trie *above* one of them is a second index
+     to keep consistent with the first.
+   - *Fanout belongs to the on-disk layout, and 3 bytes is far too many.* If chunks
+     are individual files (git-object style), the fanout exists to stop one
+     directory holding millions of entries — and 3 bytes is 16.7 M directories,
+     which trades a big directory for an inode and dentry-cache problem that is
+     strictly worse, with almost all of them empty. Git uses one byte (256); two
+     nested single-byte levels (65 536) is the usual ceiling. **Better still, skip
+     the question:** write chunks into pack files of a few MiB with an index
+     entry of (pack, offset, length), the way restic and borg do. A 4 KiB filesystem
+     block per 1 KiB chunk is a 4× space loss that dedup then has to win back, and
+     packs also turn a restore into sequential reads.
+   - *Garbage collection is the actual project.* Everything above is a weekend; a
+     CAS that can delete safely is not. Refcounts are fast and wrong at the first
+     crash mid-update; mark-and-sweep is correct but must walk every manifest and
+     must not race a concurrent write, which needs generations or a write barrier.
+     Reclaiming space from packs is a third problem (compaction, rewriting live
+     chunks out of half-dead packs). Note this changes what `Store.Remove` means:
+     unlink is a manifest edit, and space comes back later, or never, depending on
+     the answer here.
+   - *bbolt or badger.* bbolt is what the tree already uses twice, is a single file,
+     has no compaction, and is excellent for read-mostly data. Its weak case is
+     precisely this one: bulk insertion of uniformly random keys (a hash index is
+     the definition of random) splits pages relentlessly and grows the file, and a
+     write transaction is single-writer and fsyncs. Badger's LSM absorbs random
+     writes far better and is built for tens of millions of keys, at the cost of
+     background compaction, more memory, a value log to reason about, and a second
+     storage engine in the tree. **Recommendation:** bbolt behind a small interface
+     first, with a benchmark that inserts 10^7 random keys as the acceptance
+     criterion; swap to badger if it fails, which `internal/pathindex` shows is a
+     contained change.
+
+   **What is genuinely new.** A local provider has no `changes.list` to poll, but it
+   can offer something better: since we own the store, a monotonic sequence number
+   per commit makes `ChangeSource` exact rather than an approximation, and
+   `Enumerate` is a walk of the manifest table. It also breaks an assumption worth
+   naming — until now "the provider" has meant "somewhere else", so a second mount
+   pointing at the same store is a case `app.Validate` has never had to consider.
+
+   **It also settles M9's precondition properly.** M8 proved the §2.5 seam with two
+   Drive stores in one process, which is a good test and a weak proof — both sides
+   were the same implementation. A second provider that is not a cloud at all, is
+   not ID-addressed, has an exact change feed and *does* implement `RangePutter`
+   exercises every optional interface in the seam in the opposite direction from
+   Drive. Whatever survives that is what M9's plugin API should be shaped like.
+
+   **Decided: the store is private to one machine.** One host, one store, one
+   writer — which is what makes mark-and-sweep GC tractable, flat manifests
+   sufficient and locking unnecessary, i.e. it is what makes the whole entry above
+   the size it is. A store several machines sync into brings back cross-client GC
+   (a sweep cannot run while another host is writing), leases, and the Merkle spine
+   as a requirement rather than an option; that is M13 wearing a local filesystem
+   as a disguise, and it should be built there or not at all.
+
+13. **M12 — Encrypting backend (`crypt`).** Same shape as M11 with a different
+   transform, and one structural difference that makes it more interesting: it is
+   most valuable *stacked over another provider*, not over a local directory.
+   `crypt` over `gdrive` is client-side end-to-end encryption for Drive — the thing
+   rclone's crypt remote and gocryptfs exist for — and it is a strictly better
+   answer than "encrypt a local directory", which the operating system already does.
+
+   **Decided: it is a decorator over another provider**, with "encrypt into a local
+   directory" available as the degenerate case of wrapping a plain-directory store
+   rather than as a second backend.
+
+   **The new capability it needs is provider stacking**, and it is small: a
+   decorator provider has to open its inner store, so `provider.Params` must carry
+   a way back into the `Registry` (an `Open(kind string, p Params) (Store, error)`
+   hook), and a provider's config table must be allowed to name another kind and
+   nest its settings. `internal/config` still learns nothing — the nested table is
+   opaque to it exactly as a Drive folder ID is (§2.8, rule 4). This is also the
+   cleanest possible prompt for M9's plugin seam: a decorator is where a plugin API
+   either composes or does not.
+
+   **Where the seam fights back, all of which is findable before writing code.**
+
+   - *Filenames are the hard part, because the seam is path-addressed.* Encrypting
+     a name must be **deterministic** within its parent (SIV/EME-style) or path
+     lookup stops working — a random nonce per name means the only way to resolve
+     `a/b/c` is to list and trial-decrypt, which makes the M7 index authoritative
+     and breaks that milestone's invariant 2. Deterministic names leak equality
+     (the same name in the same directory is the same ciphertext) and leak length
+     unless padded. Both are documented rclone/gocryptfs trade-offs, not novel risk.
+   - *Sizes stop matching, and M6 notices.* AEAD per block adds a nonce and a tag,
+     so the ciphertext is longer than the plaintext. M6's gate 2 requires the remote
+     object to exist "at exactly the local size", and M5's placeholders need the
+     *plaintext* size to be honest. The crypt layer therefore has to translate sizes
+     in both directions and own that arithmetic; forgetting it disables M6 silently
+     (the good failure) or writes wrong-sized placeholders (the bad one).
+   - *Random access requires the block layout to be part of the format.* Fixed
+     plaintext blocks (32–64 KiB) with a nonce derived from (file key, block index)
+     keeps `GetRange` a seek and `PutRange` a block rewrite. A stream cipher over
+     the whole file makes M5 and M6 both impossible. Deriving the nonce from the
+     index rather than randomly is what makes rewrite-in-place safe *only* if the
+     file key changes on rewrite, or the same (key, nonce) encrypts two plaintexts —
+     the one cryptographic mistake in this design that is fatal rather than
+     embarrassing.
+   - *`ContentHasher` has to be answered deliberately.* M6's gate 3 compares a local
+     digest with what `Stat` reports the remote holds — which is now a digest of
+     ciphertext. Either the layer hashes the ciphertext it *would* produce
+     (deterministic, and it must be, for this to work), or it keeps a plaintext MAC
+     in a file header and compares that. The header is simpler and does not force
+     determinism on content.
+   - *Dedup and encryption do not compose for free.* Encrypt-then-dedup dedups
+     nothing; dedup-then-encrypt with convergent keys (chunk key = hash of chunk)
+     dedups across users and thereby leaks whether you hold a given file — the
+     known confirmation-of-file attack. If M11 and M12 are ever stacked, the honest
+     default is dedup within one key holder's data only.
+   - *Key handling collides with an existing rule.* `drivel mount` is
+     non-interactive by design (CLAUDE.md; it must never prompt on stdin), so the
+     passphrase cannot be prompted at mount time. That means a keyfile with
+     enforced 0600 through `gauth.writeSecret`, an agent, or the OS keyring — and
+     `login` is the interactive command where a passphrase *may* be entered.
+     Argon2id for the KDF, a master key wrapped per file, and no key material in
+     `config.toml`.
+
+14. **M13 — Block-level filesystem over a distributed database (`nosql`).** Clients
+   talk to the database directly; files are blocks, metadata and directory entries
+   are rows, and several machines mount the same tree. This is the largest item on
+   the roadmap by a wide margin, and the first one where the honest answer starts
+   with a question about which of two products it is.
+
+   **The fork in the road, which decides everything else.**
+
+   - *(a) Another provider.* The database is the sync target, each client keeps its
+     backing dir as the local source of truth, and the existing engine syncs to it
+     asynchronously. Everything in v1 and v2 applies unchanged: no distributed
+     locking, last-writer-wins with §6 conflict copies, echo suppression, the
+     `journal` table as a real `ChangeSource`. Weeks of work, not years, and it
+     composes with M11 (the block/chunk tables *are* M11's CAS, remote).
+   - *(b) A cluster filesystem.* The database is the filesystem; there is no local
+     source of truth; a read that misses cache blocks on the network. This
+     contradicts the §2.1 rule that FS operations never block on the network, and it
+     is what forces locking, leases, cache coherence and ACID commits into the
+     design. It is a different program that would share drivel's mount layer and
+     very little else — which is fine, but it should be *decided*, not discovered
+     halfway through the schema.
+
+   **Decided: (a) first, and (b) is not a later phase of it.** The first release is
+   another provider behind the existing engine — it makes the schema, the block
+   store and the journal real while the consistency model stays the one already
+   shipped and tested, and it is the version that can exist this year. What it must
+   not do is quietly pretend to be (b): a client that keeps a local source of truth
+   and resolves races with conflict copies is not a cluster filesystem, and saying
+   so plainly in the documentation is part of the milestone. If (b) is ever wanted
+   it is a second program sharing the mount layer, and the honest cost of that
+   decision is visible below; the parts of (a) that survive into it are the schema
+   and the block store, which is precisely why the schema is written for a
+   transactional engine even though (a) does not need one.
+
+   **On Cassandra specifically: it is the wrong tool for the metadata half.** It is
+   an excellent tool for the block half. The reasons are structural, not a matter of
+   tuning. There are no multi-partition transactions, so any operation touching two
+   rows — `rename`, `link`, a `create` that updates a parent and an inode — has no
+   atomic form; lightweight transactions are per-partition Paxos at roughly four
+   round trips, which is a slow way to be correct on the subset of operations that
+   fit. Conflict resolution is last-write-wins by cell timestamp, which silently
+   resolves races that a filesystem must not resolve silently. Deletes write
+   tombstones, and a block-level filesystem is a delete-and-overwrite workload, so
+   the partitions you scan (a directory listing, a file's block range) accumulate
+   exactly the thing that makes Cassandra reads fall over. And large cell values are
+   discouraged; blocks want to be ≤ 1 MiB, which is fine, but compaction then
+   rewrites every block repeatedly.
+
+   **What to use instead, in the order I would consider them.**
+
+   - **FoundationDB.** The specific answer to "a general-purpose schema I can adapt":
+     an ordered key space with strictly serialisable multi-key transactions, which
+     is what a filesystem's metadata layer wants and what nothing else on this list
+     offers as directly. Directory listings are range reads; `rename` is one
+     transaction. Constraints shape the design honestly (5 s / 10 MB per
+     transaction, so blocks live outside it and only their references are
+     transactional) and it is designed to be layered on. Its operational cost is
+     real and its client is C-with-Go-bindings, which is a mark against a pure-Go
+     tree — worth weighing against writing consistency by hand.
+   - **TiKV** — the same transactional ordered-KV shape, Raft-based, gRPC client,
+     no cgo. The closest thing to FoundationDB that keeps the build pure Go.
+   - **MongoDB** — multi-document ACID transactions since 4.0, a driver everyone
+     has, and a data model that maps to inodes and dirents without contortion.
+     Cross-shard transactions are expensive, so shard by inode and keep a rename's
+     rows co-located. The boring option, which is a compliment.
+   - **ScyllaDB** — if Cassandra's model is wanted anyway, this is Cassandra without
+     the JVM and with much better tail latency. It does not fix the transaction
+     model, so it belongs in the block half.
+   - **CockroachDB / Postgres** — outside the "NoSQL" framing but exactly this shape,
+     and worth naming because "we need transactions over an ordered key space" is a
+     description of a SQL database with extra steps.
+   - **Redis / Memcached: cache and leases only, never the authority.** Specifically,
+     do not build the correctness of a lock on Redis: the Redlock argument is that
+     a lock held across a GC pause or a clock jump can be believed by two clients at
+     once, so a lease must be checked *at the point of use* by a fencing token the
+     storage layer validates. Drivel already has the right instinct written down —
+     `internal/pathindex` is a cache that is never authoritative and is verified
+     before it is acted on (M7, invariant 1) — and a metadata cache here needs the
+     same rule with the same enforcement.
+
+   **Schema sketch, kept engine-neutral on purpose.** Every engine above can express
+   an ordered KV model; Cassandra expresses it worst (ordering exists within a
+   partition, not across). Tables: `inode` (inode_id → mode, owner, size, times,
+   nlink, generation), `dirent` ((parent_inode, name) → child_inode, type — so a
+   listing is one ordered range read and a lookup is a point read), `block`
+   ((inode_id, block_index) → content hash, or inline bytes below a threshold),
+   `content` (hash → bytes or pack reference, refcount) which is M11's CAS again,
+   `lease` (inode_id → owner, expiry, fencing token), and `journal` (a per-tree
+   ordered log of committed operations). The journal is worth building even in
+   variant (a), because it is simultaneously the crash-recovery record, the cache
+   invalidation channel, and a `provider.ChangeSource` — one structure paying for
+   three things drivel already knows how to use.
+
+   **Split the two interfaces.** A *metadata engine* and a *block store*, chosen
+   independently: FoundationDB or TiKV metadata over S3 or a Cassandra block store
+   is a shape that works, and it is what JuiceFS does (pluggable metadata engine,
+   objects in object storage) — which is the closest existing implementation of what
+   M13 describes and the best available source of schema decisions already made
+   under load. SeaweedFS and CephFS are the other two worth reading before writing:
+   Ceph's MDS exists because "put the metadata in the database and let clients race"
+   is where every such design ends up, and knowing *why* it grew a metadata server
+   is cheaper than rediscovering it.
+
+   **The unglamorous things that decide whether it works:** `O_APPEND` and shared
+   mutable files (POSIX says two writers interleave atomically per write; a block
+   store says they do not), `fsync` semantics against an eventually-consistent
+   store, partial-block writes (read-modify-write needs the read to be consistent
+   with the write), and what happens to an open file handle when another client
+   deletes the inode. Answering those is the milestone; the schema is the easy part.
+
 
 ### M0 — Test & CI (cross-cutting, always open)
 
@@ -1052,7 +1589,7 @@ Not a numbered milestone: it has no completion date and nothing waits on it. It 
 listed here because the test suite is load-bearing and was, until now, tracked
 nowhere.
 
-**Where it stands.** Every package except `internal/fsevent` has tests, green under
+**Where it stands.** Every package has tests, green under
 `go test -race ./...`. The invariants whose failure mode is *data loss*
 rather than inconvenience each have a dedicated file: `syncengine/lazy_test.go`
 (M5, never push a placeholder), `rangewrite_test.go` (M6's three gates, especially
@@ -1067,9 +1604,12 @@ while the data-loss guards never execute. `internal/testenv` turns those skips
 into failures for any facility named in `DRIVEL_REQUIRE_TESTENV` (`fuse`, `xattr`,
 or `all`), which is what CI must set.
 
-**The list, in order of what a regression would cost.** Struck items are done and
-kept here with what they taught; 1 landed before M8, 2 and 4 during it. What
-remains is the tail — property tests, `gauth`'s file I/O, `fsevent`:
+**The list, in order of what a regression would cost.** Every item is now struck
+and kept here with what it taught; 1 landed before M8, 2 and 4 during it, 3, 5 and
+6 after it. What the list does not cover, and no local item could, is the
+authorization-code exchange and the Drive calls themselves — those are Tier B's
+job (`docs/multiclient-test-plan.md`), which is where the live testing work now
+is:
 
 1. ~~**CI.**~~ ✅ Done. Every gate is a `make` target that the git hooks and the
    GitHub Actions workflow both call, so "passed locally" and "passed in CI" cannot
@@ -1078,11 +1618,26 @@ remains is the tail — property tests, `gauth`'s file I/O, `fsevent`:
 2. ~~**`cmd/drivel` is untested.**~~ ✅ Done in M8, which needed the same refactor:
    the wiring moved to `internal/app`, and `cmd/drivel` keeps flag parsing and the
    flag-to-spec mapping, which is what the tests cover.
-3. **Property tests for `internal/ranges`.** The inward/outward rounding asymmetry
-   (`Mark` vs `MarkCovering`) and the coalescer's "unknown absorbs known" rule are
-   invariants, and invariants are better checked by generated cases than by
-   examples: a dirty set must always cover its input, a present set must never
-   exceed it, and a union across mismatched block grids must degrade to unknown.
+3. ~~**Property tests for `internal/ranges`.**~~ ✅ Done. `ranges/property_test.go`
+   and `syncengine/coalescer_property_test.go` state the invariants against
+   generated op sequences over a fixed seed range, so the suite is deterministic
+   and a failure prints the seed and the spans that produced it. Two things are
+   worth keeping.
+
+   **The oracle must not share the implementation's shape.** The properties are
+   stated as relations to the *input* — marked bytes ⊆ the spans Mark was given,
+   marked bytes ⊇ the spans MarkCovering was given, marked bytes ⊆ the blocks
+   those spans touch — checked against a one-bool-per-byte model. An oracle built
+   out of `clamp` and `blockSpan` would have agreed with a broken `Set` for
+   exactly the wrong reason. The soundness half also needs its liveness partner
+   or it passes vacuously: a set told about every byte must report `Complete`.
+
+   **They were checked by breaking the code.** `Mark` rounded outward, then
+   `MarkCovering` inward, then `Union` made to ignore a grid mismatch; then the
+   coalescer made to alias the caller's set, to let a known event revive a
+   poisoned accumulator, and to swallow `Union`'s refusal. Each mutation failed
+   the property that names it, and nothing else. A property test nobody has seen
+   fail is a property test nobody knows the strength of.
 4. ~~**One end-to-end test.**~~ ✅ Done in M8: `internal/app` threads mount → write
    → push → pull → reconcile through one in-memory provider. It taught two things
    worth keeping. The downloader writes *below* FUSE rather than through it, so a
@@ -1094,10 +1649,42 @@ remains is the tail — property tests, `gauth`'s file I/O, `fsevent`:
    asserts what it can show — that they compose into a system which settles rather
    than ping-pongs, and that no conflict copy appears where both sides agree — and
    leaves isolating the gates to the unit tests that can.
-5. **`gauth` at 18%.** The interactive flow is not worth harnessing, but the
-   credentials/token file I/O around it is, and it is what fails on a bad install.
-6. **`internal/fsevent`** has no tests. Small and mostly types — lowest priority,
-   listed for completeness.
+5. ~~**`gauth` at 18%.**~~ ✅ Done — 84%, and it found two defects rather than
+   merely covering the code.
+
+   **Neither writer could tighten a file that already existed.** `os.WriteFile`
+   and `os.OpenFile` apply their mode only when they *create* the file, so a
+   `token.json` or `credentials.json` restored from a backup, copied between
+   machines, or written under a permissive umask kept its mode through every
+   rewrite — a refresh token for the user's whole Drive, left readable by every
+   local account, by a function whose doc comment said 0600. Both now go through
+   `writeSecret`, which narrows through the descriptor (no path race) on every
+   write.
+
+   **`Login` closed the loopback server out from under its own handler.** The
+   handler writes the page the user is looking at and *then* signals; the signal
+   returned `Login`, whose deferred `srv.Close()` cut the connection before the
+   response was flushed. On the denied and state-mismatch paths — exactly where
+   the user needs to be told what happened — the browser could show a transport
+   error instead. It is a graceful `Shutdown` now, on a detached context because
+   cancellation is one of the ways we get there.
+
+   The interactive half is still not harnessed, but less of it is interactive than
+   it looked: the loopback server (CSRF state check, denial reporting, the 404 for
+   a stray `/favicon.ico`, a busy port, a blank pasted line) is driven directly
+   over `127.0.0.1`, and `WhoAmI` runs against an `httptest` server because
+   oauth2 takes its base client from the context — the same seam `gdrive` uses to
+   put HTTP/3 underneath the token source. Only the code exchange itself needs
+   Google.
+6. ~~**`internal/fsevent`** has no tests.~~ ✅ Done, and the exercise was deciding
+   what is even assertable about a package of types. Three things, each load-
+   bearing elsewhere: the `Op` strings are the log format (`[sync] %-7s path`)
+   that the multi-client rig's counters are grepped out of, so renaming one or
+   adding a longer one silently changes every measurement taken from a log;
+   `Dirty` must stay a *pointer*, because the fail-safe default is carried by the
+   type — as a plain `ranges.Set` the zero value would read as "nothing changed"
+   and push no bytes at all; and `Dirty` is shared by pointer with whoever
+   produced it, which is why `vfs`'s tracker hands over a `Clone`.
 
 ---
 
@@ -1187,3 +1774,105 @@ Even perfectly authenticated metadata should not be applied verbatim.
 None of this is novel — it is the threat model `rsync -AX` and `bsdtar` already
 live with. The difference is that Drivel's metadata channel is writable by a
 remote party, which `tar` archives generally are not.
+
+---
+
+## 11. Virtual xattrs (design note, unscheduled, build-time opt-in)
+
+**The idea.** Emulate extended attributes for the mount instead of proxying them:
+keep the attributes in a file that lives *in the backing store*, so they are stored
+and synced like any other content, and serve `getxattr`/`setxattr`/`listxattr`/
+`removexattr` at the FUSE layer out of that. Two things fall out of it that a
+passthrough cannot do. A backing filesystem that cannot store `user.*` attributes
+at all — exFAT, an SMB share, a `/mnt/c` drvfs path under WSL2, most network mounts
+— would still present working xattrs at the mountpoint. And because the store is
+just a file in the tree, the attributes travel: set one here, see it on the other
+machine after a sync, which is §10's "POSIX metadata over Drive" arriving through
+the data plane rather than through provider-specific metadata.
+
+**It is off unless the build says otherwise.** A build tag (`drivel_virtual_xattr`)
+that is absent from every release build, compiling to a package whose default form
+is a no-op — not a runtime flag alone, and not a flag defaulting to false. The
+reason for reaching for the compiler is §11.2: several of the failure modes are
+not "a user turned on something risky", they are "this binary can be made to apply
+attacker-supplied metadata", and the cheapest sound answer to that is that the code
+is not in the binary. Assume a runtime flag on top, since a build that *can* do it
+should still not do it by default.
+
+### 11.1 Where the attributes would live
+
+Two layouts, and the choice is the whole design.
+
+- **One store per mount** — a single file (bbolt, or an append-only log) in the
+  backing tree, mapping path → attribute set. Compact, one object, no per-file
+  overhead, and a directory listing costs nothing extra. But it is a single
+  synced object mutated by every client, so it collides constantly: §6's
+  last-writer-wins policy on it means one client's conflict copy silently loses
+  *every* attribute another client set, not just the contested one. It is also
+  exactly the shape M8's `validate.go` refuses for the state DB — a database inside
+  a backing tree whose own writes generate the events that cause more writes — so
+  it would need the same event suppression the state DB gets by living outside.
+- **One sidecar per file** — `f.txt` carries `.f.txt.drivel-xattr` beside it, or a
+  parallel `.drivel-xattr/` tree. Conflicts stay per file and merge the way content
+  does; the loop problem is bounded (a sidecar write is one more event, not a
+  rewrite of a shared index). The costs are real too: it doubles the object count
+  in the provider (Drive counts files, and both quota and API cost follow), rename
+  and delete must move or remove two objects atomically-enough, and in in-place
+  mode the sidecars are visible in the user's own directory. Hiding them from
+  `readdir` makes them invisible locally and still visible in the Drive web UI,
+  which is its own kind of lie.
+
+Whichever wins, `rename` is the operation that decides whether it works: attributes
+have to follow a file across a rename and a cross-directory move, and a crash
+between the two writes has to leave a state the next mount can name.
+
+### 11.2 Why this is a build-time decision and not a preference
+
+The security argument is not that xattrs are dangerous. It is that a virtual store
+turns *synced file content* into *filesystem metadata*, which reverses the trust
+direction of everything in §10 — and does it one layer lower, where the checks in
+§10.4 do not exist yet.
+
+1. **It re-opens M5's data-loss path, and adds a remote actor.** §2.1 refuses xattr
+   passthrough because `user.drivel.placeholder` is drivel's own control metadata
+   and passthrough makes it forgeable by anything that can write to the mount. A
+   virtual store makes it forgeable *by anything that can write to the synced
+   store*, which includes every other client and anyone the Drive folder is shared
+   with: injecting a placeholder marker into someone else's mount makes their next
+   read overwrite local content, and stripping one makes their next push upload
+   zeros over the remote file. So the drivel namespace can never be served from,
+   or accepted into, the virtual store — the real marker stays a real xattr (or the
+   state DB where there are none), and `user.drivel.*` is refused at the boundary
+   in both directions. That rule is load-bearing and belongs in code, not in docs.
+2. **The privileged namespaces must not be storable at all.** `security.capability`,
+   `security.selinux`, IMA/EVM signatures and `system.posix_acl_access` are
+   namespaces the *kernel* treats as authoritative (§10.4). A virtual store that
+   accepted them would let a synced file carry file capabilities or an SELinux
+   label onto every machine that mounts the tree, with no signature and no
+   provenance — remote code execution's boring cousin. `user.*` only, and even
+   then the kernel's own rules (`security.*` needs privilege, `trusted.*` needs
+   `CAP_SYS_ADMIN`) have no analogue in a plain file: whatever mode bits the store
+   carries *are* the permission model, and they are weaker than the real one.
+3. **It is a metadata channel with no size limit and no accounting.** Real xattrs
+   are bounded (Linux: typically 64 KiB per attribute and often one filesystem
+   block for all of them). A file-backed store has whatever bound we invent, and
+   anything unbounded here is a covert channel that syncs — a place to park data
+   that does not appear in any file's size.
+4. **Two sources of truth for the same question.** `getfattr` on the backing file
+   and `getfattr` on the mountpoint would disagree by construction. Every tool that
+   copies a tree (`rsync -X`, `cp -a`, `tar --xattrs`, a backup agent) reads one of
+   them, and which one it read is invisible in the result.
+
+### 11.3 What would have to be settled first
+
+- Whether the virtual store is served **only** when the backing filesystem cannot
+  do the real thing (a fallback, matching `XattrsUsable`), or always when built and
+  enabled (a feature). The fallback framing is much easier to defend and much
+  harder to reason about: the same tree then behaves differently on two machines.
+- Whether attributes sync at all, or stay local. Local-only removes most of §11.2
+  and most of the point.
+- How it interacts with §10 if §10 is ever built: two mechanisms carrying the same
+  metadata over the same provider, with different trust models, is one too many.
+- What `listxattr` reports for a file whose sidecar has not been hydrated yet in
+  lazy mode. Faulting content in to answer a metadata question would make `ls -l`
+  with a `getfattr` in the loop download the tree.

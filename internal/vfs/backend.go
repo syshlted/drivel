@@ -21,7 +21,7 @@ func (backend) Name() string { return "go-fuse" }
 // Serve mounts the loopback filesystem and blocks until ctx is cancelled, which
 // triggers an unmount and makes the server's Wait return.
 func (backend) Serve(ctx context.Context, opts mount.Options) error {
-	root, err := NewRoot(opts.Backing, opts.Events, opts.Hydrator, opts.Logger)
+	root, err := NewRoot(opts)
 	if err != nil {
 		return fmt.Errorf("building root from %s: %w", opts.Backing, err)
 	}
@@ -30,6 +30,12 @@ func (backend) Serve(ctx context.Context, opts mount.Options) error {
 			Debug:  opts.Debug,
 			FsName: opts.FsName,
 			Name:   "drivel",
+			// Xattrs are off unless the mount asked for them (mount.Options.Xattr).
+			// go-fuse answers ENOSYS to the first getxattr, after which the kernel
+			// stops issuing xattr operations for this mount at all — so the cost of
+			// the default is one syscall, not one per file. See the field comment
+			// for why the passthrough is the dangerous direction.
+			DisableXAttrs: !opts.Xattr,
 		},
 	})
 	if err != nil {

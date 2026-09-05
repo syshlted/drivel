@@ -419,10 +419,7 @@ func (d *Drive) Changes(ctx context.Context, cursor string) ([]provider.RemoteCh
 			return nil, "", classify(err)
 		}
 		for _, ch := range res.Changes {
-			rc, ok := d.toRemoteChange(ctx, ch)
-			if ok {
-				out = append(out, rc)
-			}
+			out = append(out, d.toRemoteChanges(ctx, ch)...)
 		}
 		if res.NextPageToken != "" {
 			page = res.NextPageToken
@@ -432,10 +429,11 @@ func (d *Drive) Changes(ctx context.Context, cursor string) ([]provider.RemoteCh
 	}
 }
 
-// toRemoteChange resolves a Drive change into a path-addressed RemoteChange. It
-// returns ok=false for changes outside our root subtree (unresolvable path), which
-// the caller skips.
-func (d *Drive) toRemoteChange(ctx context.Context, ch *drive.Change) (provider.RemoteChange, bool) {
+// toRemoteChanges resolves one Drive change into the path-addressed changes it
+// means. It returns nothing for changes outside our root subtree (unresolvable
+// path), one change for the ordinary case, and two when an object moved — see
+// vacatedPathLocked.
+func (d *Drive) toRemoteChanges(ctx context.Context, ch *drive.Change) []provider.RemoteChange {
 	// Removal: the file record is gone, so we can only resolve the path from our
 	// reverse index. Unknown => not in our subtree => skip.
 	if ch.Removed || ch.File == nil || ch.File.Trashed {
@@ -446,9 +444,9 @@ func (d *Drive) toRemoteChange(ctx context.Context, ch *drive.Change) (provider.
 		}
 		d.mu.Unlock()
 		if !known {
-			return provider.RemoteChange{}, false
+			return nil
 		}
-		return provider.RemoteChange{Path: p, Removed: true}, true
+		return []provider.RemoteChange{{Path: p, Removed: true}}
 	}
 
 	parentID := ""
@@ -459,11 +457,63 @@ func (d *Drive) toRemoteChange(ctx context.Context, ch *drive.Change) (provider.
 	defer d.mu.Unlock()
 	dir, ok := d.pathForIDLocked(ctx, parentID)
 	if !ok {
-		return provider.RemoteChange{}, false // outside our root subtree
+		return nil // outside our root subtree
 	}
 	p := path.Join(dir, ch.File.Name)
+
+	// Ask before remembering: rememberLocked is what evicts the old mapping.
+	vacated, moved := d.vacatedPathLocked(ch.File, p)
+
 	rf := d.rememberLocked(ctx, p, ch.File)
-	return provider.RemoteChange{Path: p, File: &rf}, true
+	if !moved {
+		return []provider.RemoteChange{{Path: p, File: &rf}}
+	}
+	// Removal first: the object has left that path, and the caller applies a page
+	// in order.
+	return []provider.RemoteChange{
+		{Path: vacated, Removed: true},
+		{Path: p, File: &rf},
+	}
+}
+
+// vacatedPathLocked reports the path f has just left, when it left one.
+//
+// Drive's feed is keyed by object identity: a rename or a move is one change
+// carrying the object under its *new* name, and there is no event anywhere saying
+// the old path is now empty. provider.RemoteChange carries no identity, so
+// nothing above the seam can work that out either — the engine sees a file appear
+// at a new path and has no reason to touch the old one. Left alone, every rename
+// on one client duplicates the file on every other until an enumeration sweep
+// infers the delete, up to -sweep-interval later (24h by default).
+//
+// This is where the fact is known, so this is where it is said. Two limits, both
+// of which cost a sweep rather than risking data:
+//
+//   - Directories are excluded. A removal above the seam is a recursive local
+//     delete, and Drive reports no changes for the children of a moved folder —
+//     their own metadata did not change — so the subtree would be deleted locally
+//     and not come back until a sweep. Leaving the stale copy is the lesser
+//     failure. A folder move is still reconciled, just not by the feed.
+//   - Only the in-memory mapping is consulted, never the persistent index. Acting
+//     on it here means deleting a local file, and M7's first rule is that a
+//     persisted entry is a hint to be verified before it is believed. The
+//     in-memory pair is maintained by linkLocked as an exact inverse, so a path it
+//     reports for an ID is one this process itself recorded. A rename whose old
+//     path was only ever known to an earlier process therefore falls back to the
+//     sweep, as it did before.
+func (d *Drive) vacatedPathLocked(f *drive.File, newPath string) (string, bool) {
+	if f.MimeType == folderMIME {
+		return "", false
+	}
+	id := f.Id
+	if id == "" {
+		return "", false
+	}
+	old, ok := d.pathByID[id]
+	if !ok || old == newPath {
+		return "", false
+	}
+	return old, true
 }
 
 // ensureDirLocked returns the Drive folder ID for slash dir path p, creating it and

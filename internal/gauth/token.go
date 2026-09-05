@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 
@@ -24,16 +25,15 @@ func LoadToken(path string) (*oauth2.Token, error) {
 	return tok, nil
 }
 
-// SaveToken writes tok to path with 0600 perms.
+// SaveToken writes tok to path with 0600 perms, tightening them if the file was
+// already there with something wider.
 func SaveToken(path string, tok *oauth2.Token) error {
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-	// The whole purpose of this function is to persist the token; the 0600 mode
-	// above is the control that matters, not withholding the field.
-	return json.NewEncoder(f).Encode(tok) //nolint:gosec // G117: intentional, see above
+	return writeSecret(path, func(w io.Writer) error {
+		// The whole purpose of this function is to persist the token; the 0600
+		// mode writeSecret enforces is the control that matters, not withholding
+		// the field.
+		return json.NewEncoder(w).Encode(tok) //nolint:gosec // G117: intentional, see above
+	})
 }
 
 // WhoAmI does a best-effort Drive about.get to confirm the token works and report

@@ -18,6 +18,7 @@ func TestExtractCode(t *testing.T) {
 		{"query string only", "state=xyz&code=4/0Aabc", "4/0Aabc", false},
 		{"whitespace trimmed", "  4/0Acode  ", "4/0Acode", false},
 		{"url without code", "http://127.0.0.1:53682/?state=xyz&error=access_denied", "", true},
+		{"unparseable url", "http://127.0.0.1:53682/%zz", "", true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

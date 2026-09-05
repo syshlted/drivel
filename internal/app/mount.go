@@ -60,6 +60,13 @@ type MountSpec struct {
 	Lazy  bool // M5 lazy hydration
 	Debug bool // FUSE-level tracing
 
+	// Xattr serves extended attributes through the mountpoint by passing them to
+	// the backing store. Off by default for every mount: see mount.Options.Xattr
+	// for what the passthrough exposes, and note that it is not what M5 needs —
+	// the hydrator reads and writes its marker on the backing path directly, which
+	// is below this mount and unaffected either way.
+	Xattr bool
+
 	// Logger is where everything this mount does reports. Nil uses the log
 	// package's default, which is what a single mount wants: its output is then
 	// byte-for-byte what drivel printed before there could be more than one.
@@ -216,6 +223,14 @@ func Open(ctx context.Context, spec MountSpec, reg *provider.Registry) (*Mount, 
 			// uploader would then push over good remote content.
 			m.logf("WARNING: %s cannot store user xattrs; placeholder marks rely on the state DB alone (%s). Do not delete it while placeholders exist.", backing.Path, spec.StateDB)
 		}
+		if spec.Xattr {
+			// Passthrough publishes the placeholder marker at the mountpoint, where
+			// stripping it from an unhydrated file makes the uploader push that file's
+			// zeros over the remote copy. Nothing below the mount needs the
+			// passthrough — the hydrator uses the backing path — so this pairing is
+			// always a deliberate choice, and worth naming when it is made.
+			m.logf("WARNING: xattrs are served through %s while lazy hydration is on; %s is readable and writable there, and removing it from a placeholder loses that file's remote content", spec.Mountpoint, hydrate.XattrName)
+		}
 		m.logf("lazy hydration enabled (ranged reads: %t)", m.hyd.SupportsRanges())
 	}
 
@@ -280,6 +295,7 @@ func (m *Mount) Run(ctx context.Context) error {
 		Events:     m.events,
 		FsName:     "drivel",
 		Debug:      m.spec.Debug,
+		Xattr:      m.spec.Xattr,
 		Hydrator:   hydratorOf(m.hyd),
 		Logger:     m.lg,
 	})

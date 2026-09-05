@@ -99,7 +99,10 @@ var _ mount.Hydrator = (*testHydrator)(nil)
 // mountTest brings up a real FUSE mount over backing and tears it down when the
 // test ends. It skips when the environment cannot mount (no /dev/fuse, no
 // fusermount3, unprivileged container).
-func mountTest(t *testing.T, backing string, hyd mount.Hydrator) (mnt string, events <-chan fsevent.Event) {
+//
+// Each opt is applied to the mount.Options before Serve, for the tests that are
+// about an option rather than about a file operation.
+func mountTest(t *testing.T, backing string, hyd mount.Hydrator, opts ...func(*mount.Options)) (mnt string, events <-chan fsevent.Event) {
 	t.Helper()
 	if _, err := os.Stat("/dev/fuse"); err != nil {
 		testenv.Unavailable(t, testenv.FUSE, "no /dev/fuse: "+err.Error())
@@ -109,15 +112,20 @@ func mountTest(t *testing.T, backing string, hyd mount.Hydrator) (mnt string, ev
 	ch := make(chan fsevent.Event, 256)
 	ctx, cancel := context.WithCancel(context.Background())
 
+	o := mount.Options{
+		Mountpoint: mnt,
+		Backing:    backing,
+		Events:     ch,
+		FsName:     "drivel-test",
+		Hydrator:   hyd,
+	}
+	for _, apply := range opts {
+		apply(&o)
+	}
+
 	served := make(chan error, 1)
 	go func() {
-		served <- NewBackend().Serve(ctx, mount.Options{
-			Mountpoint: mnt,
-			Backing:    backing,
-			Events:     ch,
-			FsName:     "drivel-test",
-			Hydrator:   hyd,
-		})
+		served <- NewBackend().Serve(ctx, o)
 	}()
 
 	// Wait for the mount to come live: until it does, the mountpoint is just an

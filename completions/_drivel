@@ -55,11 +55,13 @@ _drivel_mount_args() {
         '-index=[provider path<->ID index; a cache, safe to delete]:index db:_files' \
         '-drive-root=[Drive folder ID mapped to the mount root]:folder id:' \
         '-lazy[materialise remote files as placeholders; fetch content on first read]' \
+        '-xattr[serve extended attributes through the mountpoint (off by default)]' \
         '-resync[enumerate the remote tree and reconcile it at startup]' \
         '-materialize[eager mode: download remote files that have no local copy]' \
         '-max-deletes=[cap on deletions one reconcile may infer; 0 for no limit]:count:' \
         '-sweep-interval=[re-enumerate this often, from the last completed sweep; 0 disables]:duration:' \
         '-debug[enable FUSE debug logging]' \
+        '-pprof[serve net/http/pprof on this address, e.g. localhost:6060]:address:' \
         '(-h -help)'{-h,-help}'[show mount usage]'
 }
 

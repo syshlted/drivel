@@ -101,14 +101,23 @@ func Login(ctx context.Context, c Credentials, scopes []string, opts LoginOption
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 	go func() {
-		// ErrServerClosed is the expected outcome of the deferred Close; anything
+		// ErrServerClosed is the expected outcome of the deferred shutdown; anything
 		// else means the redirect can never arrive, so fail instead of waiting
 		// for a code that is not coming.
 		if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			trySend(errCh, fmt.Errorf("loopback redirect server: %w", err))
 		}
 	}()
-	defer srv.Close()
+	// Graceful, not srv.Close(): the handler has just written the page the user
+	// is looking at, and closing the connection out from under it replaces
+	// drivel's explanation with a browser error — on exactly the paths (denied,
+	// state mismatch) where the user most needs to be told what happened.
+	// Detached from ctx because cancellation is one of the ways we get here.
+	defer func() {
+		stopCtx, stop := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Second)
+		defer stop()
+		_ = srv.Shutdown(stopCtx)
+	}()
 
 	fmt.Fprintf(out, "\nOpen this URL in your browser to authorize Drivel:\n\n  %s\n\n", authURL)
 	if opts.OpenBrowser {

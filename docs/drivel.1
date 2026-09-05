@@ -1,6 +1,6 @@
 .\" Manpage for drivel.
 .\" Render with:  man ./docs/drivel.1     or     mandoc -a docs/drivel.1
-.TH DRIVEL 1 "2026-09-04" "drivel" "User Commands"
+.TH DRIVEL 1 "2026-09-05" "drivel" "User Commands"
 .SH NAME
 drivel \- Drive-backed FUSE interceptor filesystem
 .SH SYNOPSIS
@@ -49,6 +49,7 @@ drivel \- Drive-backed FUSE interceptor filesystem
 .RB [ -drive-root
 .IR id ]
 .RB [ -lazy ]
+.RB [ -xattr ]
 .RB [ -resync ]
 .RB [ -materialize ]
 .RB [ -max-deletes
@@ -56,6 +57,8 @@ drivel \- Drive-backed FUSE interceptor filesystem
 .RB [ -sweep-interval
 .IR d ]
 .RB [ -debug ]
+.RB [ -pprof
+.IR addr ]
 .SH DESCRIPTION
 .B drivel
 mounts a local directory as a loopback FUSE filesystem that acts as an
@@ -123,7 +126,9 @@ It cannot be combined with any flag that describes
 .I what
 to mount \(em that would require a precedence rule between the two \(em though
 .B -debug
-composes with it.
+and
+.B -pprof
+compose with it.
 .TP
 .BI -mount " dir"
 Path to mount the filesystem. Required unless
@@ -193,6 +198,36 @@ filesystem cannot store user extended attributes,
 warns at startup and falls back to the state database alone; in that case do not
 delete the state database while placeholders exist.
 .TP
+.B -xattr
+Serve extended attributes through the mountpoint by passing them to the backing
+store. Off by default: without it,
+.B drivel
+answers every xattr operation on the mount with
+.BR EOPNOTSUPP ,
+as a filesystem with no xattr support does.
+.IP
+The default is a safety property, not a performance one. A
+.B drivel
+mount is an interceptor rather than a plain loopback, and its own control metadata
+lives in a
+.B user.drivel.placeholder
+attribute on the backing file (see
+.BR -lazy ).
+Passing attributes through publishes that marker at the mountpoint and makes it
+writable by anything that can write there: stripping it from an unhydrated
+placeholder makes the next upload replace the remote file with the placeholder's
+zero bytes, and attaching it to an ordinary file makes the next read fetch the
+remote copy over local content. Neither requires privilege and neither is
+reported.
+.IP
+Nothing inside
+.B drivel
+needs the passthrough (em the hydrator reads and writes its marker on the backing
+file directly, below the mount (em so enabling it is for applications on the
+mountpoint that want extended attributes of their own. Extended attributes are
+not synced to the provider in any case; see the design note on POSIX metadata in
+DESIGN.md.
+.TP
 .B -resync
 Enumerate the whole remote tree and reconcile it against the backing directory at
 startup, even when a baseline already exists.
@@ -232,6 +267,13 @@ state database reused against a different
 a fresh empty backing directory, a mount pointing somewhere new. Note that removing
 a remote object uses the provider's delete, which on Drive is permanent rather than
 a move to the trash.
+.IP
+A refused pass still counts as a completed sweep, so raising the cap and restarting
+does not retry it. If the deletions are genuine, re-run with
+.B -resync
+as well \(em otherwise nothing happens until the next
+.B -sweep-interval
+falls due.
 .TP
 .BI -sweep-interval " d"
 Re-enumerate and reconcile the remote tree this often, timed from the last
@@ -251,6 +293,25 @@ which for a long-lived mount can be never.
 .TP
 .B -debug
 Enable FUSE debug logging.
+.TP
+.BI -pprof " addr"
+Serve Go's
+.B net/http/pprof
+profiling endpoints on
+.I addr
+(for example
+.BR localhost:6060 ),
+giving
+.B go tool pprof
+goroutine, heap, CPU and trace profiles of the running process. One endpoint
+serves the whole process, not one per mount. Empty, the default, starts nothing.
+.IP
+This endpoint serves the process's heap \(em which for a filesystem holds the
+paths, and in a buffer somewhere the contents, of the files being synced \(em to
+anyone who can reach it, and lets them start a CPU profile. Bind it to a loopback
+address and tunnel to it; a bind that is not loopback is served but warned about.
+A port that cannot be bound is a startup error rather than a warning, so a run
+started in order to be measured never silently produces nothing.
 .SH LOGIN OPTIONS
 .TP
 .BI -account " name"
@@ -348,6 +409,7 @@ Mount keys mirror the flags:
 .IR data ,
 .IR state ,
 .IR lazy ,
+.IR xattr ,
 .IR debug ,
 .IR resync ,
 .IR materialize ,
@@ -403,6 +465,62 @@ HTTP/3/QUIC benefits from a larger UDP receive buffer; if
 .B quic-go
 warns about the buffer size, raise it with
 .BR "sysctl -w net.core.rmem_max=7500000" .
+.SH PLATFORM SUPPORT
+.B drivel
+is built and tested on
+.BR Linux ,
+on every architecture Go supports. It also compiles for
+.B macOS
+(amd64 and arm64) and
+.BR FreeBSD ,
+but those builds are
+.I unverified
+\(em they have never been run against a live Drive. Treat them accordingly.
+.B Windows
+is not supported and is not planned; use WSL2, or Google's native Drive client.
+Other Unixes (OpenBSD, NetBSD, Solaris, illumos, AIX) lack a Go FUSE binding.
+.PP
+Two limitations apply off Linux.
+.TP
+.B In-place mode is unavailable
+It routes backing I/O through
+.RI ( /proc/self/fd/N ),
+and only Linux has procfs. Supply
+.I -data
+on other platforms.
+.TP
+.B -lazy is unsafe
+Lazy hydration marks undownloaded files with the
+.B user.drivel.placeholder
+extended attribute, which is what prevents an empty placeholder being uploaded over
+live remote content.
+.B drivel
+does not yet implement extended attributes on macOS or FreeBSD, so the marker exists
+only in
+.IR drivel-state.db ;
+losing that file makes placeholders indistinguishable from ordinary empty ones. Use
+the default eager mode on those platforms. The same applies under WSL2 to a
+.I -data
+directory placed on
+.I /mnt/c
+or another drvfs mount, which carries no Linux extended attributes.
+.PP
+On macOS,
+.B macFUSE
+is the only supported FUSE implementation:
+.B drivel
+looks for
+.I mount_macfuse
+or
+.I mount_osxfuse
+and nothing else, so
+.B FUSE-T
+does not work. macFUSE 4.x is not open source and its own terms restrict commercial
+use;
+.B drivel
+neither bundles nor distributes it, and its AGPLv3 licence is unaffected by your use
+of it \(em the two are separate programs communicating over a file descriptor, not a
+combined work.
 .SH SIGNALS
 .B drivel mount
 unmounts cleanly on
@@ -515,6 +633,10 @@ setup guide in
 and Google credential setup in
 .IR docs/google-cloud-setup.md .
 .SH LICENSE
+Copyright (C) 2026 SystemHalted and Jeremy Melanson.
+.PP
 GNU Affero General Public License, version 3 (AGPLv3).
+This is free software: you are free to change and redistribute it.
+There is NO WARRANTY, to the extent permitted by law.
 .SH AUTHORS
-The Drivel authors.
+Written by Jeremy Melanson for SystemHalted.

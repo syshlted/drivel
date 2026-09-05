@@ -15,8 +15,11 @@ Read [DESIGN.md](DESIGN.md) before making architectural changes. The
 echo/loop-suppression model (§4) is the load-bearing correctness concern for
 bidirectional sync — don't regress it.
 
-> The `-gpu` in the repo/dir name is historical. GPU-accelerated deduplication
-> is **out of scope for v1**; don't add it unless asked.
+> The `-gpu` in the repo/dir name is historical. Deduplication itself is now on the
+> roadmap as **M11**, a provider over a content-addressed local directory — not a
+> layer inside the mount, and not started. **GPU-accelerated hashing stays out of
+> scope**: it optimises a component that does not exist yet. Don't add either unless
+> asked.
 
 ## Layout
 
@@ -81,16 +84,37 @@ rclone's port **53682**; forward it into the container for auto-capture, else us
 the paste fallback. When adding stdin prompts, share ONE bufio reader — multiple
 readers on os.Stdin race and swallow buffered lines.
 
+`-xattr` on `mount` (config: `xattr = true`) serves extended attributes through the
+mountpoint; **off by default, and the default is a safety property**. M5's
+authoritative marker is a `user.*` xattr on the backing file, so passthrough
+publishes it at the mountpoint: stripping it from a placeholder makes the uploader
+push zeros over the remote file, attaching it to a resident file makes the next
+read overwrite local content. Nothing below the mount needs it — the hydrator uses
+the backing path — and no xattr is ever synced. Two guards, both required:
+`DisableXAttrs` covers only GETXATTR/LISTXATTR, so `internal/vfs/xattr.go`
+overrides all four node ops (SETXATTR/REMOVEXATTR would otherwise reach the
+backing file). See DESIGN.md §2.1.
+
 M7b flags on `mount`: `-resync` (force an enumeration sweep), `-materialize` (eager
 mode only — download remote files that have no local copy; `-lazy` always
 materialises, as placeholders), `-max-deletes N` (cap on reconcile-inferred
 deletions, default 100, 0 = unlimited), `-sweep-interval D` (re-enumerate this
 often, default 24h, 0 disables).
 
+`-pprof ADDR` on `mount` serves `net/http/pprof` for the process (not per mount),
+off unless given. It is a debug endpoint that hands out the heap — synced paths
+and, in some buffer, contents — so a non-loopback bind is warned about, and a port
+it cannot bind is a *startup error*: the reason to run it is to be measuring, and
+a soak that produced nothing silently is worse than one that refused to start. Its
+`WriteTimeout` is deliberately 0, for the same reason `ChunkTransferTimeout` is
+unset — a write deadline never resets on progress, so any value becomes the
+longest profile the build can ever take.
+
 M8 adds `-config FILE` to `mount` and `-account NAME` / `-config FILE` to `login`.
 `-config` cannot be combined with any flag describing *what* to mount — that would
-need a precedence rule nobody would remember — but `-debug` composes. Flags without
-`-config` synthesize a one-entry config, so there is one code path below them.
+need a precedence rule nobody would remember — but `-debug` and `-pprof` compose.
+Flags without `-config` synthesize a one-entry config, so there is one code path
+below them.
 
 ## Milestones
 
@@ -114,14 +138,58 @@ config, a provider registry, account-scoped login. See "Multi-account" below.
 **v2, planned** (DESIGN.md §9 has the detail). **M9** plugin architecture
 (out-of-process or WASM; Go's `plugin` package is a poor fit). M8 discharged its
 precondition: the §2.5 seam holds under two independently-configured stores in one
-process.
+process. **M10** platform parity — native xattrs on macOS (small; it is what makes
+`-lazy` safe there), then FreeBSD `extattr_*` (larger: different API, explicit
+namespace, so the marker name has to become per-platform). Independent of M9,
+nothing waits on either. See "Platform support" below.
+
+**v2, backends on the roadmap** (DESIGN.md §9 has the reasoning; all three are
+unscheduled, none is started, and each one's shape is *decided* — the entries say
+so, so don't re-litigate them). **M11** deduplicating local backend: a
+`provider.Store` over a content-addressed local directory, **private to one
+machine**, which with `-lazy` is a deduplicating filesystem. It is the first
+non-Drive provider, so it also shapes M9. **M12** encrypting backend: a
+**decorator over another provider** (`crypt` over `gdrive` = client-side E2E for
+Drive), which needs the group's one piece of new framework — `provider.Params`
+letting a provider open its inner store through the registry. **M13** block-level
+filesystem over a distributed database, **as another async provider behind the
+existing engine**, not a cluster filesystem: the cluster version would abandon
+§2.1's "FS ops never block on the network" rule and is a different program.
+
+Three things decide those designs and are not settled: M11's garbage collection
+(refcounts vs mark-and-sweep, and reclaiming space from packs), M12's filename
+encryption (deterministic or path lookup stops working, which would make the M7
+index authoritative and break its invariant 2), and M13's engine — where the
+recommendation is emphatically **not Cassandra for metadata** (no multi-partition
+transactions, LWW by cell timestamp, tombstone pressure under a delete/overwrite
+workload) but FoundationDB or TiKV, with Redis/Memcached as cache and never as the
+lock of record.
+
+**Design notes, unscheduled.** DESIGN.md §10 (POSIX metadata over Drive) and §11
+(virtual xattrs: emulate xattrs from a file in the backing store, so they work on
+filesystems that have none and sync with the content). §11 is **build-tag gated and
+absent from release builds if it is ever written** — a virtual store turns synced
+content into filesystem metadata, so `user.drivel.*` and every privileged namespace
+have to be refused at the boundary in both directions.
 
 **M0 — Test & CI** is a cross-cutting, always-open track (DESIGN.md §9), not a
-numbered milestone. Every package but `fsevent` has tests, green under `-race`. CI
-enforces that on every push, together with `golangci-lint` and `govulncheck`; every
-gate is a `make` target that the git hooks and the workflow both call, so "passed
-locally" and "passed in CI" cannot drift apart. M8 closed the `cmd/drivel` and
-end-to-end items. Open: property tests for `ranges` · `gauth` at 18% · `fsevent`.
+numbered milestone. Every package has tests, green under `-race`. CI enforces that
+on every push, together with `golangci-lint` and `govulncheck`; every gate is a
+`make` target that the git hooks and the workflow both call, so "passed locally"
+and "passed in CI" cannot drift apart. M8 closed the `cmd/drivel` and end-to-end
+items; the property tests, `gauth` and `fsevent` closed after it, which empties the
+numbered list. The live testing work is now Tier B of the multi-client campaign
+(`docs/multiclient-test-plan.md`).
+
+Two rules the last round left behind. **A property test nobody has seen fail is a
+property test nobody knows the strength of**: `ranges/property_test.go` and
+`syncengine/coalescer_property_test.go` were each checked by mutating the code they
+cover (round `Mark` outward, let a known event revive a poisoned accumulator, …) and
+confirming the property that names the mistake is the one that fails. State the
+properties against the *input*, never against an oracle built from the same helpers.
+And **credential files are written through `gauth.writeSecret`**, never `os.WriteFile`:
+a mode argument applies only when the call creates the file, so a `token.json` that
+already exists keeps whatever permissions it arrived with.
 
 DESIGN.md §10 is a design note on carrying POSIX metadata (mode, ACLs, xattrs,
 SELinux) over Drive — unscheduled. If you touch it, the rule is that permission
@@ -236,10 +304,34 @@ by `linkLocked`/`unlinkLocked`, because a `kids` set that drifts from `idByPath`
 makes a delete miss a descendant and leave the stale mapping that row 1 above
 exists to prevent.
 
+Also: **a rename must be reported inbound as remove-old + add-new**, because
+`provider.RemoteChange` carries no identity and Drive's feed never mentions a path
+an object has left. `vacatedPathLocked` derives the old path from the in-memory
+reverse map — not the persistent index (acting on a hint here means deleting a
+local file) and not for directories (a removal above the seam is a recursive
+delete, and Drive reports no changes for a moved folder's children, so they would
+not come back until a sweep). Without it every rename duplicates the file on every
+other client until the next sweep. See DESIGN.md §2.5.
+
 Also: a file's `parents` carry the **concrete** root ID, never the `root` alias
 that `-drive-root` defaults to. Comparing against the alias is what made the parent
 walk climb past the mount root and drop every inbound change to a top-level file
 (fixed in M7 by resolving the alias once, up front).
+
+Also: **a path can name more than one object, and the tie-break is not the whole
+story.** Drive allows same-name siblings and two clients creating one path
+concurrently produce them (MC-30, covered by `gdrive/siblings_test.go`).
+`lookupChildLocked` picks the most recently modified and logs that the others are
+now invisible, which is defensible in isolation; what the fleet sees is stranger.
+A `Remove` deletes only the visible sibling, so an ordinary `rm` is followed by
+the path reappearing with an older sibling's bytes — everywhere. And `Enumerate`
+reports the path once per sibling, which `reconcileRemote` applies in listing
+order, so after a sweep the local file can hold a different sibling than the one
+a push would update. No mitigation is implemented on purpose: each candidate
+(create-if-absent, post-create dedup, surfacing siblings as distinct paths) loses
+something a user wrote or makes resolution non-deterministic, and the choice is
+the user's to be told about, not ours to make silently. See
+`docs/multiclient-test-plan.md` §4.2.
 
 Deliberately absent: any startup enumeration of the remote tree. Warming the cache
 that way is a long, quota-heavy walk, and what to do with what it finds is a policy
@@ -269,7 +361,9 @@ elapsed, and on `-resync`.
    `-max-deletes` abandons the whole pass rather than trimming it, because a huge
    count means the premise is broken (wrong `-drive-root`, empty `-data`), not that
    there are 4000 real deletions. Note `Store.Remove` on Drive is permanent, not a
-   move to the trash.
+   move to the trash. A refused pass still counts as a *completed* sweep, so
+   recovery is `-resync` **and** a higher cap — raising the cap alone changes
+   nothing until the next `-sweep-interval`, and the refusal message says so.
 3. **The marks are persistent, and the reason is resume.** An in-memory seen-set
    would report every page a *previous* process consumed as remotely deleted.
    The sweep *completion* stamp is persistent for a different reason: the periodic
@@ -376,6 +470,46 @@ never access the backing store by the mountpoint path — only via `backing.Path
 deadlock. See DESIGN.md §2.7. New mount backends implement `mount.Backend`; keep
 everything below the seam provider- and FUSE-agnostic.
 
+## Platform support
+
+Tested on Linux only. The whole tree *compiles* for `darwin/{amd64,arm64}`,
+`freebsd/*` and every `linux/*` arch; on `windows/amd64` everything builds except
+`internal/vfs` (and `app`/`config`/`cmd`, which merely import it). **Every
+cross-compile failure on every target traces to go-fuse and nothing else** — which
+is the strongest available proof that the §2.5/§2.7 seams hold. Adding a platform is
+a `mount.Backend`, never a port. DESIGN.md §2.9 has the full matrix and reasoning;
+don't re-derive it, and don't promote "builds" to "supported" without a live test.
+
+Two things degrade off Linux, and the second is a correctness matter:
+
+1. **In-place mode is Linux-only** — `/proc/self/fd/N` has no portable equivalent;
+   `openInPlace` refuses elsewhere. `-data` is mandatory there.
+2. **M5's xattr marker has no authority off Linux.** `hydrate/xattr_other.go` stubs
+   everything to `ENOTSUP`, so the state DB stops being a cache and becomes the only
+   record — inverting M5 invariant 1 and re-opening invariant 2's data-loss case if
+   `drivel-state.db` is lost. **`-lazy` off Linux is unsupported until M10.** Same
+   trap on WSL2 with `-data` under `/mnt/c` (drvfs carries no user xattrs).
+
+**macOS specifics.** go-fuse probes exactly two paths (`mount_macfuse`,
+`mount_osxfuse`) — verified in v2.10.1 *and* v2.11.0 — so **FUSE-T does not work**,
+and it is not a build-tag away: go-fuse speaks the raw FUSE protocol rather than
+linking libfuse, which is FUSE-T's integration point. If that is ever fixed, the
+selection must be **runtime detection, not build tags** — which helper exists is a
+property of the running machine.
+
+**AGPLv3 is not in conflict with macFUSE.** go-fuse contains no cgo and does not
+link libfuse; it `exec`s the mount helper and talks over an fd, which is arms-length
+communication between separate programs, not a combined work. The only rule this
+imposes is a distribution one: **never bundle macFUSE, never ship an installer that
+fetches it.** macFUSE 4.x's own non-free terms are a burden on the user, not a
+licence conflict — don't restate them as one. §2.9.2 has the argument.
+
+**Windows is a decided non-goal, not a gap** (§2.9.4): WSL2 covers the audience,
+Drive for Desktop covers the rest, WinFsp/cgofuse forfeits the pure-Go build, and
+NTFS case-insensitivity opens a *new* variant of the MC-30 same-name-sibling problem
+(Drive is case-sensitive; `Foo.txt` and `foo.txt` collide into one local path). Keep
+the seam clean anyway — the cross-compile shows that costs nothing.
+
 ## Build / test / run
 
 ```sh
@@ -418,3 +552,10 @@ events. Ctrl-C unmounts.
   the buffered event channel.
 - Secrets (`credentials.json`, `token.json`, `*.local.json`) are gitignored —
   never commit them.
+- **AGPLv3, copyright SystemHalted and Jeremy Melanson.** `LICENSE` is the
+  verbatim FSF text — never edit it, and never add a second license file at the
+  root (two of them confuse the `licensecheck` detector pkg.go.dev uses; see
+  `docs/publishing.md`). The copyright notice lives in four places that must stay
+  in sync: README §License, `docs/drivel.1`, the `cmd/drivel` package doc comment,
+  and the `usage()` text `drivel help` prints. The grant is version 3, *not*
+  "or later" — promoting it is a licensing decision, not an editorial one.
