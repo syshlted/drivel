@@ -189,14 +189,20 @@ since a placeholder is a promise that the content can be fetched later.
 .IP
 Without this flag the backing directory holds full content, which is the default.
 .IP
-Placeholder state is recorded in a
-.B user.drivel.placeholder
-extended attribute on each backing file, which is what stops the sync engine from
-uploading a placeholder's zero bytes over the real remote file. If the backing
+Placeholder state is recorded in an extended attribute on each backing file
+.RB ( user.drivel.placeholder
+on Linux and macOS;
+.B drivel.placeholder
+in
+.B EXTATTR_NAMESPACE_USER
+on FreeBSD), which is what stops the sync engine from uploading a placeholder's zero
+bytes over the real remote file. It is the only such record: if the backing
 filesystem cannot store user extended attributes,
 .B drivel
-warns at startup and falls back to the state database alone; in that case do not
-delete the state database while placeholders exist.
+warns at startup and lazy mode is unsafe there, because an unmarked placeholder is
+indistinguishable from an empty file. Use eager mode or a different
+.I -data
+directory; no database stands in for the attribute.
 .TP
 .B -xattr
 Serve extended attributes through the mountpoint by passing them to the backing
@@ -489,21 +495,37 @@ and only Linux has procfs. Supply
 .I -data
 on other platforms.
 .TP
-.B -lazy is unsafe
-Lazy hydration marks undownloaded files with the
-.B user.drivel.placeholder
-extended attribute, which is what prevents an empty placeholder being uploaded over
-live remote content.
+.B -lazy is untested on macOS and FreeBSD
+Lazy hydration marks undownloaded files with an extended attribute, which is what
+prevents an empty placeholder being uploaded over live remote content.
 .B drivel
-does not yet implement extended attributes on macOS or FreeBSD, so the marker exists
-only in
-.IR drivel-state.db ;
-losing that file makes placeholders indistinguishable from ordinary empty ones. Use
-the default eager mode on those platforms. The same applies under WSL2 to a
+implements extended attributes on all three platforms, but has never been run on a
+Mac or on FreeBSD: treat lazy mode there as untested and prefer the default eager
+mode.
+.TP
+.B -lazy is unsafe without extended attributes, on any platform
+If the marker cannot be written there is no record that a file is a placeholder at
+all, and an unfetched file is indistinguishable from an empty one. This covers a
 .I -data
-directory placed on
+directory on
 .I /mnt/c
-or another drvfs mount, which carries no Linux extended attributes.
+or another drvfs mount under WSL2, on exFAT or FAT, and on a FreeBSD
+.I tmpfs
+(UFS and ZFS carry extended attributes;
+.I tmpfs
+does not).
+.B drivel
+warns at startup, naming the directory: the fix is eager mode or a different
+.IR -data ,
+not preserving any database.
+.TP
+.B macOS backing directories belong on APFS or HFS+
+On exFAT, FAT and some network volumes macOS keeps extended attributes in hidden
+.I ._name
+companion files rather than in the filesystem, which would place the placeholder
+marker inside the synced tree.
+.B drivel
+detects this and reports the store as having no extended attributes.
 .PP
 On macOS,
 .B macFUSE

@@ -218,10 +218,13 @@ func Open(ctx context.Context, spec MountSpec, reg *provider.Registry) (*Mount, 
 	if spec.Lazy {
 		m.hyd = hydrate.New(backing.Path, m.store, m.state)
 		if !m.hyd.XattrsUsable() {
-			// Without xattrs the placeholder marker lives only in the state DB, so
-			// losing that DB makes placeholders look like empty files — which the
-			// uploader would then push over good remote content.
-			m.logf("WARNING: %s cannot store user xattrs; placeholder marks rely on the state DB alone (%s). Do not delete it while placeholders exist.", backing.Path, spec.StateDB)
+			// Without the xattr there is no placeholder record at all: IsPlaceholder
+			// reads the marker and nothing else, so an unmarked placeholder is an
+			// ordinary empty file to every guard in the tree and the uploader will
+			// push its zeros over good remote content. The state DB does not stand in
+			// — its hydration entries cache present ranges, not placeholder-ness — so
+			// the honest advice is not "keep the DB" but "do not run -lazy here".
+			m.logf("WARNING: %s cannot hold user xattrs natively, so %s cannot be recorded and -lazy is UNSAFE on this backing store: an un-fetched placeholder is indistinguishable from an empty file and may be uploaded over the remote copy. Use eager mode, or move -data to a filesystem with user extended attributes.", backing.Path, hydrate.XattrName)
 		}
 		if spec.Xattr {
 			// Passthrough publishes the placeholder marker at the mountpoint, where

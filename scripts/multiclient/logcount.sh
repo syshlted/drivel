@@ -32,7 +32,17 @@ for log in "$@"; do
   printf '  %-34s %s\n' "sweeps completed"         "$(count '[sweep] reconcile complete')"
 
   # These are not volume. Any non-zero value is a finding.
+  #
+  # "pushes ABANDONED" is the one that costs data, and counting the retry line
+  # without it is the wrong asymmetry: a retry is the recoverable event and this
+  # is the unrecoverable one. executeWithRetry gives a push 5 attempts over about
+  # 7.5s of jittered backoff and then returns — the event is dropped, not
+  # requeued, so the local file is right and the remote never hears about it. The
+  # only thing that repairs it is an M7b sweep, and §2.3 has every case in this
+  # plan running with sweep-interval = "0". A throttled run would therefore
+  # diverge silently while every volume counter above still looked healthy.
   for pat in \
+    'pushes ABANDONED (DATA NOT SENT):failed after' \
     'range write:[sync] range write' \
     'same-name siblings (DATA LOSS):share the name' \
     'max-deletes refusals:REFUSING to delete' \

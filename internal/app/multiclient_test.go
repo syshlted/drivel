@@ -2,6 +2,8 @@ package app
 
 import (
 	"context"
+	"errors"
+	"io/fs"
 	"log"
 	"os"
 	"path/filepath"
@@ -294,12 +296,24 @@ func (p *peer) read(rel string) (string, bool) {
 // convenience: §6 makes them local-only by policy, so a fleet that has resolved a
 // conflict is *supposed* to disagree about them. A convergence check that counted
 // them would report every conflict case as a failure.
+// It samples a tree that is being written to. Both walkers here run while the
+// fleet is still converging, so the pull loop can unlink a file between the
+// readdir that listed it and the read that would hash it — which is what made
+// TestFleetPropagatesABulkDelete fail roughly two runs in three. A vanished entry
+// is therefore skipped rather than fatal: from outside, an entry that disappears
+// mid-walk is exactly what "not converged yet" looks like, the caller is polling,
+// and the path's absence from this manifest is itself the disagreement it is
+// waiting to stop seeing. Nothing is weakened by this — every other error still
+// fails the test, so it tolerates the race and not an unreadable backing store.
 func (p *peer) manifest() map[string]string {
 	p.t.Helper()
 	out := map[string]string{}
 	err := filepath.WalkDir(p.spec.DataDir, func(path string, e os.DirEntry, err error) error {
-		if err != nil || e.IsDir() {
-			return err
+		if err != nil {
+			return skipVanished(err)
+		}
+		if e.IsDir() {
+			return nil
 		}
 		base := e.Name()
 		if strings.HasPrefix(base, ".drivel-") || isConflictCopy(base) {
@@ -311,7 +325,7 @@ func (p *peer) manifest() map[string]string {
 		}
 		b, err := os.ReadFile(path)
 		if err != nil {
-			return err
+			return skipVanished(err)
 		}
 		out[filepath.ToSlash(rel)] = hashOf(b)
 		return nil
@@ -322,13 +336,27 @@ func (p *peer) manifest() map[string]string {
 	return out
 }
 
+// skipVanished turns "that file is gone" into "carry on" and leaves every other
+// error alone. Returning nil for a directory's error stops WalkDir descending into
+// it and continues with its siblings, which is the right answer for a directory
+// the fleet has just deleted.
+func skipVanished(err error) error {
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	return err
+}
+
 // conflicts lists the §6 conflict copies this peer holds.
 func (p *peer) conflicts() []string {
 	p.t.Helper()
 	var out []string
 	err := filepath.WalkDir(p.spec.DataDir, func(path string, e os.DirEntry, err error) error {
-		if err != nil || e.IsDir() {
-			return err
+		if err != nil {
+			return skipVanished(err) // same live-tree race as manifest
+		}
+		if e.IsDir() {
+			return nil
 		}
 		if isConflictCopy(e.Name()) {
 			rel, rErr := filepath.Rel(p.spec.DataDir, path)

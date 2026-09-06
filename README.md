@@ -176,7 +176,9 @@ Roadmap (v2), in [DESIGN.md §9](DESIGN.md): **M9** plugin architecture for
 third-party providers, **M10** native macOS and FreeBSD support, and three backends
 that are not a cloud — **M11** a deduplicating local store, **M12** an encrypting
 layer that stacks over any other backend (client-side encryption for Drive), and
-**M13** a block-level filesystem over a distributed database. All unscheduled.
+**M13** a block-level filesystem over a distributed database. **M14** adds a local
+control socket so other tools can read sync status and backend statistics, pause and
+resume a mount, and stop the daemon. All unscheduled.
 
 ## Build
 
@@ -303,22 +305,29 @@ unverified rather than as supported.
 **In-place mode is Linux-only.** It works by routing backing I/O through
 `/proc/self/fd/N`, and macOS and FreeBSD have no procfs. Pass `-data` there.
 
-**`-lazy` is not safe off Linux yet.** Lazy hydration marks not-yet-downloaded files
-with a `user.drivel.placeholder` extended attribute, and that marker is what stops
-Drivel from uploading an empty placeholder over your real file in the cloud. Drivel
-does not implement extended attributes on macOS or FreeBSD yet, so the marker lives
-only in `drivel-state.db` — and if that database is lost or deleted, placeholders
-become indistinguishable from ordinary empty files. **Use the default (eager) mode on
-macOS and FreeBSD.** Native support is tracked as M10 in [DESIGN.md](DESIGN.md); on
-macOS it is a small change, on FreeBSD a larger one.
+**`-lazy` is untested on macOS and FreeBSD.** Lazy hydration marks not-yet-downloaded
+files with an extended attribute, and that marker is the only thing that stops Drivel
+from uploading an empty placeholder over your real file in the cloud. Drivel now
+implements extended attributes on all three platforms, but it has never been run on a
+Mac or a FreeBSD box — treat lazy mode there as untested rather than as working, and
+prefer the default (eager) mode until someone has.
 
-Drivel detects this and says so at mount time — `WARNING: … cannot store user
-xattrs; placeholder marks rely on the state DB alone`. That warning is expected off
-Linux, not a bug, and it is telling you not to delete the state database.
+**`-lazy` is genuinely unsafe on a backing filesystem without extended attributes**,
+whatever the operating system. If the marker cannot be written there is no record
+that a file is a placeholder at all, and an un-fetched file looks exactly like an
+empty one — which Drivel may then upload over the remote copy. The cases to know:
 
-The same trap applies on **WSL2**: `/mnt/c` and friends do not carry Linux extended
-attributes, so keep `-data` on the Linux filesystem inside WSL rather than on a
-mounted Windows drive.
+- **WSL2**: `/mnt/c` and other Windows drives are drvfs and carry no Linux extended
+  attributes. Keep `-data` on the Linux filesystem inside WSL.
+- **macOS**: keep `-data` on an **APFS or HFS+** volume. On exFAT, FAT and some
+  network volumes macOS stores extended attributes in hidden `._name` companion
+  files instead of in the filesystem, which would put Drivel's marker inside the
+  directory it syncs; Drivel detects that and treats it as having none.
+- **FreeBSD**: UFS and ZFS carry them, **tmpfs does not** — so a `/tmp` mounted as
+  tmpfs is not a usable `-data` directory.
+
+Drivel checks at mount time and says so, naming the directory and the attribute. The
+fix is eager mode or a different `-data`; there is no database to preserve instead.
 
 ### macOS: macFUSE, FUSE-T, and licensing
 

@@ -183,7 +183,32 @@ func (n *node) Open(ctx context.Context, flags uint32) (fs.FileHandle, uint32, s
 			return nil, 0, syscall.EIO
 		}
 	}
-	fh, fuseFlags, errno := n.LoopbackNode.Open(ctx, flags)
+	// The backing file is opened readable even when the client asked for
+	// write-only, because a kernel may read through a write handle. FreeBSD's
+	// fusefs fills a buffer-cache block before writing part of it, and
+	// fuse_io_strategy deliberately falls back to the write filehandle for that
+	// read-modify-write when no read handle is open — so a READ arrives on a handle
+	// opened O_WRONLY. Passing the flags straight through leaves the backing fd
+	// write-only, go-fuse preads it to serialise the fd-backed ReadResult in its
+	// !linux reply path (server_unix.go in the pinned v2.10.1), and the EBADF that
+	// pread returns comes back to the caller as the *write* failing — after a
+	// -debug trace has already logged the READ as OK, since the read happens when
+	// the reply is written rather than when it is built. Linux does not RMW through
+	// the write handle, so nothing there depends on this; it is one body rather
+	// than a build-tagged FreeBSD delta so that a Linux CI run covers the path
+	// FreeBSD needs, the same argument hydrate/xattr_unix.go makes.
+	//
+	// The fallback is not decoration: read permission is not implied by write
+	// permission, so a backing file this process may write and not read (mode 0222,
+	// or an ACL) must still open exactly as the caller asked.
+	openFlags := flags
+	if flags&uint32(syscall.O_ACCMODE) == uint32(syscall.O_WRONLY) {
+		openFlags = flags&^uint32(syscall.O_ACCMODE) | uint32(syscall.O_RDWR)
+	}
+	fh, fuseFlags, errno := n.LoopbackNode.Open(ctx, openFlags)
+	if errno != 0 && openFlags != flags {
+		fh, fuseFlags, errno = n.LoopbackNode.Open(ctx, flags)
+	}
 	if errno == 0 {
 		fh = &fileHandle{wrapped: fh, path: path, events: n.events, hyd: n.hyd, lg: n.lg}
 	}

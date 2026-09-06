@@ -59,7 +59,8 @@ bidirectional sync — don't regress it.
   the M5 hydration bitmap cache (opaque bytes; the encoding belongs to `ranges`)
   and the M7b sweep record + per-generation `seen` marks.
 - `internal/hydrate` — M5 lazy hydration: placeholder creation, the authoritative
-  `user.drivel.placeholder` xattr marker, and whole-file hydrate-on-first-I/O with
+  `hydrate.XattrName` xattr marker (per platform since M10), and whole-file
+  hydrate-on-first-I/O with
   singleflight. Provider-agnostic.
 - `internal/ranges` — leaf value package: the block bitmap (`Set`) used two ways —
   M5's present-ranges and M6's dirty-ranges. Pure, no I/O. It lives outside
@@ -138,10 +139,42 @@ config, a provider registry, account-scoped login. See "Multi-account" below.
 **v2, planned** (DESIGN.md §9 has the detail). **M9** plugin architecture
 (out-of-process or WASM; Go's `plugin` package is a poor fit). M8 discharged its
 precondition: the §2.5 seam holds under two independently-configured stores in one
-process. **M10** platform parity — native xattrs on macOS (small; it is what makes
-`-lazy` safe there), then FreeBSD `extattr_*` (larger: different API, explicit
-namespace, so the marker name has to become per-platform). Independent of M9,
-nothing waits on either. See "Platform support" below.
+process. **M10** platform parity — both xattr halves are written; **FreeBSD has been
+run on its own OS (2026-09-06), macOS has not**: one shared linux+darwin
+implementation, plus FreeBSD `extattr_*` in its own file (different API, namespace
+as an argument, so `hydrate.XattrName` is now per platform — `drivel.placeholder`
+there, `user.drivel.placeholder` elsewhere). What remains is the macOS run and the
+two FUSE-T questions, so M10 is open. Writing it also corrected a claim these
+notes had carried since M5: losing `drivel-state.db` was never what turned a
+placeholder into an empty file — no marker means no placeholder record at all.
+
+**The FreeBSD run found nothing wrong with M10 and one real bug underneath it**, so
+don't read a green xattr suite as a green platform. `DRIVEL_REQUIRE_TESTENV=all`
+on FreeBSD 15.1 passes now; on the first attempt four `internal/vfs` tests failed,
+every one of them writing through an `O_WRONLY` handle — see "Platform support"
+below for why the backing file is opened readable regardless.
+
+Independent of M9, nothing waits on either.
+
+**M14** control & status API — a unix socket (`internal/control`, HTTP/JSON,
+`/v1/…`) so third-party tools can read per-path sync status and per-backend stats,
+pause/resume a mount, see whether a backend is reachable, and stop the process,
+with `drivel status|pause|resume|stop` as the in-tree first client. Depends only on
+M8, so it can be scheduled at any time. Five things in DESIGN.md §9's entry are
+load-bearing and easy to get wrong: it is a **view, never an authority** (M7
+invariant 2 again — no sync decision may read from it); status is served from a
+**snapshot**, never from `Engine.Run`, whose coalescer is goroutine-confined and
+whose `dispatch` blocks when a worker queue fills; **pause holds the dispatch, not
+the event channel** — `vfs.node.emit` blocks rather than drops, so pausing
+consumption hangs FUSE, and discarding the pending set is not a fallback because
+`reconcile.pushLocalOnly` skips paths that already have an echo; **`unknown` is a
+first-class status**, because reporting "synced" for a path with no record is the
+placeholder-vs-empty-file lie in a new place; and shutdown cancels the SIGINT
+context rather than exiting, so the three-phase `Close` and its bounded drain still
+run. Reachability is **observed, never probed**. Unsettled and deliberately so:
+on-by-default vs off (the `-pprof` precedent says off), authorisation beyond the
+socket mode, and whether status answers for a whole *tree* — that last one decides
+the response schema, so it comes first.
 
 **v2, backends on the roadmap** (DESIGN.md §9 has the reasoning; all three are
 unscheduled, none is started, and each one's shape is *decided* — the entries say
@@ -181,15 +214,20 @@ items; the property tests, `gauth` and `fsevent` closed after it, which empties 
 numbered list. The live testing work is now Tier B of the multi-client campaign
 (`docs/multiclient-test-plan.md`).
 
-Two rules the last round left behind. **A property test nobody has seen fail is a
+Three rules the last rounds left behind. **A property test nobody has seen fail is a
 property test nobody knows the strength of**: `ranges/property_test.go` and
 `syncengine/coalescer_property_test.go` were each checked by mutating the code they
 cover (round `Mark` outward, let a known event revive a poisoned accumulator, …) and
 confirming the property that names the mistake is the one that fails. State the
 properties against the *input*, never against an oracle built from the same helpers.
-And **credential files are written through `gauth.writeSecret`**, never `os.WriteFile`:
+**Credential files are written through `gauth.writeSecret`**, never `os.WriteFile`:
 a mode argument applies only when the call creates the file, so a `token.json` that
-already exists keeps whatever permissions it arrived with.
+already exists keeps whatever permissions it arrived with. And **a helper that walks
+a tree the code under test is mutating must skip `fs.ErrNotExist`, not fail on it**
+— `peer.manifest`/`peer.conflicts` in `multiclient_test.go` did the latter and made
+`TestFleetPropagatesABulkDelete` fail two runs in three, with the product innocent.
+A sampler in a poll loop is waiting out exactly that race; every *other* error still
+fails.
 
 DESIGN.md §10 is a design note on carrying POSIX metadata (mode, ACLs, xattrs,
 SELinux) over Drive — unscheduled. If you touch it, the rule is that permission
@@ -200,9 +238,16 @@ the file, fail closed, and mask setuid/setgid by default.
 
 Three invariants; breaking any of them loses user data.
 
-1. **The xattr is authoritative, the DB is a cache.** `user.drivel.placeholder`
-   lives on the backing file; the `RangeSet` in `internal/state` is a fast path.
-   Never invert this — the xattr is what survives losing `drivel-state.db`.
+1. **The xattr is authoritative and the DB is not a fallback.** The marker
+   (`hydrate.XattrName` — per platform since M10, never the literal) lives on the
+   backing file; the `RangeSet` in `internal/state` caches present *ranges* and
+   nothing else. `IsPlaceholder` reads the marker and only the marker, so **no
+   marker means no placeholder record at all**, immediately — not "after the DB is
+   lost", which is what these notes wrongly said until M10. The practical
+   consequence is invariant 2's: on a backing filesystem with no user xattrs
+   (drvfs under WSL2, exFAT, a tmpfs `/tmp` on FreeBSD) `-lazy` is unsafe and the
+   mount warns; the mitigation is eager mode or a different `-data`, never "keep
+   the state DB".
 2. **Never push a placeholder.** `syncengine.Placeholders` gates every content
    upload. A placeholder holds zero bytes at full apparent size, so uploading it
    replaces the remote file with nothing. The guard fails **safe**: unsure ⇒ report
@@ -472,7 +517,8 @@ everything below the seam provider- and FUSE-agnostic.
 
 ## Platform support
 
-Tested on Linux only. The whole tree *compiles* for `darwin/{amd64,arm64}`,
+Tested on Linux and FreeBSD; macOS is compile-verified only. The whole tree
+*compiles* for `darwin/{amd64,arm64}`,
 `freebsd/*` and every `linux/*` arch; on `windows/amd64` everything builds except
 `internal/vfs` (and `app`/`config`/`cmd`, which merely import it). **Every
 cross-compile failure on every target traces to go-fuse and nothing else** — which
@@ -480,15 +526,65 @@ is the strongest available proof that the §2.5/§2.7 seams hold. Adding a platf
 a `mount.Backend`, never a port. DESIGN.md §2.9 has the full matrix and reasoning;
 don't re-derive it, and don't promote "builds" to "supported" without a live test.
 
-Two things degrade off Linux, and the second is a correctness matter:
+Four things differ off Linux. The second is now a *filesystem* matter rather than a
+platform one, and the fourth is not a degradation at all — it is a kernel behaviour
+the mount layer has to accommodate:
 
 1. **In-place mode is Linux-only** — `/proc/self/fd/N` has no portable equivalent;
    `openInPlace` refuses elsewhere. `-data` is mandatory there.
-2. **M5's xattr marker has no authority off Linux.** `hydrate/xattr_other.go` stubs
-   everything to `ENOTSUP`, so the state DB stops being a cache and becomes the only
-   record — inverting M5 invariant 1 and re-opening invariant 2's data-loss case if
-   `drivel-state.db` is lost. **`-lazy` off Linux is unsupported until M10.** Same
-   trap on WSL2 with `-data` under `/mnt/c` (drvfs carries no user xattrs).
+2. **M5's xattr marker is implemented on all three platforms (M10) and absent on any
+   backing store that cannot hold it.** `hydrate/xattr_unix.go` is one body for linux
+   **and** darwin over `golang.org/x/sys/unix`; `xattr_freebsd.go` is separate
+   because `extattr_*` takes the namespace as an argument; `xattr_linux.go` /
+   `xattr_darwin.go` hold only the missing-attribute errno (`ENODATA` vs `ENOATTR`)
+   and the native-store probe. Keep the linux+darwin body shared — it is what makes a
+   Linux test run cover the macOS code on a platform no maintainer can run. **The
+   freebsd file is verified on its own OS (2026-09-06, FreeBSD 15.1, `=all`, nothing
+   skipped, `TMPDIR` on ZFS); the darwin half is not — don't promote it.** Neither
+   thing that file feared appeared on FreeBSD: no short write from
+   `extattr_set_file`, and no sign of the `//go:uintptrescapes` wrappers failing.
+
+   **The marker name is per platform**: `user.drivel.placeholder` on linux/darwin,
+   `drivel.placeholder` in `EXTATTR_NAMESPACE_USER` on freebsd. Always
+   `hydrate.XattrName`, never the literal.
+
+   **Where the backing filesystem has no user xattrs, `-lazy` is unsafe, full stop**
+   — drvfs under WSL2, exFAT/FAT, a tmpfs `/tmp` on FreeBSD. `setxattr` fails,
+   `CreatePlaceholder` continues unmarked, and there is then no placeholder record at
+   all, because **`IsPlaceholder` reads the marker and nothing else**. The state DB
+   does *not* stand in: its hydration entries cache present ranges (`Hydrator.Ranges`,
+   which nothing outside tests reads) and no path has ever consulted them for
+   placeholder-ness. Docs said otherwise until M10 — "don't delete the state DB" was
+   never the mitigation; "don't run `-lazy` there" is.
+3. **A case-insensitive backing filesystem is a correctness surface**, and macOS
+   defaults to one (APFS and HFS+). Drive is case-sensitive, so `Foo.txt` and
+   `foo.txt` collide into one local path — the MC-30 sibling problem arriving by a
+   second route. Nothing handles it; a live macOS run should find out what happens.
+4. **A kernel may read through a write handle, so `node.Open` opens the backing file
+   readable whatever the caller asked for.** FreeBSD's fusefs fills a buffer-cache
+   block before writing part of it and falls back to the write filehandle for that
+   read-modify-write, so a READ arrives on a handle opened `O_WRONLY`; the backing
+   fd is then write-only, go-fuse preads it to serialise the fd-backed `ReadResult`
+   when it writes the reply, and the `EBADF` surfaces as the *write* failing. It is
+   deliberately unconditional rather than build-tagged, so Linux CI covers the path
+   — the `xattr_unix.go` argument again — and the fallback to the caller's flags is
+   not decoration: write permission does not imply read permission. Found by running
+   `internal/vfs` on FreeBSD; darwin shares the same go-fuse reply path, so if
+   macFUSE does the same thing the case is already covered. `Create` needs no
+   equivalent: its handle only ever needs blocks it authored.
+
+**On macOS a successful `setxattr` does not mean the filesystem stored it.** On a
+volume without native EAs (exFAT, FAT, some SMB/NFS) macOS emulates them in an
+AppleDouble `._name` sidecar, which would put M5's marker in a *file inside the
+backing tree* — synced like any other file and detachable from what it describes.
+`xattrNative` (darwin) probes for the sidecar and reports emulation as "no xattrs".
+Don't drop that check for looking redundant; keep macOS backing dirs on APFS/HFS+.
+
+**On FreeBSD the `//go:uintptrescapes` wrappers are load-bearing, not decoration.**
+x/sys types the extattr buffer as a `uintptr`, which neither keeps the array alive
+nor survives a stack copy, and escape analysis confirms the buffer would otherwise
+stay on the stack. `runtime.KeepAlive` does not fix this one. Also: `extattr_set_file`
+returns a byte count, so a short write is a real case there and must stay an error.
 
 **macOS specifics.** go-fuse probes exactly two paths (`mount_macfuse`,
 `mount_osxfuse`) — verified in v2.10.1 *and* v2.11.0 — so **FUSE-T does not work**,

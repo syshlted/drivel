@@ -92,6 +92,67 @@ and install the `fuse3` package; without that the job tests less than it looks
 like it does. On a machine that genuinely cannot mount, leave the variable unset
 and expect the skips.
 
+### Testing on macOS or FreeBSD
+
+FreeBSD has been run (15.1, 2026-09-06, everything below green); macOS has not.
+Both have real xattr implementations as of M10, so this is the list of what a
+machine or VM is actually worth — and, for FreeBSD, what the first run cost.
+
+**Put the backing directory on a filesystem that carries extended attributes**, and
+check that first — everything below tests the fallback otherwise. APFS or HFS+ on
+macOS; UFS or ZFS on FreeBSD, where **tmpfs has none**, so a tmpfs `/tmp` makes the
+whole suite report the facility missing. Never use a shared folder from the host.
+
+```sh
+TMPDIR=/path/on/a/real/filesystem \
+  DRIVEL_REQUIRE_TESTENV=xattr go test -race ./internal/hydrate/ ./internal/syncengine/
+```
+
+That is the whole per-platform surface, and it is **fully settled by a VM**:
+virtualisation does not change what `getxattr` does. Read the failures by layer —
+`internal/hydrate/xattr_unix_test.go` is the syscall layer (it builds on all three
+platforms), and `hydrate_test.go` or `syncengine/lazy_test.go` failing with that one
+green is placeholder logic above it.
+
+On macOS the code under test is `hydrate/xattr_unix.go`, the same body Linux runs,
+plus two symbols in `xattr_darwin.go`. On FreeBSD it is `hydrate/xattr_freebsd.go`,
+which shares nothing with the others: watch particularly for a short write from
+`extattr_set_file` (reported as an error, and a case no other platform can produce)
+and for anything suggesting the `//go:uintptrescapes` wrappers are not holding.
+
+**The mount layer is where the two platforms differ.** FreeBSD needs no special
+arrangement — fusefs is in base — so a VM settles it end to end:
+
+```sh
+kldload fusefs && sysctl vfs.usermount=1
+DRIVEL_REQUIRE_TESTENV=all go test -race ./...
+```
+
+`fusefs` is not loaded by default and `kldload` does not persist, so a fresh boot
+that skips it makes every mount test skip — which under `=all` is a failure, and is
+the answer you want rather than a quiet pass.
+
+**Run `=all`, not just `=xattr`, wherever the platform can mount.** The FreeBSD run
+found nothing wrong with the xattr code it was aimed at and four failures in
+`internal/vfs` underneath it: every test that wrote through an `O_WRONLY` handle got
+`EBADF`, because fusefs reads through a write handle to fill a cache block and the
+backing fd was write-only (DESIGN.md §2.1). It is fixed and there is a regression
+test, but the shape of the surprise is the lesson — the milestone's own surface was
+fine and the layer nobody suspected was not.
+
+Two things about reading a failure there. A `-debug` trace will log that READ as
+`OK` and still fail the write, because go-fuse resolves an fd-backed read result
+when it writes the reply rather than when it builds it; and a failed mount test
+leaves the mountpoint busy, so clear it with `umount -f` before rerunning —
+`mount -t fusefs` will not list it, since the type is `fusefs.drivel`.
+
+macOS needs macFUSE, which is a kernel extension: loading one in a guest means
+reduced-security boot, which is not the configuration a user's Mac is in, and a
+macOS guest on an Apple-silicon host cannot load third-party kexts at all. FUSE-T is
+not an alternative — go-fuse cannot drive it (DESIGN.md §2.9.3). So a green VM run
+on macOS is evidence about syscalls rather than about the platform, and "builds"
+still does not become "supported" without a live end-to-end run on hardware.
+
 ### Upgrading the Go toolchain
 
 Three things move together, and the Makefile enforces the first:

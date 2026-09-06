@@ -130,8 +130,8 @@ trusts, cheapest source first, with only the bottom row authoritative:
 flowchart TD
     subgraph localq ["Is this file a placeholder? (M5)"]
         direction TB
-        L1["state.hydration bucket<br/>present-ranges cache"] -->|"miss, or DB lost"| L2
-        L2["AUTHORITATIVE<br/>user.drivel.placeholder xattr<br/>on the backing file"]
+        L2["AUTHORITATIVE and SOLE<br/>hydrate.XattrName xattr<br/>on the backing file"]
+        L1["state.hydration bucket<br/>present-ranges cache<br/>(a different question:<br/>WHICH bytes are here)"]
     end
 
     subgraph remoteq ["Which fileID is this path? (M7)"]
@@ -146,6 +146,16 @@ flowchart TD
     class L2,R3 truth
     class L1,R1,R2 cache
 ```
+
+The M5 ladder has one rung, and that is the correction M10 made rather than a
+simplification of the diagram. `Hydrator.IsPlaceholder` reads the marker and
+nothing else: the hydration bucket caches *present ranges*, which answers "which
+bytes are here", and no code path has ever consulted it to answer "is this a
+placeholder". So there is no fallback — a backing filesystem that cannot store the
+attribute has no placeholder record at all, immediately, and `-lazy` is unsafe
+there rather than merely fragile. The attribute's spelling is per platform
+(`user.drivel.placeholder` on Linux and macOS, `drivel.placeholder` in
+`EXTATTR_NAMESPACE_USER` on FreeBSD), so callers use `hydrate.XattrName`.
 
 The M7 rule is the one that is easy to erode: a persisted entry is a hint about
 the past. The process that wrote it may have exited months ago, and the remote

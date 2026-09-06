@@ -144,6 +144,47 @@ Launch: `./bin/drivel mount -config rig/cN/config.toml 2>&1 | ts > rig/cN/logs/r
 (`ts` from moreutils gives every line a timestamp, which the convergence detector
 and the latency measurements both need).
 
+#### 2.2.1 One rig per scenario
+
+`rig/` above is the original Tier B rig, and it stays as it is. Everything after
+the smoke cases gets a **scenario**: its own rig, its own Drive folder, created by
+`scripts/multiclient/scenario.sh new NAME -r FOLDER_ID` and recorded in
+`scenarios/REGISTRY.md`.
+
+Reusing one rig is the tempting alternative and it costs more than it looks.
+Several cases are counting arguments — MC-11 writes 10 000 files and asks how many
+`[sync] upload` lines came out — and that is subtraction only while the folder
+holds nothing else. Against a populated folder every derived count needs
+path-prefix filtering, including the count the case exists to produce. The
+cheaper-looking fix, clearing the folder first, is worse: `Store.Remove` is
+`Files.Delete`, so it is a thousand irreversible deletes spent to reach a state a
+new folder gives away.
+
+A scenario is one physical directory and never a symlink into another. drivel's
+cardinal rule is about backing-tree and mountpoint overlap and `app.Validate`
+compares paths to enforce it, so a symlinked path is precisely how that guard gets
+defeated without anyone noticing.
+
+**Placement is part of the scenario**, because the hardware is not uniform:
+
+| Placement | Where | For |
+|---|---|---|
+| `overlay` | `~/drivel-rig/scenarios` | Anything reporting a latency, throughput or convergence time |
+| `bulk` | the external disk, `$DRIVEL_BULK_ROOT` | Capacity-bound cases only — MC-10, MC-52, MC-46 |
+
+A duration is only comparable to durations taken on the same disk, and the
+MC-01/02/03 baselines were taken on the overlay. The bulk disk at the time of
+writing is a magnetic USB drive measured at 61 MB/s sequential and **19 synchronous
+4 KiB writes per second** — that second figure is what a bbolt commit costs — and
+it is scheduled to be replaced by an SSD, so `scenario.sh` stamps the device into
+each scenario's `SCENARIO.md` at creation. A result that does not name its disk
+becomes uninterpretable the moment the hardware changes. See the bulk root's
+`README.md` for the full measurements and the migration notes.
+
+**Never run two fleets at once.** They share a Drive account, so the second one's
+traffic lands in the first one's quota and request-rate numbers; `scenario.sh
+start` refuses while any other client is alive.
+
 ### 2.3 Test-run knobs
 
 Several defaults are tuned for production and make tests take a day. Override
@@ -256,6 +297,7 @@ measure of whether a case would have hit a real user's quota.
 | `\[sync\] skip .* unhydrated placeholder` | M5 guard firing |
 | `\[pull\] conflict` | §6 resolution |
 | `attempt .* failed, retrying` | Transient/quota pressure |
+| `failed after .* attempt` | **Pushes abandoned — data not sent.** `executeWithRetry` allows 5 attempts over ~7.5s of jittered backoff and then *drops* the event rather than requeueing it, so the local file is correct and the remote never hears about it. Only an M7b sweep repairs that, and §2.3 runs every case with `sweep-interval = "0"` — meaning a throttled run diverges silently while every volume counter still looks healthy. Counting the retry line without this one is the wrong asymmetry: the retry is the recoverable event |
 | `\[drive\] .* share the name` | Same-name siblings — **silent data loss** |
 | `\[sweep\] REFUSING to delete` | `-max-deletes` abandoned a pass |
 | `\[sweep\] reconcile complete in` | Sweep cost |
@@ -271,9 +313,9 @@ is not worth its wall-clock.
 
 | ID | Setup / action | Expected | Catches |
 |---|---|---|---|
-| **MC-01** | Seed the folder from A only (1000 files, 20 dirs, 50 MB). Start B and C cold. | Sweep materialises the tree on both. Manifests identical. **Zero** conflict copies, **zero** deletes on the first run. | The "first-ever run deletes nothing" invariant, and the M7b sweep under a tree it did not create. |
-| **MC-02** | All three idle for 30 min, no writes. | RSS drift < 2 MB/client. CPU < 1%. Drive requests settle at the slow cadence (≈1 `changes.list`/30s/client ⇒ ≈10 req/100s/client, ≈30 for the fleet). | Poll-loop leaks; a cadence that never backs off; the idle quota floor of a fleet. |
-| **MC-03** | Write one 1 MiB file on A. | 1 push, exactly 2 downloads, 0 conflicts. Converges within fast-cadence + transfer. | Baseline fan-out latency and the N-1 download rule. |
+| **MC-01** | Seed the folder from A only (1000 files, 20 dirs, 50 MB). Start B and C cold. | Sweep materialises the tree on both. Manifests identical. **Zero** conflict copies, **zero** deletes on the first run. **PASS live** (§5): 3-page enumeration, 1023 objects, 1002 files + 21 dirs materialised on each cold client in 400s, `1023 reconciled locally, 0 pushed`, converged in 13s, 0 conflicts, 0 deletes. | The "first-ever run deletes nothing" invariant, and the M7b sweep under a tree it did not create. |
+| **MC-02** | All three idle for 30 min, no writes. | RSS drift < 2 MB/client. CPU < 1%. Drive requests settle at the slow cadence (≈1 `changes.list`/30s/client ⇒ ≈10 req/100s/client, ≈30 for the fleet). **PASS live** (§5): RSS drift negative on all three (−176 kB, −1.7 MB, −2.0 MB), CPU ≈ 0.007%, HWM flat, fds and threads flat, and zero log lines inside the window. | Poll-loop leaks; a cadence that never backs off; the idle quota floor of a fleet. |
+| **MC-03** | Write one 1 MiB file on A. | 1 push, exactly 2 downloads, 0 conflicts. Converges within fast-cadence + transfer. **PASS live, twice** (§5): 1 upload, exactly 2 downloads, 0 conflicts both times — but **2.7s on a warm fleet and 21s on one idle for hours**, because the cadence has backed off to 30s. Fan-out to an idle peer is bounded by the poll cadence, not by transfer time; quote both numbers or this case overstates what a user sees by 3×. | Baseline fan-out latency and the N-1 download rule. |
 
 ### Group II — scale and integrity
 
@@ -281,7 +323,7 @@ is not worth its wall-clock.
 |---|---|---|---|
 | **MC-10** | 1 GiB then 5 GiB of random data written on A. | Byte-identical on all three + oracle. **Peak RSS must not scale with file size** — uploads and downloads stream. | A buffering regression that OOMs a fleet on one big file. Also exercises resumable chunking with `ChunkTransferTimeout` unset. |
 | **MC-10b** | While A is still uploading the 5 GiB file, poll for it on B and C. | The file is either absent or complete — never short and never mid-write. Hash any snapshot that appears. | The atomic temp-file + rename in `Downloader.download`; a partial file served as content is silent corruption. |
-| **MC-11** | 10 000 × 4 KiB files across 100 directories, created on A. | All three converge. Record: wall clock, API request count, 403/retry count, peak RSS, state DB and index DB size per client. | Debounce/worker-pool behaviour under burst; the first realistic chance of hitting user rate limits. |
+| **MC-11** | 10 000 × 4 KiB files across 100 directories, created on A. | All three converge. Record: wall clock, API request count, 403/retry count, peak RSS, state DB and index DB size per client. **PASS live** (§5): 10 000 uploads, 10 000 downloads each on c2/c3, 0 conflicts, 0 duplicates, 0 abandoned pushes, **0 403s**; 2 h 32 m at a flat 1.09 uploads/s, converging 6.9 s after the last upload; peak RSS 112 MB on the writer and 39 MB on each puller; both DBs 32 KiB → 4 MiB (~416 B/entry). A cold oracle rebuilt the same tree from `Enumerate` and agrees. Four findings the case did not predict: **the FUSE write path blocks at the upload rate** once a burst exceeds the 1024-slot buffer plus 4 × 64 worker queues (measured backlog 1286 against a capacity of 1280, so `tar -x` runs at Drive's upload rate and nothing says why); **write amplification ≈ 6000×** (190 KB of content, 1175 MB to disk) from per-operation bbolt commits, with the oracle's bulk `SetMany` reconcile 2.8× cheaper for identical content; **enumeration scales with the account, not the mount** (the oracle listed 11 129 objects to keep 10 101, discarding 1028 belonging to another rig's folder — so delete a scenario's folder once recorded); and **MC-01's duplicate upload did not reproduce** — 10 000 lines for 10 000 distinct paths. | Debounce/worker-pool behaviour under burst; the first realistic chance of hitting user rate limits. **It is not that chance**: drivel's serialised upload path caps a writing client near 1 request/s, so a single-writer case cannot burst hard enough to trip a quota. That question moves to MC-36 and MC-51. |
 | **MC-12** | Hostile names, all created on A: depth-40 nesting · 5000 entries in one directory (forces Drive paging) · unicode and emoji · `'` and `\` (`escapeQuery`) · spaces, `%`, newline · 255-byte names · a file legitimately named `report (conflict 2024-01-01 00-00-00).pdf` · a file named `.drivel-notes`. | Everything round-trips. **The reserved-name half is answered in Tier A and the two paths disagree:** `skipLocal` guards only reconcile's local walk, so a user file of either shape written *through a mount* is pushed and fans out like anything else, while the same file created with the engine not watching is stepped over by the sweep that exists to catch up on exactly that — silently, and for as long as the file exists. Pinned by `TestFleetSyncsAReservedNameFromTheMountButNeverFromASweep`. Still Tier B: the escaping, paging, unicode and length cases, which need real Drive. | Query-escaping bugs; paging bugs; the conflict-name regex catching real user files. |
 | **MC-13** | Empty files · sparse file with holes · hardlinked pair · symlink (relative and absolute) · fifo · device node · setuid bit · a file with user xattrs · non-UTC mtimes. | Define the behaviour and write it down. Drive has no representation for most of these; what matters is that drivel fails predictably rather than corrupting or looping. | Undefined behaviour becoming a support question. §10 territory. |
 | **MC-14** | Create a Google Doc, a Sheet and a Slide in the Drive web UI inside the folder. | All three clients log `skip … Google-native document`, never materialise them, and — critically — **never infer them as deleted** in a later sweep. | The `ExportOnly` seen-marking. A regression here deletes the user's real Drive documents. |
@@ -450,9 +492,109 @@ roughly in descending order of how likely they are to change a decision:
    'TestChanges|TestSimultaneous|TestRemovingTheVisible|TestEnumerateReportsEvery'
    ./internal/provider/gdrive`. Everything remaining in the matrix needs a real
    Drive, which is what Tier B is for.
-3. **Tier B smoke**: MC-01, MC-02, MC-03 — proves the rig, costs almost nothing.
-4. **Tier B scale and semantics**: Groups II and III.
+3. **Tier B smoke — done. MC-01, MC-02 and MC-03 all pass.** The rig is built and
+   lives outside the repo at `~/drivel-rig` (`rig/c1…c3`, `rig/oracle`,
+   `rig/results`), pinned to a dedicated folder ID, one token per client, three
+   real processes against real Drive. Results land in
+   `rig/results/<case>/<timestamp>/` with the logs and the commit SHA, per §4.11.
+
+   **MC-03 passes, and it is the case that found the missing upload log.** The
+   first live run converged three clients and reported *zero* uploads, because a
+   successful push logged nothing at all — from outside the process an upload that
+   worked and one that never happened looked identical, which made every
+   transfer-volume number §2.7 asks for unmeasurable. Fixed first, then re-run:
+   one `[sync] upload mc03.bin (1048576 B)` on c1, exactly two `[pull] download`
+   lines, ~2.7s from the upload line to both downloads, no conflict copies and no
+   retries. That is the N-1 download rule and the baseline fan-out latency,
+   measured rather than assumed.
+
+   **MC-01 passes on every assertion, and two of its numbers are worth keeping.**
+   Two clients started cold — empty backing dir, no state DB, no index — took
+   1023 objects from a 3-page enumeration (0.75s) and materialised 1002 files and
+   21 directories each in 400s, converging with c1 in 13s of `converge.sh`, zero
+   conflict copies and zero deletes. The first number: **pages 1 and 2 resolved
+   nothing under the mount root and page 3 resolved all 1023**, which is the
+   parent-parking path doing real work rather than a listing that happened to
+   arrive parent-first. The second: **`1023 reconciled locally, 0 pushed`** — a
+   cold client must not push a byte back at a tree it has only just learned, and
+   this is the run that says it does not. c1 meanwhile stayed at five log lines
+   while two peers rebuilt its tree: no echo storm, nothing re-pushed. Peak RSS
+   30 MB per puller against 53 MB transferred, `hwm == rss`, so downloads stream.
+
+   **MC-02 passes with room to spare, and turned up the number this plan was
+   missing.** Over 1827 idle seconds: RSS drift **negative** on all three clients
+   (−176 kB, −1.7 MB, −2.0 MB — the target was under +2 MB, and what actually
+   happens is the runtime handing back the sweep's working set), HWM never moving
+   off its start value, CPU ≈ **0.007%** against a < 1% target, fds and threads
+   flat, and **zero log lines on any client inside the window**. Goroutines were
+   23 per client and sat at 24/27/27 hours later — bounded, though MC-53 is what
+   actually answers that.
+
+   Then a container DNS outage at 23:48, well after the window, gave an unplanned
+   MC-44b: one `[pull] changes: … lookup www.googleapis.com` line per client per
+   30s attempt for eight minutes, then silence. No crash, no fd or goroutine
+   growth, nothing touched locally, cadence unchanged. But **silence after an
+   outage is indistinguishable from a wedge**, because the pull loop only logs
+   failures — §2.6's "content equality, not log silence" arriving in practice — so
+   it was probed: 1 MiB on c1, one upload, exactly two downloads, byte-identical
+   on all three, in **21s**.
+
+   Keep that 21s next to MC-03's 2.7s. Same case, same file, and the difference is
+   that a fleet idle for hours has backed its cadence off to 30s: **fan-out
+   latency to an idle peer is bounded by the poll cadence, not by transfer time.**
+   2.7s is a busy fleet; ~15–30s is what a user's second laptop actually sees.
+   The design intends both and the matrix quotes only the first, which makes MC-03
+   read as three times faster than the experience it describes. MC-51's scaling
+   law should measure warm and idle separately for the same reason.
+
+   **One thing the seed turned up that no case predicted.** Seeding MC-01's tree
+   (1000 files × 50 KiB across 20 directories, ~1.15s per file from one client)
+   produced **1001 upload lines for 1000 files**: `seed/d16/f13.bin` went up
+   twice, seven seconds and seven other files apart, with no error line anywhere
+   in the log. It is not a retry. It is a second event for a path whose first push
+   had already left the debounce window, re-uploaded whole because at 50 KiB the
+   file sits below `hashSkipMinSize` and so never reaches M6's unchanged-content
+   gate — the gate that would otherwise have said "remote already holds these
+   bytes". One extra 50 KiB in 51 MB is nothing; the shape is not, because MC-11
+   is this same burst ten times larger and MC-22 measures precisely this
+   amplification. Watch the ratio there rather than the count here.
+4. **Tier B scale and semantics — MC-11 done, and it moved two other cases.**
+   Groups II and III, ordered by what the hardware allows rather than by case
+   number. **MC-11 passed on 2026-09-06** in the `mc11-burst` scenario (the first
+   use of one-rig-per-scenario, §2.2.1) — full write-up in that scenario's
+   `results/mc11/`. Two things it changes downstream: the quota hunt moves to
+   MC-36/MC-51, because a single writer cannot burst past ~1 request/s; and
+   **MC-52 should measure enumeration against account size deliberately**, since a
+   cold client lists every object the account can see before filtering to the mount
+   root, so each scenario's leftovers tax every later scenario's startup. Delete a
+   scenario's Drive folder once its results are recorded.
+
+   The remaining overlay cases go next — MC-21 and MC-12's remainder (minutes
+   each), then MC-20 and MC-22. The bulk
+   cases (MC-10, MC-10b, MC-52, MC-46) wait for the SSD that is replacing the
+   external disk: running them on magnetic media means running them again
+   afterwards to get a number worth quoting.
+
+   Group III is run as **observation only** — MC-26b's folder move, MC-27, MC-28,
+   MC-33, MC-34, MC-35. Record what happens and write it down; implement no
+   mitigation. That is the treatment MC-30 got and for the same reason: each
+   candidate fix loses something a user wrote, and the choice is the user's to be
+   told about rather than ours to make silently.
+
 5. **Tier B concurrency**: Group IV, with the start barrier.
+
+**One thing MC-11 is *not* the instrument for.** The seed's extra upload (§5.3,
+`seed/d16/f13.bin` pushed twice) reads like a case for MC-11 to amplify, and the
+log says otherwise. Across the whole seed run there were zero retry lines, zero
+errors and zero gate-3 skips, uploads were serialised at 1.18 s apiece — Drive
+round-trip bound — and the duplicate landed 7 seconds and five other uploads after
+the first. Drive's only role in it was pacing; the second event arose in the local
+event/debounce/dispatch path, which is in-process and needs no network. That makes
+it a **Tier A** question, reproducible against a fake store at thousands of
+iterations per second under `-race`, instead of one instance per thousand files at
+1.18 s each. Chase it there. Keep MC-11 as the burst-throughput, quota and
+DB-growth measurement it is specified to be, and let its upload-count ratio be a
+corroborating observation rather than the experiment.
 6. **Failure injection**: Group V.
 7. **Resource and soak**: Group VI, last, because MC-53 wants a stable build.
 

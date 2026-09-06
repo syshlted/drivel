@@ -4,11 +4,14 @@
 //
 // Two records describe a placeholder, and the split is deliberate:
 //
-//   - An xattr on the backing file itself (user.drivel.placeholder) is the
-//     AUTHORITATIVE marker. It survives losing the state DB and travels with the
-//     file, which matters because the failure mode it prevents is data loss: a
+//   - An xattr on the backing file itself (XattrName, whose spelling is per
+//     platform) is the AUTHORITATIVE marker, and the only one: IsPlaceholder reads
+//     it and nothing else. It travels with the file and survives losing the state
+//     DB, which matters because the failure mode it prevents is data loss — a
 //     placeholder mistaken for a genuinely empty file gets uploaded as zero bytes,
-//     destroying the remote content it was standing in for.
+//     destroying the remote content it was standing in for. The corollary is that a
+//     backing filesystem which cannot hold the attribute has no placeholder record
+//     at all, so lazy mode is unsafe there; app.Mount warns.
 //   - A ranges.Set in the engine state store is a cache and a forward hook. M5
 //     only ever stores the degenerate all-or-nothing cases, but the bitmap schema
 //     is the one M5b (per-block faulting) needs, and M6 reads the same structure
@@ -37,7 +40,13 @@ import (
 // in the "user." namespace deliberately: "security."/"trusted." are the
 // namespaces the kernel treats as authoritative, and a sync tool has no business
 // writing there (see DESIGN.md §10.4).
-const XattrName = "user.drivel.placeholder"
+//
+// The spelling is per platform because the interfaces disagree about where the
+// namespace goes: Linux and macOS take one string with "user." as a prefix,
+// FreeBSD takes EXTATTR_NAMESPACE_USER as a separate argument and the bare name.
+// Same attribute, same namespace, two spellings — so this is the only name any
+// caller may use, and none of them may assume the Linux one.
+const XattrName = xattrName
 
 // markerVersion is bumped if the on-disk Marker encoding changes. An unknown
 // version is treated as "placeholder, contents unknown" — fail safe, never fail
@@ -109,6 +118,11 @@ func (h *Hydrator) SupportsRanges() bool { return h.ranges != nil }
 // marker. When false, placeholder state rests on the state DB alone and losing
 // that DB downgrades placeholders to apparently-empty files — the caller should
 // warn, and should not enable lazy mode silently.
+//
+// A successful write is necessary and not sufficient: macOS emulates extended
+// attributes in an AppleDouble sidecar on volumes that have none of their own, so
+// the probe also asks xattrNative whether the value it just wrote is held by the
+// filesystem or by a file sitting in the backing tree. See xattr_darwin.go.
 func (h *Hydrator) XattrsUsable() bool {
 	if !xattrSupported {
 		return false
@@ -120,7 +134,10 @@ func (h *Hydrator) XattrsUsable() bool {
 	}
 	f.Close()
 	defer os.Remove(probe)
-	return setxattr(probe, XattrName, []byte("1")) == nil
+	if err := setxattr(probe, XattrName, []byte("1")); err != nil {
+		return false
+	}
+	return xattrNative(probe)
 }
 
 // abs maps a root-relative slash path to its backing-store path.
