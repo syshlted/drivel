@@ -3,6 +3,10 @@
 Short, reusable paragraphs for the website, a repo tagline, and social blurbs.
 Everything here is factual to the current implementation — no vaporware.
 
+This is a *source* for copy, not a description of the product: when the two
+disagree, [the README](../../README.md) and [docs/user/](../user/) are right and
+this file needs updating.
+
 ## Tagline options
 
 - **Your Drive, as a folder. Nothing phones home.**
@@ -46,6 +50,14 @@ the only possible one.
 - **Bidirectional background sync** with Google Drive — edit locally or in the
   cloud, both converge.
 - **Instant reads** — filesystem operations never block on the network.
+- **Lazy mode** — a whole Drive visible as zero-byte placeholders, content
+  fetched on first read. A Drive larger than the disk becomes usable.
+- **Smart uploads** — an unchanged rebuild sends nothing; large files upload in
+  resumable chunks.
+- **Guarded deletions** — inferred only from a sync baseline, so a first run
+  deletes nothing and a suspicious count refuses the whole pass.
+- **Several accounts at once** — N mounts in one process, validated against each
+  other before any of them opens.
 - **In-place mode (Linux)** — mount a directory onto itself; files just stay put
   when Drivel exits, with no separate cache directory.
 - **Bring your own credentials** — no shared app identity, no hosted service, no

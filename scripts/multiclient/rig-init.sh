@@ -61,7 +61,7 @@ for i in $(seq 1 "$n"); do
   [[ -n $token ]] && cp "$token" "$d/token.json"
 
   cat > "$d/config.toml" <<TOML
-# Client $c of the multi-client rig. See docs/multiclient-test-plan.md.
+# Client $c of the multi-client rig. See docs/dev/multiclient-test-plan.md.
 [account.$c]
 provider    = "gdrive"
 credentials = "$d/credentials.json"
@@ -97,7 +97,7 @@ mkdir -p "$d"/{mnt,data,logs}
 cp "$creds" "$d/credentials.json"
 [[ -n $token ]] && cp "$token" "$d/token.json"
 cat > "$d/config.toml" <<TOML
-# The oracle (docs/multiclient-test-plan.md §2.4). Three clients agreeing proves
+# The oracle (docs/dev/multiclient-test-plan.md §2.4). Three clients agreeing proves
 # they converged, not that they converged on what Drive holds. Wipe data/ and the
 # state DB before each use so it enumerates from nothing:
 #   rm -rf $d/data/* $d/drivel-state.db $d/drivel-index.db

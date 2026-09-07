@@ -30,7 +30,8 @@ const driveKind = "gdrive"
 // inspected, not what any of it is.
 var mountShapingFlags = []string{
 	"mount", "data", "credentials", "token", "state", "index",
-	"drive-root", "lazy", "xattr", "resync", "materialize", "max-deletes", "sweep-interval",
+	"drive-root", "drive-sweep-mode", "lazy", "xattr", "resync", "materialize", "max-deletes",
+	"sweep-interval",
 }
 
 func runMount(args []string) error {
@@ -43,6 +44,7 @@ func runMount(args []string) error {
 	stateDB := fset.String("state", "drivel-state.db", "path to the sync-state DB (cursor + echo records); kept outside the backing tree")
 	indexDB := fset.String("index", "drivel-index.db", "path to the provider's path↔ID index (a cache; safe to delete); \"\" disables it")
 	driveRoot := fset.String("drive-root", "root", "Drive folder ID mapped to the mount root")
+	driveSweepMode := fset.String("drive-sweep-mode", "", "how the enumeration sweep walks Drive: \"scoped\" descends from -drive-root, \"flat\" lists the whole account, \"auto\" (default) descends unless -drive-root names the whole Drive")
 	lazy := fset.Bool("lazy", false, "lazy hydration (M5): materialise remote files as placeholders and fetch content on first read (requires -credentials)")
 	xattr := fset.Bool("xattr", false, "serve extended attributes through the mountpoint by passing them to the backing store; off by default because it exposes drivel's own placeholder marker to anything that can write to the mount")
 	resync := fset.Bool("resync", false, "enumerate the whole remote tree and reconcile it against the backing dir at startup, even if a baseline already exists")
@@ -59,7 +61,8 @@ func runMount(args []string) error {
 	specs, err := mountSpecs(fset, given, specFlags{
 		configPath: *configPath, mountpoint: *mountpoint, dataDir: *dataDir,
 		credentials: *credentials, token: *token, stateDB: *stateDB, indexDB: *indexDB,
-		driveRoot: *driveRoot, lazy: *lazy, xattr: *xattr, resync: *resync, materialize: *materialize,
+		driveRoot: *driveRoot, driveSweepMode: *driveSweepMode,
+		lazy: *lazy, xattr: *xattr, resync: *resync, materialize: *materialize,
 		maxDeletes: *maxDeletes, sweepInterval: *sweepInterval, debug: *debug,
 	})
 	if err != nil {
@@ -99,14 +102,16 @@ func runMount(args []string) error {
 
 // specFlags is the parsed flag set, gathered so mountSpecs stays testable.
 type specFlags struct {
-	configPath    string
-	mountpoint    string
-	dataDir       string
-	credentials   string
-	token         string
-	stateDB       string
-	indexDB       string
-	driveRoot     string
+	configPath     string
+	mountpoint     string
+	dataDir        string
+	credentials    string
+	token          string
+	stateDB        string
+	indexDB        string
+	driveRoot      string
+	driveSweepMode string
+
 	lazy          bool
 	xattr         bool
 	resync        bool
@@ -185,6 +190,7 @@ func mountSpecs(fset *flag.FlagSet, given map[string]bool, f specFlags) ([]app.M
 			Credentials: f.credentials,
 			Token:       f.token,
 			RootID:      f.driveRoot,
+			SweepMode:   gdrive.SweepMode(f.driveSweepMode),
 			IndexPath:   f.indexDB,
 		})
 	}

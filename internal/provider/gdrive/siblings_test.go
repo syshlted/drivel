@@ -10,7 +10,7 @@ import (
 	"github.com/zishmusic/drivel/internal/provider"
 )
 
-// MC-30 from docs/multiclient-test-plan.md, at the layer that owns it.
+// MC-30 from docs/dev/multiclient-test-plan.md, at the layer that owns it.
 //
 // Drive's data model permits what a POSIX directory cannot represent: two files
 // with the same name in one folder. Three clients creating the same path at the

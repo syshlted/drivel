@@ -24,7 +24,7 @@ import (
 // its own local write time; Drive stamps the upload with a time of its own, and
 // nothing writes that back down over the originator's copy. So for every file,
 // one client's mtime differs from everyone else's, permanently and by design.
-// docs/multiclient-test-plan.md §2.6 defines convergence on content for exactly
+// docs/dev/multiclient-test-plan.md §2.6 defines convergence on content for exactly
 // this reason.
 func TestDownloadCarriesTheRemoteModifiedTime(t *testing.T) {
 	dir := t.TempDir()

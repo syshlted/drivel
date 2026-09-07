@@ -377,7 +377,7 @@ func (e *Engine) Push(ctx context.Context, ev fsevent.Event) { e.handle(ctx, ev)
 // "[sync] push" lines in a log were failures — so from the outside a working
 // upload and an upload that never happened were the same silence. That is a bad
 // property for a filesystem whose whole job is to move bytes somewhere else, and
-// it made the transfer-volume half of docs/multiclient-test-plan.md §2.7
+// it made the transfer-volume half of docs/dev/multiclient-test-plan.md §2.7
 // unmeasurable.
 func (e *Engine) push(ctx context.Context, ev fsevent.Event) error {
 	switch ev.Op {

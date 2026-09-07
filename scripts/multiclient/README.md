@@ -1,7 +1,7 @@
 # Multi-client rig (Tier B)
 
 Three real `drivel` processes against one Drive folder. The plan these implement
-is [`docs/multiclient-test-plan.md`](../../docs/multiclient-test-plan.md); the
+is [`docs/multiclient-test-plan.md`](../../docs/dev/multiclient-test-plan.md); the
 deterministic half of it (Tier A) is `TestFleet*` in `internal/app`, which needs
 no network and runs under `-race` with the rest of the suite.
 

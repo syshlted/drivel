@@ -11,7 +11,7 @@ import (
 	"time"
 )
 
-// The debug profiling endpoint (docs/multiclient-test-plan.md §2.7).
+// The debug profiling endpoint (docs/dev/multiclient-test-plan.md §2.7).
 //
 // /proc answers "did it grow" — RSS, CPU, disk, fds, threads — and nothing else.
 // It cannot answer "what grew", and the questions the soak case (MC-53) is

@@ -86,35 +86,40 @@ You now have everything Drivel needs.
 
 ## Step 5 — Feed the credentials to Drivel
 
-Run the wizard:
-
 ```sh
-drivel login
+drivel login -account personal
 ```
 
-Provide the client ID/secret two ways:
+`-account NAME` scopes the login: credentials and token are written under
+`~/.config/drivel/NAME/`, and an `[account.NAME]` block is appended to
+`~/.config/drivel/config.toml`. Without it, the wizard writes `credentials.json`
+and `token.json` into the working directory instead — fine for a single mount
+driven by flags.
 
-- **Interactively:** paste them when prompted, or place the downloaded JSON at
-  `./credentials.json` and the wizard will read the ID/secret from it (press Enter
-  to keep the found values).
-- **Non-interactively:**
+Provide the client ID and secret either way:
 
-  ```sh
-  drivel login -client-id <ID> -client-secret <SECRET> -scope drive
-  ```
+- **Interactively** — paste them when prompted, or put the downloaded JSON at
+  `./credentials.json` and press Enter to accept what the wizard finds in it.
+- **Non-interactively** — `drivel login -client-id ID -client-secret SECRET
+  -scope drive`.
 
-The wizard writes `credentials.json`, prints an authorization URL, and captures
-the OAuth result. It runs a loopback server on port **53682** (rclone's port) to
-catch the browser redirect automatically; if the browser can't reach that address
-(e.g. inside a container without the port forwarded), paste the full redirect URL
-— or just the `code=` value — from the address bar into the prompt. On success it
-saves `token.json` and prints the authenticated account.
+The wizard then prints an authorization URL and captures the result: a loopback
+server on port **53682** catches the browser redirect automatically, and if the
+browser cannot reach that address you paste the redirect URL — or just the
+`code=` value — into the prompt. On success it saves the token and prints the
+account you signed in as.
 
-Then mount with sync enabled:
+Then mount:
+
+```sh
+drivel mount                     # everything in the config file
+```
+
+or, with flags only:
 
 ```sh
 drivel mount -mount ./mnt -data ./data \
-  -credentials credentials.json -token token.json -drive-root <folderID>
+  -credentials credentials.json -token token.json
 ```
 
 ---
@@ -128,42 +133,36 @@ grants:
 |------------------|------------------------------------------------------------|----------|
 | `drive`          | Full read/write to all files in your Drive                 | A general sync mount (recommended). |
 | `drive.readonly` | Read-only to file metadata and contents                    | You only want inbound sync / a mirror. |
-| `drive.file`     | Only files the app itself creates or opens                 | You want Drivel sandboxed to its own files. |
+| `drive.file`     | Only files the app itself creates or opens                 | Rarely usable — see the caveat below. |
 
 Narrower is safer; `drive` is the most convenient for a two-way mount. To change
 scope later, re-run `drivel login` with a different `-scope` — the new consent
 replaces the old token.
 
+**A caveat on `drive.file`.** It sounds like the safe default and is not, for a
+structural reason: the only way to grant it access to files that already exist is
+through Google's Picker, a JavaScript component, and `drivel login` is a
+terminal flow with no browser surface to host one. Files you already have would
+be *invisible* to Drivel rather than merely read-only. The scope is plumbed and
+untested; it suits a folder Drivel creates and owns from scratch, which is not
+how it is used today.
+
 ## Troubleshooting
 
-- **`403 access_denied` / "app is being tested" at consent.** The signed-in
-  account isn't in the **Test users** list (Step 3.4). Add it, or use an Internal
-  app type if you have Workspace.
-- **`403 accessNotConfigured` on Drive calls.** The Drive API isn't enabled for
-  the project (Step 2), or you enabled it in a *different* project than the client
-  ID belongs to.
-- **`redirect_uri_mismatch`.** The OAuth client is the wrong type. It must be
-  **Desktop app** (Step 4.2), which permits loopback redirects.
-- **Login works, then breaks after ~a week.** Refresh tokens for **unverified,
-  Testing-status** apps can expire after ~7 days. Just re-run `drivel login`. To
-  avoid it, publish the app (adds a Google review) or use an Internal Workspace
-  app.
-- **The loopback capture never fires (container/headless).** Forward the port
-  (`docker run -p 127.0.0.1:53682:53682 …`) or use the **paste fallback** — copy
-  the redirect URL from the browser into the prompt. You can also pass `-port 0`
-  to let the OS pick a free port.
-- **Leaked a secret?** In **Credentials**, delete the OAuth client (or reset its
-  secret) and create a new one. Deleting the client immediately invalidates tokens
-  minted from it.
+The errors this setup produces — `access_denied`, `accessNotConfigured`,
+`redirect_uri_mismatch`, a login that stops working after a week, a loopback
+capture that never fires — are collected in
+[Troubleshooting → Login and credentials](troubleshooting.md#login-and-credentials).
 
-## What Drivel stores, and where
+## What this produces, and where it lives
 
-- `credentials.json` — your OAuth **client ID/secret**. Identifies *your project*
-  to Google. Secret; gitignored.
-- `token.json` — the **access/refresh token** for your account, obtained by the
-  login flow. Secret; gitignored.
-- `drivel-state.db` — sync bookkeeping (change-feed cursor + echo records). Not a
-  credential, but kept outside the backing tree so it isn't synced to Drive.
+`credentials.json` identifies *your project* to Google; `token.json` is your
+account's access and refresh token. Both are secrets, both are written `0600`,
+and both are gitignored in this repo. [Installing → Where Drivel keeps
+things](install.md#where-drivel-keeps-things) has the full list of paths.
+
+If a secret leaks, delete the OAuth client in the Cloud Console — that
+invalidates every token minted from it immediately — and create a new one.
 
 Drivel bundles no application secrets and collects no analytics or telemetry. All
 Drive traffic is directly between your machine and Google, under the app identity

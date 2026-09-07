@@ -16,7 +16,7 @@ this repo.
    derived from the module path.
 
 2. **A valid `go.mod` with a real Go version.**
-   Already present (`go 1.26.1`). Run `go mod tidy` so `go.sum` is complete and
+   Already present (`go 1.27.1`). Run `go mod tidy` so `go.sum` is complete and
    committed; the proxy verifies checksums.
 
 3. **A semver tag.**

@@ -80,6 +80,11 @@ func TestEnumerateDropsObjectsOutsideTheMountRoot(t *testing.T) {
 		file("id-loose", "loose.txt", "id-vanished"), // parent not in the listing at all
 	)
 	// Mount the "mine" folder rather than My Drive.
+	//
+	// Pinned to the flat sweep on purpose: a concrete root selects the M7c descent
+	// under auto, which never lists what is outside the root and so would pass this
+	// test without ever exercising the rule it is named for.
+	d.sweepMode = SweepFlat
 	d.root = "id-mine"
 	d.rootID = ""
 	d.idByPath = map[string]string{"": "id-mine"}

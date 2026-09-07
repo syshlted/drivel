@@ -2,8 +2,9 @@
 
 Two views of Drivel: the **runtime components** (what talks to what while a mount
 is live) and the **code structure** (how the packages depend on each other).
-These complement the prose in [DESIGN.md](../DESIGN.md); the section numbers below
-point back to it.
+These complement the prose in [DESIGN.md](../../DESIGN.md); the section numbers below
+point back to it. For the *dynamic* view — the order things actually happen in a
+push, a pull, a sweep or a hydration — see [Workflows](workflows.md).
 
 ## Component overview (runtime)
 
@@ -84,8 +85,12 @@ Key points, mapped to DESIGN.md:
 - **Enumeration & reconcile** (§9, M7b — always on): the change feed only reports
   what changes after a cursor is taken, so the downloader sweeps the whole remote
   tree once (`provider.Enumerator`) before it starts tailing — on a first run, a
-  resumed sweep, an expired cursor, or `-resync`. Two rules carry it: the start
-  token is taken *before* the sweep and adopted *after* it, and a deletion is
+  resumed sweep, an expired cursor, or `-resync`. Since M7c the walk has two
+  shapes — a scoped breadth-first descent from the mount root, or a flat listing
+  of the whole account — and neither dominates; see
+  [Workflows §4](workflows.md#scoped-versus-flat-enumeration-m7c). Two rules carry
+  it whichever runs: the start token is taken *before* the sweep and adopted
+  *after* it, and a deletion is
   inferred only from a baseline (the §4 echo records plus the sweep's own
   per-generation seen marks), never from a file being absent on one side. So the
   first-ever run deletes nothing.
@@ -172,8 +177,11 @@ What the graph enforces:
   that imports `transport` and `gauth`.
 - **`vfs` implements `mount.Backend`** and speaks `fsevent`, but knows nothing
   about providers or sync — a mutation just becomes an event.
-- **`cmd/drivel` is the composition root**: it is the one place that wires a
-  concrete backend, provider, engine, and state store together.
+- **`internal/app` is the composition root**, and `cmd/drivel` is only the flag
+  layer above it. `app` is where a concrete backend, provider, engine and state
+  store are wired together for one mount, and where N of them are supervised;
+  `cmd/drivel` maps flags and config to specs and hands them over. `app` names a
+  provider *kind*, never a type.
 - **`hydrate` depends only on `provider`** and `ranges`, and its consumers reach it
   through small interfaces they declare themselves (`mount.Hydrator`,
   `syncengine.Placeholders`, `syncengine.Materializer`). So `vfs` still knows

@@ -48,6 +48,8 @@ drivel \- Drive-backed FUSE interceptor filesystem
 .IR file ]
 .RB [ -drive-root
 .IR id ]
+.RB [ -drive-sweep-mode
+.IR mode ]
 .RB [ -lazy ]
 .RB [ -xattr ]
 .RB [ -resync ]
@@ -177,6 +179,26 @@ Drive folder ID mapped to the mount root. Use
 .B root
 for the My Drive root. Default:
 .BR root .
+.TP
+.BI -drive-sweep-mode " mode"
+How the enumeration sweep walks Drive.
+.B scoped
+descends from
+.B -drive-root
+one directory at a time, so the cost is proportional to the folder mounted.
+.B flat
+lists the whole account, one request per thousand objects, and filters afterwards.
+.B auto
+(the default) descends unless
+.B -drive-root
+names the whole Drive, where there is no subtree to save.
+.IP
+A descent spends roughly one request per directory, where a flat listing spends one
+per thousand objects in the account, so a subtree holding a very large number of
+near-empty directories can be cheaper to sweep
+.BR flat .
+Drivel logs when a descent looks folder-dense rather than leaving it to be
+discovered.
 .TP
 .B -lazy
 Enable lazy hydration. Remote files are materialised in the backing directory as
@@ -475,13 +497,14 @@ warns about the buffer size, raise it with
 .B drivel
 is built and tested on
 .BR Linux ,
-on every architecture Go supports. It also compiles for
+on every architecture Go supports, and on
+.B FreeBSD
+15.1, where the full test suite has been run with nothing skipped. It also
+compiles for
 .B macOS
-(amd64 and arm64) and
-.BR FreeBSD ,
-but those builds are
+(amd64 and arm64), but that build is
 .I unverified
-\(em they have never been run against a live Drive. Treat them accordingly.
+\(em it has never been run against a live Drive. Treat it accordingly.
 .B Windows
 is not supported and is not planned; use WSL2, or Google's native Drive client.
 Other Unixes (OpenBSD, NetBSD, Solaris, illumos, AIX) lack a Go FUSE binding.
@@ -495,13 +518,13 @@ and only Linux has procfs. Supply
 .I -data
 on other platforms.
 .TP
-.B -lazy is untested on macOS and FreeBSD
+.B -lazy is untested on macOS
 Lazy hydration marks undownloaded files with an extended attribute, which is what
 prevents an empty placeholder being uploaded over live remote content.
 .B drivel
-implements extended attributes on all three platforms, but has never been run on a
-Mac or on FreeBSD: treat lazy mode there as untested and prefer the default eager
-mode.
+implements extended attributes on all three platforms, and FreeBSD has been
+verified, but the code has never been run on a Mac: treat lazy mode there as
+untested and prefer the default eager mode.
 .TP
 .B -lazy is unsafe without extended attributes, on any platform
 If the marker cannot be written there is no record that a file is a placeholder at
@@ -648,12 +671,22 @@ on a clean unmount,
 on an unknown command or flag-parse error, and non-zero on a fatal mount, auth,
 or sync-setup error.
 .SH SEE ALSO
-Project design notes in
-.IR DESIGN.md ,
-setup guide in
-.IR README.md ,
-and Google credential setup in
-.IR docs/google-cloud-setup.md .
+.BR fusermount3 (1),
+.BR mount (8)
+.PP
+User documentation in
+.IR docs/user/ :
+.I quickstart.md
+to get started,
+.I configuration.md
+for every flag and config key,
+.I google-cloud-setup.md
+for Google credentials,
+.I data-safety.md
+for conflict and deletion behaviour, and
+.I troubleshooting.md
+when something goes wrong. Contributor documentation is in
+.IR docs/dev/ .
 .SH LICENSE
 Copyright (C) 2026 SystemHalted and Jeremy Melanson.
 .PP

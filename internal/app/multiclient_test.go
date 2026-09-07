@@ -19,7 +19,7 @@ import (
 	"github.com/zishmusic/drivel/internal/testenv"
 )
 
-// Several drivel instances against one remote — the shape docs/multiclient-test-plan.md
+// Several drivel instances against one remote — the shape docs/dev/multiclient-test-plan.md
 // calls Tier A.
 //
 // What only a fleet can show: §4 echo suppression is per client, so a push by one

@@ -15,7 +15,7 @@
 # is 1000 irreversible deletes to save nothing.
 #
 # Each scenario therefore gets a NEW Drive folder, created by a human, per
-# safety precondition 1 in docs/multiclient-test-plan.md §2.1. This script will
+# safety precondition 1 in docs/dev/multiclient-test-plan.md §2.1. This script will
 # not create one: -drive-root root is the documented catastrophic configuration
 # and nothing here should be able to reach for it by accident.
 #
@@ -149,7 +149,7 @@ MD
 # Scenario registry
 
 One rig per scenario, each with its own Drive folder. See
-`docs/multiclient-test-plan.md` §2.2 and `scripts/multiclient/scenario.sh`.
+`docs/dev/multiclient-test-plan.md` §2.2 and `scripts/multiclient/scenario.sh`.
 
 Never run two fleets at once: they share a Drive account, so the second one's
 traffic lands in the first one's quota and request-rate measurements.

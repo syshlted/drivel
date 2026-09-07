@@ -90,6 +90,15 @@ type Drive struct {
 	close func() error // shuts down the HTTP/3 transport
 	root  string       // Drive folder ID mapped to the mount root ("" => My Drive root)
 
+	// sweepMode selects how Enumerate walks the tree (M7c). Fixed at open time.
+	sweepMode SweepMode
+	// fanout overrides how many folder listings a scoped sweep issues at once.
+	// Zero means enumFanout. It exists as a field rather than a constant so a test
+	// can run the same fixture at one and at eight and compare, which is the only
+	// way to show the concurrency is doing anything — and so the number has
+	// somewhere to live if Drive ever turns out to rate-limit at eight.
+	fanout int
+
 	// lg is where this instance writes. Per instance rather than the package
 	// default because one process may hold several Drives, and a line that does
 	// not say which mount it came from is close to useless (M8).
@@ -157,6 +166,11 @@ type Config struct {
 	// disables persistence, which costs API round trips and nothing else. It must
 	// not sit inside the backing tree, or it would sync itself to Drive.
 	IndexPath string `toml:"index"`
+	// SweepMode selects how the M7b/M7c enumeration sweep walks the tree:
+	// "flat" lists the whole account, "scoped" descends from the mount root, and
+	// "" or "auto" picks by whether RootID names a concrete folder. See
+	// enumerate_scoped.go for why neither is right for every shape of Drive.
+	SweepMode SweepMode `toml:"sweep-mode"`
 	// Scope is the OAuth scope the token was granted, as `drivel login` recorded
 	// it. Empty means gauth.ScopeDrive.
 	//
@@ -177,6 +191,11 @@ func open(ctx context.Context, cfg Config, lg *log.Logger) (*Drive, error) {
 	if lg == nil {
 		lg = log.Default()
 	}
+	// An unreadable value here is the same failure M8 rule 6 makes an unknown key:
+	// a mount that silently sweeps the wrong way is a cost nobody can see.
+	if !cfg.SweepMode.valid() {
+		return nil, fmt.Errorf("sweep-mode %q: want \"auto\", \"flat\" or \"scoped\"", cfg.SweepMode)
+	}
 	client, closer, err := buildHTTPClient(ctx, cfg.Credentials, cfg.Token, cfg.Scope)
 	if err != nil {
 		return nil, err
@@ -187,13 +206,14 @@ func open(ctx context.Context, cfg Config, lg *log.Logger) (*Drive, error) {
 		return nil, fmt.Errorf("creating drive service: %w", err)
 	}
 	d := &Drive{
-		svc:      svc,
-		close:    closer,
-		lg:       lg,
-		root:     cfg.RootID,
-		idByPath: map[string]string{"": cfg.RootID},
-		pathByID: map[string]string{cfg.RootID: ""},
-		kids:     map[string]map[string]struct{}{},
+		svc:       svc,
+		close:     closer,
+		lg:        lg,
+		root:      cfg.RootID,
+		sweepMode: cfg.SweepMode,
+		idByPath:  map[string]string{"": cfg.RootID},
+		pathByID:  map[string]string{cfg.RootID: ""},
+		kids:      map[string]map[string]struct{}{},
 	}
 	if cfg.IndexPath != "" {
 		// A failure here is not fatal: the index only ever saves work, so we log it

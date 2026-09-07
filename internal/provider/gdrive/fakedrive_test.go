@@ -17,6 +17,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -78,6 +79,41 @@ type fakeDrive struct {
 	// expirePageTokens makes the next paginated request answer 410, as Drive does
 	// for a listing or change token that has aged out.
 	expirePageTokens bool
+
+	// childDelay stands in for a network round trip on the one request shape M7c
+	// issues concurrently. Without it the fake answers instantly and a sweep that
+	// fans out is indistinguishable from one that does not — every request here
+	// serialises behind f.mu, so the concurrency claim is untestable by default
+	// rather than merely unmeasured. The sleep is taken *before* the lock, for the
+	// same reason nameGate is: holding f.mu across it would serialise the very
+	// thing being measured.
+	childDelay time.Duration
+
+	// childRateLimit makes the next N child listings answer 403
+	// userRateLimitExceeded, which is how Drive says "too fast". It counts down
+	// under f.mu, so a fanned-out batch consumes several at once — which is the
+	// case worth testing, since the whole question M7c leaves open is what happens
+	// when several concurrent listings are throttled together.
+	childRateLimit int
+
+	// childFailEvery makes every Nth child listing answer 403, so a throttle lands
+	// on part of a fanned-out batch rather than on all of it. That is the case the
+	// counter above cannot reach and the one that says what concurrency costs when
+	// Drive pushes back.
+	childFailEvery int
+	childSeen      int
+
+	// childInFlight / childPeak record how many child listings are actually in
+	// the server at once. Atomics rather than f.mu because the interesting window
+	// spans childDelay, which is taken *outside* that lock — measuring it inside
+	// would report 1 forever and prove nothing.
+	childInFlight atomic.Int32
+	childPeak     atomic.Int32
+
+	// childPage overrides fakeChildPage. A concurrency measurement wants folders
+	// that do not page, because paging inside one folder is inherently sequential
+	// (the next token comes from the previous response) and would muddy the ratio.
+	childPage int
 
 	// changeLog is the changes.list feed, and it is modelled the way Drive's own
 	// is: one entry per *object* whose state changed, carrying that object's
@@ -234,6 +270,21 @@ func (f *fakeDrive) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if f.nameGate != nil && isNameQuery(r) {
 		f.nameGate.arrive()
 	}
+	// Likewise before the lock, and likewise safe to read unsynchronised: both are
+	// set before any client is started.
+	if isChildQuery(r) {
+		n := f.childInFlight.Add(1)
+		for {
+			peak := f.childPeak.Load()
+			if n <= peak || f.childPeak.CompareAndSwap(peak, n) {
+				break
+			}
+		}
+		defer f.childInFlight.Add(-1)
+		if f.childDelay > 0 {
+			time.Sleep(f.childDelay)
+		}
+	}
 
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -258,11 +309,20 @@ func (f *fakeDrive) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	case r.URL.Path == "/files" && r.Method == http.MethodGet:
 		f.lists++
-		if q := r.URL.Query().Get("q"); q == sweepQuery {
+		switch q := r.URL.Query().Get("q"); {
+		case q == sweepQuery:
 			f.serveSweep(w, r.URL.Query().Get("pageToken"))
-			return
+		case reQueryOne.MatchString(q):
+			// name = '<name>' and '<parent>' in parents — a path lookup (M7).
+			writeJSON(w, map[string]any{"files": f.query(q)})
+		case reQueryTwo.MatchString(q):
+			// '<parent>' in parents, with no name — a scoped descent listing one
+			// folder's children (M7c). Real Drive tells the two apart by result;
+			// the fake has to tell them apart by shape, because only this one pages.
+			f.serveChildren(w, q, r.URL.Query().Get("pageToken"))
+		default:
+			writeJSON(w, map[string]any{"files": []*drive.File{}})
 		}
-		writeJSON(w, map[string]any{"files": f.query(r.URL.Query().Get("q"))})
 
 	case r.URL.Path == "/files" && r.Method == http.MethodPost:
 		// Metadata-only create: a folder, or an empty file. The body-bearing form
@@ -315,6 +375,16 @@ func isNameQuery(r *http.Request) bool {
 		strings.Contains(r.URL.Query().Get("q"), "name = '")
 }
 
+// isChildQuery matches the one listing shape a scoped descent issues: a folder's
+// children, with no name clause to make it a path lookup.
+func isChildQuery(r *http.Request) bool {
+	if r.URL.Path != "/files" || r.Method != http.MethodGet {
+		return false
+	}
+	q := r.URL.Query().Get("q")
+	return q != sweepQuery && reQueryTwo.MatchString(q) && !reQueryOne.MatchString(q)
+}
+
 // serveUpload handles create-with-body (POST) and update-with-body (PATCH).
 func (f *fakeDrive) serveUpload(w http.ResponseWriter, r *http.Request) {
 	in, body, err := readUpload(r)
@@ -347,7 +417,7 @@ func (f *fakeDrive) serveUpload(w http.ResponseWriter, r *http.Request) {
 //
 // A payload larger than uploadChunkSize becomes a resumable session instead,
 // which this fake deliberately does not implement. That protocol is Tier B's
-// business (MC-10 in docs/multiclient-test-plan.md) — it is exactly the part of
+// business (MC-10 in docs/dev/multiclient-test-plan.md) — it is exactly the part of
 // an upload that only a real server can be wrong about, so speaking it here
 // would prove nothing and would hide the day a test starts needing it.
 func readUpload(r *http.Request) (*drive.File, []byte, error) {
@@ -551,6 +621,79 @@ func (f *fakeDrive) serveSweep(w http.ResponseWriter, token string) {
 	writeJSON(w, res)
 }
 
+// fakeChildPage is the scoped descent's page size, tiny for the same reason
+// fakeEnumPage is: a folder that pages is the only way to reach the code that
+// puts a half-listed folder back on the frontier.
+const fakeChildPage = 2
+
+// serveChildren answers one page of one folder's direct children, which is the
+// only listing shape M7c's descent issues.
+func (f *fakeDrive) serveChildren(w http.ResponseWriter, q, token string) {
+	if f.expirePageTokens && token != "" {
+		f.expirePageTokens = false // only the resumed token is stale
+		writeErr(w, http.StatusGone, "Page token expired")
+		return
+	}
+	if f.childRateLimit > 0 {
+		f.childRateLimit--
+		writeRateLimit(w)
+		return
+	}
+	if f.childFailEvery > 0 {
+		f.childSeen++
+		if f.childSeen%f.childFailEvery == 0 {
+			writeRateLimit(w)
+			return
+		}
+	}
+	m := reQueryTwo.FindStringSubmatch(q)
+	kids := f.childrenOf(f.normalize(m[1]))
+
+	start := 0
+	if token != "" {
+		start, _ = strconv.Atoi(strings.TrimPrefix(token, "kids-"))
+	}
+	if start > len(kids) {
+		start = len(kids)
+	}
+	size := fakeChildPage
+	if f.childPage > 0 {
+		size = f.childPage
+	}
+	end := start + size
+	if end > len(kids) {
+		end = len(kids)
+	}
+	res := map[string]any{"files": kids[start:end]}
+	if end < len(kids) {
+		res["nextPageToken"] = fmt.Sprintf("kids-%d", end)
+	}
+	writeJSON(w, res)
+}
+
+// resetChildPeak forgets the high-water mark, so a measurement can ignore the
+// batches a descent issued before it had any throttling to react to.
+func (f *fakeDrive) resetChildPeak() { f.childPeak.Store(0) }
+
+// childrenOf is every non-trashed direct child of one folder, in a fixed order so
+// paging is reproducible.
+func (f *fakeDrive) childrenOf(parentID string) []*drive.File {
+	var out []*drive.File
+	for _, file := range f.files {
+		if file.Trashed || file.Id == parentID {
+			continue
+		}
+		for _, p := range file.Parents {
+			if f.normalize(p) == parentID {
+				out = append(out, file)
+				break
+			}
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Id < out[j].Id })
+	return out
+}
+
 // sweepFiles is everything a flat listing returns: not trashed, and never the
 // root folder itself (files.list does not report it, which is why the provider
 // has to recognise the root by ID rather than by finding it in the listing).
@@ -621,4 +764,21 @@ func writeJSON(w http.ResponseWriter, v any) {
 func writeErr(w http.ResponseWriter, code int, msg string) {
 	w.WriteHeader(code)
 	writeJSON(w, map[string]any{"error": map[string]any{"code": code, "message": msg}})
+}
+
+// writeRateLimit is what Drive answers when a user is asking too fast, and the
+// shape matters: the status is 403, not 429, and only the reason inside tells it
+// apart from a permission failure. isTransient reads exactly that, so a fake that
+// wrote a bare 403 would be testing the wrong classification.
+func writeRateLimit(w http.ResponseWriter) {
+	w.WriteHeader(http.StatusForbidden)
+	writeJSON(w, map[string]any{"error": map[string]any{
+		"code":    http.StatusForbidden,
+		"message": "User rate limit exceeded.",
+		"errors": []map[string]any{{
+			"domain":  "usageLimits",
+			"reason":  "userRateLimitExceeded",
+			"message": "User rate limit exceeded.",
+		}},
+	}})
 }

@@ -5,7 +5,7 @@
 # long that took. Exits non-zero on timeout, after printing the first difference.
 #
 # "Converged" is one definition used by every case, or results are not comparable
-# across cases or across runs (docs/multiclient-test-plan.md §2.6):
+# across cases or across runs (docs/dev/multiclient-test-plan.md §2.6):
 #
 #   - content equality, not log silence. The poll cadence backs off to 30s, so a
 #     quiet log is ambiguous; agreement on bytes is not.

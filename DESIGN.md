@@ -1077,6 +1077,18 @@ are both lossy and racy.
      One flat listing, roughly **one request per 1000 objects**, no content
      transferred and no local files created. Cheap enough to be the default, and it
      is: a mount with no cursor yet sweeps before it starts tailing.
+
+     **The unit of that cost is the account, not the mount, and this entry failed
+     to say so for three milestones.** `listPage` asks for `trashed = false` across
+     the whole of `spaces=drive` and filters to the mount root *afterwards*, by
+     parking objects on parents it has not seen yet — so a mount of one folder
+     inside a large Drive pays for every object in the Drive. MC-11 measured the
+     shape (11 129 objects listed to keep 10 101) and read it as a tidiness problem
+     about leftovers from other scenarios; it is not, it is the scaling law. At 10^6
+     objects it is ~1000 *strictly sequential* pages — page tokens cannot be
+     prefetched — and N mounts on one account each pay it in full, on every first
+     run, every dead cursor and every `-sweep-interval`. **M7c** replaces it for
+     subfolder mounts.
    - *Materialisation* — create local entries for remote objects that have no local
      counterpart. Under `-lazy` these are placeholders: metadata only, effectively
      free, and the whole Drive becomes visible for the price of the sweep. In eager
@@ -1291,14 +1303,154 @@ are both lossy and racy.
    claim we hold content we do not), and the pull loop skips them with a log instead
    of failing a download on every report. Shared-with-me files stay out of scope by
    construction: they are not under the My Drive root, so a root-scoped sweep excludes
-   them — a decision, not an accident. Sharding the sweep (list folders first, then
-   fan out) remains unbuilt, because one sequential pagination has not been measured
-   to be too slow and building for that on speculation is how a cheap sweep becomes an
-   expensive one.
+   them — a decision, not an accident.
+
+   **Sharding the sweep is no longer speculative, and this entry's reason for
+   deferring it has expired.** It said that one sequential pagination "has not been
+   measured to be too slow" — the right test to set, and the wrong answer to assume
+   in the meantime. It has now been measured, on a Drive holding 10^5–10^6 files:
+   the sweep costs minutes, per mount, repeated for every folder mounted from the
+   same account. The work moves to **M7c**, which is that same "list folders first,
+   then fan out" plus the scoping that is most of why it is worth doing. What this
+   entry got right is the caution — a sweep that fans out is a sweep that can cost
+   more, and M7c keeps the flat listing for the case where it still wins.
 
    **Not in scope:** dedup, periodic full scans (the cursor feed stays the steady
    state), and any content transfer in lazy mode.
-9. **M8 — Multi-account & multi-provider mounts.** ✅ Shipped. §2.8 has the design;
+9. **M7c — Scoped enumeration.** ✅ Shipped, and owed a live measurement. M7b made
+   a pre-existing Drive visible; M7c makes the bill for that proportional to what
+   was actually mounted.
+
+   **The defect M7b shipped with.** `listPage` asks Drive for `trashed = false`
+   across the whole of `spaces=drive` and sorts the result into the mount root
+   afterwards, by parking each object on a parent it may not have seen yet. So the
+   unit of cost is the *account*: a mount of one folder inside a large Drive pays
+   one request per 1000 objects in the Drive, in strictly sequential pages (a page
+   token cannot be prefetched), and every other mount of that account pays it again
+   in full — on every first run, every dead cursor and every `-sweep-interval`. At
+   10^6 objects that is ~1000 round trips, measured in minutes. MC-11 saw the shape
+   and filed it as untidy test leftovers; it is the scaling law.
+
+   **Drive offers nothing cheaper to ask for.** There is no recursive "everything
+   below this folder" query — `'ID' in parents` returns direct children only —
+   which is why the flat listing was the reasonable first answer and why the fix is
+   a client-side descent rather than a better query.
+
+   **What M7c does.** A breadth-first walk from the mount root: one listing per
+   folder, with the frontier fanned out over `enumFanout` (8) concurrent requests
+   per `Enumerate` call. A folder holding more children than one page goes back on
+   the frontier rather than being drained in place, so no single call is unbounded
+   — MC-52 watches exactly that. Against a subfolder mount the unit tests measure
+   **1 listing against the flat sweep's 12** for the same fixture; the shape of that
+   ratio, not the number, is the claim.
+
+   Two things fall out that are worth more than the speed.
+
+   - **The descent is parent-first by construction**, so none of M7b's parking
+     machinery applies: a child is only discovered by listing its parent, so its
+     path is known the moment it appears. `waiting`, the parked count and the
+     "still parked ⇒ outside the mount" rule are the flat path's alone. This
+     removes the subtlest code in M7b from the common case rather than adding to it.
+   - **Resume stops mattering.** M7b persists a sweep cursor because losing a
+     full-account sweep is expensive, and needs the M7 index to stand in for pages a
+     previous process consumed. A descent of the folder actually mounted is short
+     enough to restart, which is what a cursor arriving with no frontier behind it
+     does. One less thing that can be half-right after a crash.
+
+   **It is not a free win, and the mode is therefore selectable.** A descent costs
+   about one request per *folder*; the flat sweep costs one per 1000 *account
+   objects*. So a subtree with more folders than the account has thousands of
+   objects is cheaper to sweep flat — a deep tree of near-empty directories inside a
+   small account is the losing shape. `sweep-mode` (`-drive-sweep-mode`) takes
+   `auto`, `flat` or `scoped`; **auto descends whenever `-drive-root` names a
+   concrete folder and lists the account when it names the whole Drive**, which is
+   the one case where the descent has no subtree to save and would pay per folder
+   for the privilege. An unreadable value is refused at open, which is M8 rule 6
+   applied to a value rather than a key. A descent that has spent far more requests
+   than it has found objects says so once, and names `flat` — the "no silent caps"
+   rule: a cost the user cannot see is one they report as a hang.
+
+   **The rejected alternative, recorded because it is the obvious one.** Google's
+   `drive.file` scope ("per-file access to files created or opened by the app")
+   would fix this at the source, since `files.list` under it returns only what the
+   app can see. drivel already offers it — `drivel login -scope drive.file`, stored
+   per account — and it is **untested; no test in the tree references it.** It is
+   nonetheless the wrong tool for this problem, for a reason that is structural
+   rather than a matter of effort: under `drive.file` an app reaches files it
+   *created*, or that the user hands it **through the Google Picker**, which is a
+   JavaScript component. `drivel mount` is non-interactive and `drivel login` is a
+   loopback/paste flow with no browser surface to host one, so there is no mechanism
+   by which a user could grant drivel access to a folder that already exists. Their
+   files would simply be invisible, which converts a slow sweep into no sync at all.
+   There is a second blocker underneath: `resolveRootLocked` resolves the `root`
+   alias with `Files.Get("root")`, and root-folder access is documented as
+   unavailable under that scope. Where `drive.file` *is* right is a folder drivel
+   creates and owns, for a user who wants the narrower grant — that case deserves a
+   live test it has never had, and it is not this milestone.
+
+   **What M7c does not fix.** `changes.list` has no folder filter, so the steady
+   state is still one account-wide feed per mount, filtered client-side. At one poll
+   per 30 s that is a quota cost rather than a latency one, and the fix — one poller
+   per account, fanning out to the mounts whose root contains each change — is
+   cross-mount coupling of exactly the kind M8's guards exist to prevent. It waits
+   for evidence that the quota actually bites.
+
+   **Tested, and what is still owed.** There are two claims here and they need
+   different instruments. The *request-count* claim is a ratio a fake can answer
+   directly: 1 listing against the flat sweep's 12, for one file in a 23-object
+   account. The *wall-clock* claim could not be answered there at all until the fake
+   was changed — every request in it serialises behind one mutex, so a sweep that
+   fans out was indistinguishable from one that does not, which made that claim
+   untestable rather than merely unmeasured. With a round trip injected on the
+   child-listing shape only, and taken *before* that mutex, the same fixture at
+   fanout 1 and fanout 8 measures **1.03 s against 165 ms — 6.3×**, where the ideal
+   for 33 requests eight at a time is ~5 batches. Both halves were confirmed
+   load-bearing by breaking them: making `listBatch` sequential collapses the ratio
+   to 1.0× and fails on the concurrency assertion, and dropping the injected delay
+   fails on the separate one saying the delay never arrived.
+
+   **Throttling was the open question, and asking it found a defect.** Drive answers
+   "too fast" with 403 and a `userRateLimitExceeded` reason, which `isTransient`
+   already classified as retryable — so the first test, one that throttles whole
+   batches, passed immediately: the sweep finishes, every path is found, and the
+   error reaches `Downloader.start` as retryable rather than stranding inbound sync.
+   The second test is the one that mattered. A throttle landing on *part* of a
+   fanned-out batch made the descent put the batch back **whole**, discarding up to
+   seven listings that had already succeeded. At fanout 8 a 20% refusal rate spoils
+   ~83% of batches, so re-issuing all eight fed the throttle it was reacting to:
+   **97× the ideal request count**, measured, and close to a livelock.
+
+   Two changes, and the second exists because the first is not enough:
+
+   - **Keep what succeeded, re-queue only what failed** (at the front, so a failed
+     folder is retried before the sweep goes deeper). This alone takes the same
+     fixture from 97× to **1.2×**.
+   - **Move the concurrency toward what the provider tolerates** — halve on any
+     throttled listing, grow back by one on a clean batch, floor 1, ceiling
+     `Drive.fanout`. Request-count amplification cannot see this and the first
+     change already bounds it; what it prevents is a descent still firing eight at
+     a time at a provider that is saying no. Measured peak concurrency: **8
+     unthrottled, 2 when one listing in three is refused**, recovering to 8 once a
+     burst passes. Backing off fast and recovering slowly is the asymmetry that
+     keeps it from oscillating, and the recovery half is asserted separately
+     because without it one transient 403 pins the rest of a sweep at one listing
+     at a time — which on a large tree costs more than the throttle did.
+
+   So `Drive.fanout` is a **ceiling, not a rate**: eight is where a healthy sweep
+   sits, and the descent finds its own level below that without being told the
+   account's budget. Every claim above was confirmed load-bearing by breaking it —
+   sequential `listBatch`, no injected delay, whole-batch re-issue, no backoff, no
+   recovery — and each mutation fails the assertion that names it and no other.
+
+   What is still owed is real Drive: whether it throttles at eight concurrent
+   listings **at all**, which is now a tuning question rather than a correctness
+   one. MC-11 established that a single writer cannot burst hard enough to reach a
+   limit, so this is new territory for the codebase. It belongs in the Tier B matrix
+   beside MC-52, whose "enumeration scales with the account" finding is this one
+   seen from the other side.
+
+
+10. **M8 — Multi-account & multi-provider mounts.** ✅ Shipped. §2.8 has the design;
    what is worth recording here is what building it changed about the plan.
 
    - *Multi-account.* One process, N mounts, each with its own credentials, token,
@@ -1339,7 +1491,7 @@ are both lossy and racy.
    account asked for full access. And `-sweep-interval` existed as a flag with a
    documented default that nothing was reading into `ReconcileOptions`; the mount
    spec now carries it.
-10. **M9 — Plugin architecture.** Let third parties add providers (and eventually
+11. **M9 — Plugin architecture.** Let third parties add providers (and eventually
    mount backends) without forking. The seam already exists — `provider.Store` +
    optional `ChangeSource`/`RangeGetter` — so M9 is about the *loading* mechanism
    and its blast radius, not the interface. Go's `plugin` package is a poor fit
@@ -1349,7 +1501,7 @@ are both lossy and racy.
    should not inherit the mount's ambient credentials), failure isolation (a
    crashing plugin must not take down the mount), and versioning of the seam
    itself. Depends on M8 having proven the seam with a second registered provider.
-11. **M10 — Platform parity (macOS, then FreeBSD).** Independent of M9; nothing
+12. **M10 — Platform parity (macOS, then FreeBSD).** Independent of M9; nothing
    waits on either. The tree already cross-compiles for both (§2.9), so this is not
    a port — it is closing the two gaps that make a build that *runs* differ from a
    build that *works*. Ordered by ratio of user value to effort:
@@ -1493,7 +1645,7 @@ are both lossy and racy.
    Explicit non-goals: in-place mode off Linux (it needs an fd-relative `*at`
    loopback — §2.7, still future work) and Windows in any form (§2.9.4).
 
-12. **M11 — Deduplicating local backend (`dedup`).** A `provider.Store` whose
+13. **M11 — Deduplicating local backend (`dedup`).** A `provider.Store` whose
    "cloud" is a directory on this machine: content-addressed chunks plus a manifest
    per path, with the sync engine driving it exactly as it drives Drive. Mount a
    directory, write to it, and what lands in the store is one copy of each distinct
@@ -1604,7 +1756,7 @@ are both lossy and racy.
    as a requirement rather than an option; that is M13 wearing a local filesystem
    as a disguise, and it should be built there or not at all.
 
-13. **M12 — Encrypting backend (`crypt`).** Same shape as M11 with a different
+14. **M12 — Encrypting backend (`crypt`).** Same shape as M11 with a different
    transform, and one structural difference that makes it more interesting: it is
    most valuable *stacked over another provider*, not over a local directory.
    `crypt` over `gdrive` is client-side end-to-end encryption for Drive — the thing
@@ -1666,7 +1818,7 @@ are both lossy and racy.
      Argon2id for the KDF, a master key wrapped per file, and no key material in
      `config.toml`.
 
-14. **M13 — Block-level filesystem over a distributed database (`nosql`).** Clients
+15. **M13 — Block-level filesystem over a distributed database (`nosql`).** Clients
    talk to the database directly; files are blocks, metadata and directory entries
    are rows, and several machines mount the same tree. This is the largest item on
    the roadmap by a wide margin, and the first one where the honest answer starts
@@ -1776,7 +1928,7 @@ are both lossy and racy.
    with the write), and what happens to an open file handle when another client
    deletes the inode. Answering those is the milestone; the schema is the easy part.
 
-15. **M14 — Control & status API.** A local IPC surface so software this repo does
+16. **M14 — Control & status API.** A local IPC surface so software this repo does
    not ship can ask what drivel is doing and tell it to stop doing it: per-path and
    per-directory sync status, per-backend statistics, online/offline per backend,
    pause/resume, and shutdown. Depends on nothing but M8 — which is what makes it
@@ -1887,7 +2039,7 @@ are both lossy and racy.
    internal shape.
 
    There is already a consumer waiting: the multi-client rig
-   (`docs/multiclient-test-plan.md`, Tier B) counts uploads and downloads by
+   (`docs/dev/multiclient-test-plan.md`, Tier B) counts uploads and downloads by
    grepping log lines, which is why a push that logged nothing at all could look
    exactly like a push that never happened. A measurement surface that a test
    harness can read is the same surface a file manager wants.
@@ -1934,7 +2086,7 @@ are both lossy and racy.
    **Shape and acceptance.** `internal/control` holds the server (provider-agnostic,
    above `app`, driven by `App` because `App` owns the mounts), the engine and
    downloader grow read-only snapshot accessors, and the versioned artefact is
-   `docs/control-api.md` — the schema, not the Go types. The first client ships in
+   `docs/dev/control-api.md` — the schema, not the Go types. The first client ships in
    tree as `drivel status` / `drivel pause` / `drivel resume` / `drivel stop`,
    because an API whose only consumers are hypothetical drifts within one release,
    and because the CLI is the acceptance test: it must be writable with no access
@@ -1943,6 +2095,153 @@ are both lossy and racy.
    a write storm without the mount blocking, and an API shutdown draining byte for
    byte like a signal.
 
+
+17. **M15 — Special files, POSIX metadata, and the mount's safety options.** Not
+   started. This is MC-13 (`docs/dev/multiclient-test-plan.md` §3, Group II) promoted
+   from "define the behaviour and write it down" to a set of decisions, because an
+   audit found half of them already true by accident and the other half one-line
+   changes that close a security surface.
+
+   **What the audit found, which is most of the answer.** The M7b local walk
+   already skips everything that is not a regular file (`reconcile.go`,
+   `!e.Type().IsRegular()`), and `internal/vfs` overrides `Create`, `Open`,
+   `Mkdir`, `Rmdir`, `Unlink`, `Rename` and `Setattr` but *not* `Symlink`, `Link`
+   or `Mknod` — so those three fall through to go-fuse's `LoopbackNode`, are
+   created correctly in the backing store, and emit no `fsevent` at all. A symlink
+   or a fifo made through the mount therefore works locally and is never pushed,
+   which is rclone's default behaviour arrived at by two independent routes,
+   neither of them a decision anyone recorded. The gap is that drivel is **silent**
+   where rclone warns unless told not to be (`--skip-links`, `--skip-specials`),
+   and silence is what turns "unsupported" into a support question.
+
+   1. **`nodev` and `nosuid` are compulsory mount options, with no flag to disable
+      them.** This is a cloud-storage client: a device node or a setuid binary
+      arriving from a remote is never something a user asked for, and there is no
+      legitimate case to weigh against refusing it. On the unprivileged path they
+      are already forced — fusermount mounts FUSE filesystems `nodev,nosuid` by
+      default and only a privileged user can override that — but go-fuse also has a
+      direct-mount path that translates the strings in `MountOptions.Options` into
+      `MS_NODEV` and `MS_NOSUID`, and drivel currently passes no options at all.
+      Setting them explicitly is what makes the guarantee independent of which
+      mount path was taken and of who ran the process.
+
+      **It does not protect the backing store, and that half is the one worth
+      writing down.** In separate-dir mode `-data` is an ordinary directory on an
+      ordinary filesystem, reachable by path without going through the mount at
+      all, so a setuid bit restored there from remote metadata is live however the
+      mountpoint is flagged. The mount option narrows the blast radius; it does not
+      discharge §10.4's rule that permission metadata from a remote source is
+      executable trust and that setuid/setgid are masked by default.
+
+   2. **Hard links are refused, with `EPERM`.** No provider on the roadmap can
+      represent them, and there is no benefit in inventing a representation: what a
+      hard link buys — two names, one inode, one copy of the bytes — is precisely
+      what a path-addressed remote cannot express. `link(2)` documents `EPERM` as
+      "the filesystem containing oldpath and newpath does not support the creation
+      of hard links", so `ln` and `cp -l` produce the right diagnostic with no
+      special case. (rclone answers `ENOSYS`; `EPERM` is the more standard spelling
+      of the same refusal.)
+
+      **Refusing is strictly safer than what happens today.** `Link` is not
+      overridden, so a hard link is created in the backing store with no event —
+      and then, because both names are regular files, the M7b local walk pushes
+      **both**, as two independent remote objects that diverge from each other from
+      the first write. The user gets rclone's duplicate-copy outcome having first
+      been told the link succeeded. Revisit if enough users ask for it; this
+      decision is reversible in a way that silently-broken links are not.
+
+   3. **Non-regular files are skipped, and the skip is logged once per path.**
+      Fifos, sockets and device nodes have no byte stream to sync, so the local file
+      stays and the remote never learns of it — the behaviour the walk already has.
+      What is added is *saying so*, at both sites that make the decision (the mount,
+      when it declines to emit; the sweep, when it steps over one), plus a note in
+      the man page. A cost the user cannot see is a cost they report as a bug.
+
+   4. **POSIX mode, ownership and ACLs get two interchangeable channels, chosen per
+      mount** — the provider's own metadata where it has some, or a sidecar in the
+      backing store. Both are needed and neither is a default for everyone: putting
+      permissions into a cloud API is a disclosure some users will refuse outright,
+      and a sidecar is a file in the tree that syncs like any other. This is §10
+      moving from a design note to scheduled work, and it is what makes `setfacl` /
+      `getfacl` survive a round trip.
+
+      **Drive is the provider that shows why the sidecar cannot be dropped.**
+      Drive's metadata surface is `btime`, `content-type`, `description`, `labels`,
+      `mtime`, `owner`, `permissions`, `starred`, `viewed-by-me` and
+      `writers-can-share` — no `mode`, no `uid`, no `gid`, no `rdev`. rclone's
+      metadata framework hits the same wall: `-M` against Drive carries none of it.
+      Anything drivel does here on Drive means `appProperties`, which is a
+      deliberate use of a general-purpose key-value channel and exactly the
+      disclosure the per-mount choice exists to let a user decline.
+
+      **The record must be bound to what it describes, or it is not metadata.** A
+      sidecar is the AppleDouble hazard drivel already refuses on macOS (§2.9.1): a
+      file inside the backing tree describing another file, syncable and separable
+      from it. A §6 conflict copy of one and not the other, a rename that moves one
+      and not the other, or a partial sync is then enough to graft one file's ACL
+      onto another file's bytes. So the record names the path it describes **and**
+      carries a content digest, and one that does not match what it is attached to
+      is discarded rather than applied. Fail closed, per §10.4: a permission that
+      fails to restore is an inconvenience, and a permission restored onto the
+      wrong bytes is the failure this entry exists to prevent.
+
+      **This partially reverses §11's build-tag gate, deliberately.** §11 keeps
+      virtual xattrs out of release builds because a virtual store turns synced
+      content into filesystem metadata with no boundary anywhere. The difference
+      here is that the channel is explicit, opt-in per mount, bound to its subject,
+      and refuses `user.drivel.*` and every privileged namespace at the seam in both
+      directions — which are the conditions §11.3 asks for. §11 itself stays gated;
+      it does not inherit an exemption by resembling this.
+
+   5. **Symlinks are deferred, and the reasoning is recorded so it is not
+      re-derived.** They are the one case with real user demand and no clean answer,
+      and the work belongs after the multi-client hardening rather than before it.
+
+      The attractive idea is to represent a symlink as a small text file with a
+      human-readable header, so a user meeting it in the Drive web UI is told what
+      it is and where it points — a real improvement on rclone's bare `.rclonelink`
+      payload. **The body is right and the identity is wrong.** Deciding "this is a
+      symlink" from the *content* fails three ways, and the first is structural
+      rather than a matter of care:
+
+      - **It breaks enumeration.** The M7b sweep is one flat listing, roughly one
+        request per 1000 objects, with **no content transferred**. If symlink-ness
+        lives in the bytes, classifying the tree means downloading every small file
+        in it. Under `-lazy` it is worse: a remote pointer file materialises as a
+        placeholder, so `readlink(2)` cannot be answered without a fetch, and
+        knowing to always-hydrate it in full (the §6 conflict-copy rule) requires
+        knowing it is a symlink before fetching it. Circular.
+      - **Content-as-identity is a symlink injection channel.** Anything that can
+        write a *text file* — the web UI, a phone client, another sync tool — can
+        make every other client create a symlink at that path, pointing anywhere.
+        The converse loses data: a legitimate text file matching the header is
+        restored as a link and its content is gone.
+      - **The header becomes a permanent compatibility contract**, and one a user
+        can edit in a web UI.
+
+      Every production system that does this uses **two** signals, and the
+      out-of-band one is primary because it is the cheap filter: Cygwin marks its
+      `!<symlink>` files with the DOS System attribute and only opens files
+      carrying it, and Git LFS pairs a strict pointer format with a `.gitattributes`
+      declaration of which paths are pointers. The shape for drivel is therefore the
+      marker in provider metadata where the provider has some (on Drive,
+      `appProperties` — invisible in the web UI, surviving a rename, unforgeable
+      from the content channel), a name suffix where it does not, and the
+      human-readable body as both payload and fallback parser. That is the same
+      capability decision 4 needs, so the two ship together or not at all.
+
+      Two guards are not optional whatever the format, both borrowed from rclone:
+      **never write through a link arriving from a remote**, and refuse targets that
+      escape the mount root in either direction. `filepath.WalkDir` does not follow
+      symlinks, so the sweep is already safe — keep it that way. Reading
+      `.rclonelink` on materialisation costs almost nothing and makes an existing
+      rclone tree work, which is worth doing when the rest lands.
+
+   **Sequencing.** 1–3 are small, independent of everything else, and belong
+   *before* the next Tier B round rather than after it: they change what a fleet
+   does with a file it cannot represent, which is a thing the fleet tests observe.
+   4 is a milestone of its own and waits on the provider-metadata capability. 5
+   waits on both.
 
 ### M0 — Test & CI (cross-cutting, always open)
 
@@ -1982,7 +2281,7 @@ or `all`), which is what CI must set.
 and kept here with what it taught; 1 landed before M8, 2 and 4 during it, 3, 5 and
 6 after it. What the list does not cover, and no local item could, is the
 authorization-code exchange and the Drive calls themselves — those are Tier B's
-job (`docs/multiclient-test-plan.md`), which is where the live testing work now
+job (`docs/dev/multiclient-test-plan.md`), which is where the live testing work now
 is:
 
 1. ~~**CI.**~~ ✅ Done. Every gate is a `make` target that the git hooks and the
@@ -2082,7 +2381,7 @@ The 124-byte-per-property rule is the binding constraint: a 12-byte key leaves
 one property, so anything rich needs chunking across keys or a sidecar.
 
 **The BYO-credentials consequence.** Drivel deliberately has every user create
-their own Cloud project and OAuth client (see `docs/google-cloud-setup.md`).
+their own Cloud project and OAuth client (see `docs/user/google-cloud-setup.md`).
 `appProperties` are private to the *requesting app*, keyed by OAuth client ID —
 so two Drivel users sharing a Drive file each write metadata the other cannot
 see. `appProperties` and `appDataFolder` therefore work for **one user across

@@ -5,7 +5,7 @@
 # too. Porting to another CI system is therefore a rewrite of the YAML around
 # the make calls, not a rewrite of the gates.
 #
-# Run it locally:  act --privileged  (see docs/development.md)
+# Run it locally:  act --privileged  (see docs/dev/building.md)
 
 name: CI
 

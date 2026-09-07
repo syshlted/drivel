@@ -71,6 +71,32 @@ bidirectional sync — don't regress it.
   names the facility (`fuse`, `xattr`, `all`). Skipping is right on a laptop and
   wrong in CI, where the tests that skip are the M5 data-loss guards.
 
+## Documentation
+
+Two published collections, split by audience, plus repo housekeeping:
+
+- `docs/user/` — quickstart, install, google-cloud-setup, configuration,
+  lazy-mode, data-safety, troubleshooting, platforms, and `drivel.1`. Written for
+  someone who wants to *use* drivel; it never cites DESIGN.md.
+- `docs/dev/` — architecture (structure), workflows (sequence/decision diagrams),
+  schema (the two bbolt DBs), dependencies (why each one), conventions (the
+  load-bearing rules), building, testing, new-provider, glossary, and the
+  multiclient test plan. These *do* cite `DESIGN.md §N`, for reasoning.
+- `docs/project/` — publishing to pkg.go.dev, marketing copy.
+- Root: `README.md` is a slim landing page, `CHANGELOG.md` is the **externally
+  facing** change record (abbreviated, in user terms — not a milestone log),
+  `CONTRIBUTING.md`, `SECURITY.md`.
+
+**`DESIGN.md` and this file are internal working documents** and are deliberately
+not part of either collection. Don't link them from `docs/user/`, and don't slim
+DESIGN.md to match a docs page — it is the long-form record, and the docs cite it.
+
+Three rules. A user-visible behaviour change lands in `docs/user/`, the man page
+**and** `CHANGELOG.md`. A fact lives in exactly one place and everything else
+links to it — platform support is `docs/user/platforms.md`, flags are
+`docs/user/configuration.md`, the invariants are `docs/dev/conventions.md`. And
+mermaid diagrams are validated by parsing them, not by eye.
+
 ## CLI
 
 `drivel` has two subcommands (`mount` is the default, so `drivel -mount … -data …`
@@ -100,7 +126,8 @@ M7b flags on `mount`: `-resync` (force an enumeration sweep), `-materialize` (ea
 mode only — download remote files that have no local copy; `-lazy` always
 materialises, as placeholders), `-max-deletes N` (cap on reconcile-inferred
 deletions, default 100, 0 = unlimited), `-sweep-interval D` (re-enumerate this
-often, default 24h, 0 disables).
+often, default 24h, 0 disables). M7c adds `-drive-sweep-mode` (`auto`|`flat`|
+`scoped`, config `sweep-mode` in the provider table).
 
 `-pprof ADDR` on `mount` serves `net/http/pprof` for the process (not per mount),
 off unless given. It is a debug endpoint that hands out the heap — synced paths
@@ -131,7 +158,9 @@ M6 range writes **shipped**: always on, no flag. See "Range writes" below.
 M7 path↔ID index persistence **shipped**: on by default (`-index`, `""` disables).
 See "Path resolution" below. M7b initial enumeration & reconcile **shipped**: the
 sweep runs automatically on a first run, a resumed sweep or a dead cursor, with
-`-resync` to force it. See "Enumeration & reconcile" below.
+`-resync` to force it. M7c scoped enumeration **shipped**: a subfolder mount
+descends its own subtree instead of listing the account, which is what makes the
+sweep's cost proportional to what was mounted. See "Enumeration & reconcile" below.
 
 M8 multi-account & multi-provider **shipped**: N mounts per process from a TOML
 config, a provider registry, account-scoped login. See "Multi-account" below.
@@ -176,6 +205,27 @@ on-by-default vs off (the `-pprof` precedent says off), authorisation beyond the
 socket mode, and whether status answers for a whole *tree* — that last one decides
 the response schema, so it comes first.
 
+**M15** special files, POSIX metadata & mount safety — DESIGN.md §9's newest entry,
+and the answer to MC-13. Four decisions and one deferral. **`nodev`/`nosuid` become
+compulsory** (already forced on the unprivileged path by fusermount; go-fuse's
+direct-mount path needs them named explicitly, and drivel passes no options today)
+— but they cover the *mountpoint*, never the backing store, so §10.4's mask
+setuid/setgid by default still stands on its own. **Hard links are refused with
+`EPERM`** — which is what `link(2)` documents for a filesystem that cannot make
+them, and strictly safer than today, where `Link` is unhandled, emits no event, and
+leaves two regular files the sweep pushes as two diverging remote objects.
+**Non-regular files stay skipped and start being logged** — the M7b walk already
+drops them (`!e.Type().IsRegular()`), silently, which is how "unsupported" becomes a
+support question. **POSIX mode/ownership/ACLs get two per-mount channels**, provider
+metadata or a bound sidecar, because Drive carries no `mode`/`uid`/`gid` at all and
+because putting permissions in a cloud API is a disclosure some users refuse; the
+record must name its path *and* carry a content digest, or a conflict copy grafts
+one file's ACL onto another's bytes. **Symlinks are deferred on purpose**: the
+human-readable pointer file is a good body and a bad *identity*, because
+content-as-identity forces the sweep to download every small file to classify it,
+and it is a symlink-injection channel. Cygwin and Git LFS both use two signals with
+the out-of-band one primary; that is the shape to copy when it lands.
+
 **v2, backends on the roadmap** (DESIGN.md §9 has the reasoning; all three are
 unscheduled, none is started, and each one's shape is *decided* — the entries say
 so, so don't re-litigate them). **M11** deduplicating local backend: a
@@ -212,7 +262,7 @@ on every push, together with `golangci-lint` and `govulncheck`; every gate is a
 and "passed in CI" cannot drift apart. M8 closed the `cmd/drivel` and end-to-end
 items; the property tests, `gauth` and `fsevent` closed after it, which empties the
 numbered list. The live testing work is now Tier B of the multi-client campaign
-(`docs/multiclient-test-plan.md`).
+(`docs/dev/multiclient-test-plan.md`).
 
 Three rules the last rounds left behind. **A property test nobody has seen fail is a
 property test nobody knows the strength of**: `ranges/property_test.go` and
@@ -376,13 +426,13 @@ a push would update. No mitigation is implemented on purpose: each candidate
 (create-if-absent, post-create dedup, surfacing siblings as distinct paths) loses
 something a user wrote or makes resolution non-deterministic, and the choice is
 the user's to be told about, not ours to make silently. See
-`docs/multiclient-test-plan.md` §4.2.
+`docs/dev/multiclient-test-plan.md` §4.2.
 
 Deliberately absent: any startup enumeration of the remote tree. Warming the cache
 that way is a long, quota-heavy walk, and what to do with what it finds is a policy
 question, not a caching one.
 
-## Enumeration & reconcile (M7b)
+## Enumeration & reconcile (M7b, M7c)
 
 The change feed only reports what changed *after* a cursor was taken, so a Drive
 that existed before the first mount was invisible. `Enumerate` (optional
@@ -441,6 +491,50 @@ uploading them publishes the losing side of every conflict) and placeholders
 (remote-born; pushing one is the M5 catastrophe). Reconcile pushes go through
 `Engine.Push`, never straight to the store, so they get the same M5/M6 gates, echo
 recording and retries as a write from the mount.
+
+**M7c: the sweep's cost is the mount's, not the account's.** The flat `files.list`
+above scales with the *Drive* — it lists everything and sorts it out afterwards, in
+strictly sequential pages, repeated by every mount of that account on every first
+run, dead cursor and `-sweep-interval`. At 10^6 objects that is minutes each. Drive
+has no recursive "everything under this folder" query (`'ID' in parents` is direct
+children only), so the fix is a client-side breadth-first descent from the mount
+root, `enumFanout` (8) listings at a time, in `enumerate_scoped.go`. The fan-out is
+measured, not assumed — 6.3× at fanout 8 against fanout 1 on one fixture — but only
+because the fake grew an injected round trip taken *before* its global mutex;
+every request in it otherwise serialises, which made the concurrency claim
+untestable rather than merely unmeasured. **Under throttling the descent keeps what succeeded and re-queues
+only what failed, and moves its own concurrency** (halve on a throttled listing,
+grow back on a clean one, floor 1, ceiling `Drive.fanout` — so the field is a
+*ceiling*, not a rate). Both are load-bearing: putting a throttled batch back whole
+measured **97× the ideal request count** at a 20% refusal rate, because at fanout 8
+most batches are spoiled and re-issuing all eight feeds the throttle. Do not
+"simplify" either back into a single error return. Whether real Drive throttles at
+eight at all is still open, but it is now a tuning question, not a correctness one.
+
+Three things to keep straight. **The descent is parent-first by construction**, so
+the parking machinery above (`waiting`, `parked`, "still parked ⇒ outside the
+mount") is the *flat path's alone* — do not "unify" them. **Resume stops mattering**
+in scoped mode: the frontier is in memory and a cursor arriving without one restarts
+the descent, which is cheap by construction, so the M7 index is not needed to stand
+in. And **neither mode dominates**: a descent costs ~1 request per folder against
+flat's ~1 per 1000 account objects, so a folder-dense subtree is cheaper flat.
+`auto` descends when `-drive-root` names a concrete folder and lists the account
+when it names the whole Drive; an unknown mode is refused at open (M8 rule 6 applied
+to a value), and a folder-dense descent logs once and names `flat`.
+
+**`drive.file` is not the answer to this, and the reason is structural.** It would
+scope `files.list` to app-created files, but that scope reaches pre-existing files
+only through the Google Picker — a JavaScript component — and `drivel login` is a
+loopback/paste flow with no browser surface to host one. A user could not grant
+access to a folder they already have, so their files would be invisible rather than
+merely slow. `resolveRootLocked`'s `Files.Get("root")` is a second blocker. The
+scope is plumbed (`login -scope drive.file`) and **has no test**; it suits a folder
+drivel creates and owns, which is a different milestone.
+
+**Still account-wide:** `changes.list` has no folder filter, so N mounts of one
+account each poll the whole feed and discard most of it. That is quota, not latency,
+and one poller per account would be exactly the cross-mount coupling M8's guards
+exist to prevent — so it waits for evidence.
 
 Google-native Docs/Sheets/Slides carry `RemoteFile.ExportOnly`: reported and marked
 seen (so their absence is never read as a delete) but **never materialised and
@@ -651,7 +745,7 @@ events. Ctrl-C unmounts.
 - **AGPLv3, copyright SystemHalted and Jeremy Melanson.** `LICENSE` is the
   verbatim FSF text — never edit it, and never add a second license file at the
   root (two of them confuse the `licensecheck` detector pkg.go.dev uses; see
-  `docs/publishing.md`). The copyright notice lives in four places that must stay
-  in sync: README §License, `docs/drivel.1`, the `cmd/drivel` package doc comment,
+  `docs/project/publishing.md`). The copyright notice lives in four places that must stay
+  in sync: README §License, `docs/user/drivel.1`, the `cmd/drivel` package doc comment,
   and the `usage()` text `drivel help` prints. The grant is version 3, *not*
   "or later" — promoting it is a licensing decision, not an editorial one.

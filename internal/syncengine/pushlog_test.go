@@ -18,7 +18,7 @@ import (
 // This is normally the wrong thing to test — pinning log text pins an
 // implementation detail. Here the log IS the interface. Tier B of the
 // multi-client campaign derives transfer volume from these lines
-// (docs/multiclient-test-plan.md §2.7), because per-process network accounting
+// (docs/dev/multiclient-test-plan.md §2.7), because per-process network accounting
 // on a shared host is awkward and the logs already name every path. That plan
 // was written against lines the engine did not emit: before this, a successful
 // upload logged nothing at all, and every "[sync] push" in a log was a failure.

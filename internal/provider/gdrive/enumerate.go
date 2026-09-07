@@ -45,6 +45,15 @@ type sweepState struct {
 	waiting map[string][]*drive.File // parent id -> objects parked on it
 	parked  int                      // how many are currently parked
 
+	// Scoped descent (M7c): folders not yet listed, and whether this sweep is one.
+	// The two halves are exclusive — a flat sweep never fills frontier and a
+	// descent never parks — because the mode is fixed when the Drive is opened.
+	scoped   bool
+	frontier []folderTask
+	fanout   int  // current concurrency, moved by adaptFanoutLocked toward what Drive allows
+	requests int  // folder listings issued, which is a descent's whole cost
+	warned   bool // whether this descent has already reported being folder-dense
+
 	pages   int
 	objects int
 	emitted int
@@ -60,6 +69,9 @@ type sweepPage struct {
 // Enumerate implements provider.Enumerator: one page of a flat sweep, resolved to
 // paths under the mount root. next == "" means the sweep is complete.
 func (d *Drive) Enumerate(ctx context.Context, cursor string) ([]provider.RemoteFile, string, error) {
+	if d.scopedSweep() {
+		return d.enumerateScoped(ctx, cursor)
+	}
 	d.mu.Lock()
 	// Pin the concrete root ID before anything is placed. A file's parents carry
 	// the real folder ID, never the "root" alias -drive-root defaults to, so
@@ -112,17 +124,7 @@ func (d *Drive) Enumerate(ctx context.Context, cursor string) ([]provider.Remote
 	sw.objects += len(res.Files)
 	sw.emitted += len(page.files)
 
-	// Warm the index with everything this page resolved: one transaction, not one
-	// per object.
-	if idx := d.indexLocked(ctx); idx != nil && len(page.ids) > 0 {
-		paths := make([]string, len(page.files))
-		for i := range page.files {
-			paths[i] = page.files[i].Path
-		}
-		if err := idx.SetMany(paths, page.ids); err != nil {
-			d.logf("[drive] path index: recording enumeration page: %v", err)
-		}
-	}
+	d.warmIndexLocked(ctx, &page)
 
 	if res.NextPageToken == "" {
 		d.logf("[drive] enumeration complete: %d page(s), %d object(s) listed, %d under the mount root, %d outside it",
@@ -258,3 +260,20 @@ func (d *Drive) sweepParentLocked(ctx context.Context, sw *sweepState, parentID 
 // persistent half is written per page in one batch (see Enumerate), which is the
 // difference between one commit per page and one per object.
 func (d *Drive) rememberIDLocked(p, id string) { d.linkLocked(p, id) }
+
+// warmIndexLocked records everything one sweep call resolved, in a single
+// transaction. Set per object would mean one fsync per file, which on a large
+// tree costs more than the listing did. Shared by both sweep modes.
+func (d *Drive) warmIndexLocked(ctx context.Context, page *sweepPage) {
+	idx := d.indexLocked(ctx)
+	if idx == nil || len(page.ids) == 0 {
+		return
+	}
+	paths := make([]string, len(page.files))
+	for i := range page.files {
+		paths[i] = page.files[i].Path
+	}
+	if err := idx.SetMany(paths, page.ids); err != nil {
+		d.logf("[drive] path index: recording enumeration page: %v", err)
+	}
+}

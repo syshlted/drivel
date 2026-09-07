@@ -54,6 +54,7 @@ _drivel_mount_args() {
         '-state=[sync-state DB (cursor + echo records)]:state db:_files' \
         '-index=[provider path<->ID index; a cache, safe to delete]:index db:_files' \
         '-drive-root=[Drive folder ID mapped to the mount root]:folder id:' \
+        '-drive-sweep-mode=[how the enumeration sweep walks Drive]:mode:(auto flat scoped)' \
         '-lazy[materialise remote files as placeholders; fetch content on first read]' \
         '-xattr[serve extended attributes through the mountpoint (off by default)]' \
         '-resync[enumerate the remote tree and reconcile it at startup]' \
