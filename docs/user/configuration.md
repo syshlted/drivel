@@ -67,13 +67,51 @@ Every key mirrors a flag. Both are listed together below; `drivel mount -h` and
 | `-materialize` | `materialize` | off | In eager mode, download remote files that have no local copy. Implied by `-lazy`, where it costs only a placeholder. |
 | `-max-deletes N` | `max-deletes` | `100` | Cap on deletions one reconcile may infer, in either direction. `0` is unlimited. See [Data safety](data-safety.md#deletion). |
 | `-sweep-interval D` | `sweep-interval` | `24h` | How often to re-enumerate. `0` disables it. |
+| `-upload-workers N` | `upload-workers` | `4` | How many files this mount uploads at once. See [Transfer concurrency](#transfer-concurrency). |
+| `-hydrate-workers N` | `hydrate-workers` | `8` | How many placeholders this mount fetches at once under `-lazy`. See [Transfer concurrency](#transfer-concurrency). |
 | `-debug` | `debug` | off | FUSE-level tracing. Very verbose. |
-| `-pprof ADDR` | — | off | Serve Go profiling endpoints, e.g. `localhost:6060`. Process-wide. |
+| `-pprof ADDR` | — | off | Serve Go profiling endpoints on a loopback address. A bare port means `127.0.0.1`. Process-wide. See [Profiling](#profiling). |
+| `-pprof-allow-remote` | — | off | Let `-pprof` bind something other than loopback. See [Profiling](#profiling). |
 | `-config FILE` | — | — | The config file to read. |
 
 `max-deletes` and `sweep-interval` are stored as optional values so that writing
 an explicit `0` survives: merging "zero" with "unset" would silently uncap the
-delete guard.
+delete guard. The two worker counts are optional for the opposite reason — `0` is
+not a pool size, so an explicit one is refused rather than read as "use the
+default".
+
+## Transfer concurrency
+
+Two numbers, because the two directions are not alike. `upload-workers` sizes the
+pool that pushes local changes; `hydrate-workers` caps how many placeholders are
+being fetched at once in [lazy mode](lazy-mode.md). A typical link's downlink is
+several times its uplink, and a provider may well cap the two differently, so one
+shared number would be wrong at one end or the other.
+
+Both are **per mount**, and deliberately so. Two mounts are usually two accounts;
+a limit they shared would let either one starve the other and let each infer, from
+how long it waited, when the other was busy. Nothing in Drivel budgets across
+mounts.
+
+Raising `upload-workers` buys less than it looks like it should. Every push shares
+one HTTP/3 connection and therefore one congestion window, so extra workers
+overlap the per-file round trips — auth, the unchanged-content check, metadata —
+rather than moving more bytes. Against that:
+
+- Each in-flight upload can hold a chunk buffer (16 MiB on Drive), so 32 workers
+  can be half a gigabyte of buffers.
+- Past the point the provider starts refusing requests, more workers cost quota
+  and gain nothing. Drivel retries with backoff, so this shows up as slower sync
+  rather than as errors.
+- Writes to the *same path* are serialised whatever you set, because concurrent
+  uploads of one file can land out of order. Concurrency here is across files.
+
+`hydrate-workers` is the one that bounds a `grep -r` over a lazy tree: without it
+every file faulted at once. It sits on the read path, so a caller is blocked on
+every fetch it governs — setting it to 1 turns a parallel read into a queue.
+
+Neither number governs the inbound change feed, which applies remote changes one
+at a time and has no knob.
 
 ## Google Drive options
 
@@ -166,3 +204,33 @@ break each other in ways one cannot. These are startup errors naming both mounts
 
 Logging is per mount and prefixed with the mount name — except when there is only
 one, where the output is unprefixed.
+
+## Profiling
+
+`-pprof ADDR` serves Go's profiling endpoints for the whole process — one
+endpoint, not one per mount — and is off unless you give it an address:
+
+```sh
+drivel mount … -pprof localhost:6060      # or just: -pprof 6060
+go tool pprof http://localhost:6060/debug/pprof/heap
+```
+
+**It only binds loopback.** A non-loopback address is refused at startup, and
+takes `-pprof-allow-remote` to proceed. That is deliberate and it is not
+paranoia: the endpoint hands whoever reaches it this process's heap, which for a
+filesystem means the paths — and in a buffer somewhere the contents — of the
+files you are syncing, and it lets them start a CPU profile, which is a way to
+make a busy mount slower on request. Bind it to localhost and tunnel (`ssh -L`)
+instead; reach for the flag only when you have decided who else is on that
+network.
+
+Two smaller things. `/debug/pprof/cmdline` is **not** served — it would return
+the command line, which names your credentials file, your token, your backing
+directory and your account. And a port that cannot be bound is a startup error
+rather than a warning, because the reason to run this is to be measuring, and a
+long run that quietly produced nothing is worse than one that refused to start.
+
+**In a dev container, watch the port forwarder.** VS Code and similar editors
+forward ports they see, which turns a loopback bind into something reachable
+from the machine running the editor — the one case the loopback rule does not
+cover.

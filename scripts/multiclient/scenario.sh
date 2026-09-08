@@ -39,7 +39,7 @@
 set -euo pipefail
 
 RIG_ROOT=${DRIVEL_RIG_ROOT:-$HOME/drivel-rig}
-BULK_ROOT=${DRIVEL_BULK_ROOT:-/home/coder/extra_space/drivel-rig}
+BULK_ROOT=${DRIVEL_BULK_ROOT:-$HOME/extra_space/drivel-rig}
 SCEN_HOME=$RIG_ROOT/scenarios
 REGISTRY=$SCEN_HOME/REGISTRY.md
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)

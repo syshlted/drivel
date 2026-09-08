@@ -126,6 +126,39 @@ The short form:
 - Reconcile pushes go through `Engine.Push`, never straight to the store, so they
   get the same gates, echo recording and retries as a write from the mount.
 
+## Special files and mount safety
+
+DESIGN.md §9's M15 items 1–3. Four rules, each of them a decision rather than an
+implementation detail:
+
+- **`nodev` and `nosuid` are compulsory**, with no flag to disable them, and the
+  list is per platform (`internal/vfs/mountopts_*.go`). FreeBSD gets `nosuid`
+  alone: its kernel dropped `MNT_NODEV`, and `mount_fusefs` parses options against
+  a fixed table and **fails the mount** on one it does not know — verified, not
+  assumed. The options cover the mountpoint and say nothing about the backing
+  store, which is an ordinary directory reachable without the mount.
+- **Hard links are refused with `EPERM`.** Not a limitation being reported — a
+  refusal chosen over the alternative. Falling through created the link, emitted no
+  event, and left two regular files the sweep pushed as two diverging remote
+  objects, after telling the caller it worked. `EPERM` is what `link(2)` documents
+  for a filesystem that cannot make them.
+- **Non-regular files are skipped and the skip is logged**, at both sites that
+  decide it: `vfs.node.Symlink`/`Mknod` when the mount declines to emit, and
+  `reconcile.pushLocalOnly` when the sweep's walk steps over one. The wording is
+  duplicated on purpose — `vfs.specialKind` and `syncengine.kindOf` say the same
+  words from different input types, because sharing one helper would mean the sync
+  core importing the mount backend and pulling go-fuse into every build of it.
+  Keep them in step; there is a test on each side.
+- **A regular file is regular however it was made.** `Mknod` with no type bits
+  creates one, so it emits `OpCreate` like `Create` does. Staying silent there
+  would make syncing depend on which syscall wrote the file — the same
+  push-path-versus-sweep disagreement MC-12 found for reserved names, which is a
+  bug wherever it appears.
+
+Not decided here: POSIX mode/ownership/ACLs (M15 item 4, needs a provider metadata
+capability) and symlink *representation* (item 5, needs item 4). Both have their
+reasoning recorded in DESIGN.md so it is not re-derived.
+
 ## Cross-mount guards
 
 `app.Validate` runs **before anything opens**, on the flag path too. Each guard

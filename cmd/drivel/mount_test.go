@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/zishmusic/drivel/internal/config"
+	"github.com/zishmusic/drivel/internal/hydrate"
 	"github.com/zishmusic/drivel/internal/provider/gdrive"
 	"github.com/zishmusic/drivel/internal/syncengine"
 )
@@ -32,6 +33,9 @@ func defaults() specFlags {
 		driveRoot:     "root",
 		maxDeletes:    syncengine.DefaultMaxDeletes,
 		sweepInterval: syncengine.DefaultSweepInterval,
+
+		uploadWorkers:  syncengine.DefaultWorkers,
+		hydrateWorkers: hydrate.DefaultWorkers,
 	}
 }
 
@@ -53,6 +57,8 @@ func TestFlagsReachTheSpec(t *testing.T) {
 	f.materialize = true
 	f.maxDeletes = 7
 	f.sweepInterval = 90 * time.Minute
+	f.uploadWorkers = 11
+	f.hydrateWorkers = 13
 
 	specs, err := mountSpecs(quietFlagSet(), map[string]bool{"mount": true}, f)
 	if err != nil {
@@ -73,6 +79,12 @@ func TestFlagsReachTheSpec(t *testing.T) {
 	}
 	if s.SweepInterval != 90*time.Minute {
 		t.Errorf("SweepInterval = %v; want 90m", s.SweepInterval)
+	}
+	// Distinct values on purpose: one number reaching both fields would satisfy a
+	// test that used the same one, and the whole point is that the two directions
+	// are tuned separately.
+	if s.UploadWorkers != 11 || s.HydrateWorkers != 13 {
+		t.Errorf("workers = up %d / hydrate %d; want 11 / 13", s.UploadWorkers, s.HydrateWorkers)
 	}
 	if s.Provider != driveKind {
 		t.Errorf("Provider = %q; want %q", s.Provider, driveKind)
@@ -217,5 +229,57 @@ func TestExplicitMountBeatsDefaultConfig(t *testing.T) {
 	}
 	if len(specs) != 1 || specs[0].Mountpoint != "/from-flags" {
 		t.Errorf("default config overrode an explicit -mount: %+v", specs)
+	}
+}
+
+// Zero is refused rather than quietly meaning "the default". A pool of that size
+// transfers nothing, and -max-deletes 0 means "no limit" in the same flag set, so
+// a user has every reason to read 0 as a request rather than as an omission.
+func TestWorkerPoolOfZeroIsRefused(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		set  func(*specFlags)
+		want string
+	}{
+		{"upload zero", func(f *specFlags) { f.uploadWorkers = 0 }, "-upload-workers"},
+		{"upload negative", func(f *specFlags) { f.uploadWorkers = -1 }, "-upload-workers"},
+		{"hydrate zero", func(f *specFlags) { f.hydrateWorkers = 0 }, "-hydrate-workers"},
+		{"hydrate negative", func(f *specFlags) { f.hydrateWorkers = -2 }, "-hydrate-workers"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := defaults()
+			f.mountpoint = "/m"
+			tc.set(&f)
+			_, err := mountSpecs(quietFlagSet(), map[string]bool{"mount": true}, f)
+			if err == nil {
+				t.Fatalf("%s was accepted", tc.want)
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("error %q does not name %s", err, tc.want)
+			}
+		})
+	}
+}
+
+// Both knobs describe a mount, so both belong in the config file — which makes
+// combining them with -config an error, like every other shaping flag. Left out
+// of the list, -config -upload-workers 8 would silently ignore the flag.
+func TestWorkerFlagsAreShapingFlags(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.toml")
+	if err := os.WriteFile(cfgPath, []byte("[[mount]]\npath = \"/m\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"upload-workers", "hydrate-workers"} {
+		f := defaults()
+		f.configPath = cfgPath
+		_, err := mountSpecs(quietFlagSet(), map[string]bool{"config": true, name: true}, f)
+		if err == nil {
+			t.Errorf("-%s alongside -config was accepted", name)
+			continue
+		}
+		if !strings.Contains(err.Error(), name) {
+			t.Errorf("error %q does not name -%s", err, name)
+		}
 	}
 }

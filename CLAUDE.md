@@ -35,6 +35,8 @@ bidirectional sync — don't regress it.
   `ResolveBacking` (separate-dir vs in-place). Platform bits in `backing_*.go`.
 - `internal/vfs` — the go-fuse mount backend: loopback that proxies to the backing
   store and emits an `fsevent.Event` per mutation. Reads/lookups/attrs pass through.
+  `special.go` holds M15's refusals and skips; `mountopts_*.go` the compulsory
+  `nodev`/`nosuid`, which is per platform for a reason (see "Special files" below).
 - `internal/provider` — cloud-backend interface (the seam). Drive impl is M2. M8
   adds the `Registry` (kind → `Factory`), an explicit value rather than an
   `init()`-filled package map.
@@ -129,10 +131,42 @@ deletions, default 100, 0 = unlimited), `-sweep-interval D` (re-enumerate this
 often, default 24h, 0 disables). M7c adds `-drive-sweep-mode` (`auto`|`flat`|
 `scoped`, config `sweep-mode` in the provider table).
 
+**Transfer concurrency is two numbers, both per mount**: `-upload-workers`
+(config `upload-workers`, default `syncengine.DefaultWorkers` = 4) sizes the
+push pool, `-hydrate-workers` (config `hydrate-workers`, default
+`hydrate.DefaultWorkers` = 8) caps concurrent lazy fetches. Three things are
+load-bearing. **Per mount is a security property, not a layering preference** —
+two mounts are two accounts, and a limiter they shared would let either starve the
+other and let each time the other's activity off the contention, which is exactly
+the cross-mount coupling `app.Validate` exists to prevent; there is no process-wide
+budget and adding one would be the only process-global mutable state in the tree.
+**An explicit `0` is refused at both boundaries**, because `max-deletes = 0` means
+"no limit" in the same config file, so reading `upload-workers = 0` as "use the
+default" is M8 rule 6's failure in a new place — and because `hydrate.New` must
+clamp `<= 0` regardless, since a zero-capacity channel blocks the first fetch
+forever. And **the hydration bound is a fix, not a knob**: before it, a `grep -r`
+over a lazy tree issued one download per file simultaneously, so bounding it
+changes lazy-mode behaviour by design.
+
+The push pool's own concurrency is still `workerFor(ev.Path, …)` — same path, same
+worker, ordered — so no setting makes same-path writes concurrent. Raising the
+count buys latency-hiding and not bandwidth (one HTTP/3 connection, one congestion
+window), costs a chunk buffer per in-flight upload, and past the provider's
+throttle threshold costs quota for nothing — the M7c 97x measurement is the
+evidence. **The inbound pull loop is still serial and has no knob**, deliberately:
+concurrency there is not a parameter but a change to the `forget` map, the
+cursor-advance ordering and per-path ordering within a page. Anyone adding a
+"download-workers" name must not point it at hydration — the two are different
+pools. The right default is ultimately the *provider's* to suggest (they cap
+up/down differently); nothing crosses the seam for that yet.
+
 `-pprof ADDR` on `mount` serves `net/http/pprof` for the process (not per mount),
 off unless given. It is a debug endpoint that hands out the heap — synced paths
-and, in some buffer, contents — so a non-loopback bind is warned about, and a port
-it cannot bind is a *startup error*: the reason to run it is to be measuring, and
+and, in some buffer, contents — so it **binds loopback only**: anything else is
+refused at startup and needs `-pprof-allow-remote` (a bare `-pprof 6060` means
+`127.0.0.1:6060`), `/debug/pprof/cmdline` is deliberately not registered because
+argv names the credentials file, the token, the backing tree and the account, and
+a port it cannot bind is a *startup error*: the reason to run it is to be measuring, and
 a soak that produced nothing silently is worse than one that refused to start. Its
 `WriteTimeout` is deliberately 0, for the same reason `ChunkTransferTimeout` is
 unset — a write deadline never resets on progress, so any value becomes the
@@ -205,23 +239,16 @@ on-by-default vs off (the `-pprof` precedent says off), authorisation beyond the
 socket mode, and whether status answers for a whole *tree* — that last one decides
 the response schema, so it comes first.
 
-**M15** special files, POSIX metadata & mount safety — DESIGN.md §9's newest entry,
-and the answer to MC-13. Four decisions and one deferral. **`nodev`/`nosuid` become
-compulsory** (already forced on the unprivileged path by fusermount; go-fuse's
-direct-mount path needs them named explicitly, and drivel passes no options today)
-— but they cover the *mountpoint*, never the backing store, so §10.4's mask
-setuid/setgid by default still stands on its own. **Hard links are refused with
-`EPERM`** — which is what `link(2)` documents for a filesystem that cannot make
-them, and strictly safer than today, where `Link` is unhandled, emits no event, and
-leaves two regular files the sweep pushes as two diverging remote objects.
-**Non-regular files stay skipped and start being logged** — the M7b walk already
-drops them (`!e.Type().IsRegular()`), silently, which is how "unsupported" becomes a
-support question. **POSIX mode/ownership/ACLs get two per-mount channels**, provider
-metadata or a bound sidecar, because Drive carries no `mode`/`uid`/`gid` at all and
-because putting permissions in a cloud API is a disclosure some users refuse; the
-record must name its path *and* carry a content digest, or a conflict copy grafts
-one file's ACL onto another's bytes. **Symlinks are deferred on purpose**: the
-human-readable pointer file is a good body and a bad *identity*, because
+**M15** special files, POSIX metadata & mount safety — **items 1–3 shipped
+(2026-09-08); 4 and 5 remain.** See "Special files" below for what landed and the
+three things the FreeBSD run corrected. What is left: **POSIX mode/ownership/ACLs
+get two per-mount channels** (item 4), provider metadata or a bound sidecar,
+because Drive carries no `mode`/`uid`/`gid` at all and because putting permissions
+in a cloud API is a disclosure some users refuse; the record must name its path
+*and* carry a content digest, or a conflict copy grafts one file's ACL onto
+another's bytes. It is a milestone of its own and needs the provider-metadata
+capability first. **Symlinks are deferred on purpose** (item 5, and it needs item
+4): the human-readable pointer file is a good body and a bad *identity*, because
 content-as-identity forces the sweep to download every small file to classify it,
 and it is a symlink-injection channel. Cygwin and Git LFS both use two signals with
 the out-of-band one primary; that is the shape to copy when it lands.
@@ -542,6 +569,48 @@ never given an echo** — they have no byte stream, so there is no honest size f
 placeholder and no digest to compare. Cursor expiry (`provider.ErrCursorExpired`,
 Drive's 410) recovers through this same path: fresh token, then a sweep.
 
+## Special files & mount safety (M15 items 1–3)
+
+What a path-addressed cloud store cannot hold, and what the mount does about it.
+Four rules; the first three are the milestone and the fourth is what writing it
+turned up.
+
+1. **`nodev`/`nosuid` are compulsory and the list is per platform.** No flag
+   disables them. `internal/vfs/mountopts_{linux,darwin,freebsd}.go` — and it has
+   to be three files, because **FreeBSD would fail to mount at all** with `nodev`
+   in the list: its kernel dropped `MNT_NODEV` (only devfs holds device nodes, so
+   the property holds by construction) and `mount_fusefs` parses `-o` against a
+   fixed table and exits non-zero on an unknown option — `mount_fusefs: -o dev:
+   option not supported`, verified on 15.1. The options cover the **mountpoint**
+   and say nothing about the backing store, which is an ordinary directory
+   reachable without the mount; §10.4's mask-setuid/setgid rule still stands alone.
+2. **Hard links are refused with `EPERM`** (`vfs/special.go`). Not a limitation
+   being reported — a refusal chosen over the alternative. Falling through to the
+   loopback created the link, emitted no event, and left two *regular* files the
+   sweep pushed as two diverging remote objects, having told the caller it worked.
+   `EPERM` is what `link(2)` documents for a filesystem that cannot make them.
+3. **Non-regular files are skipped and the skip is logged, at both sites that
+   decide it** — `vfs.node.Symlink`/`Mknod` when the mount declines to emit, and
+   `reconcile.pushLocalOnly` when the sweep's walk steps over one, with a count in
+   the sweep summary. The wording is **duplicated on purpose**: `vfs.specialKind`
+   and `syncengine.kindOf` say the same words from different input types, because
+   sharing one helper means the sync core importing the mount backend, which drags
+   go-fuse into every build of it and costs §2.9's cross-compile proof. Keep them
+   in step; each side has a test.
+4. **A regular file is regular however it was made.** `Mknod` with no type bits
+   creates one, so that branch emits `OpCreate` like `Create` does. Silence there
+   would make syncing depend on which syscall wrote the file — MC-12's push-path-
+   versus-sweep disagreement arriving by a second route, and a bug wherever it
+   appears.
+
+**FreeBSD cannot create a special file through the mount at all**, so item 3's line
+has nothing to describe there: fusefs sends `rdev = ~0` on the MKNOD for a fifo
+while FreeBSD's `mknod(2)` takes `S_IFIFO` only with `dev == 0`, and its `mknod(2)`
+refuses `S_IFREG` outright (on plain ZFS too, not just through a mount). Both are
+below drivel, neither risks data — loud `EINVAL`, no file — and the tests **assert**
+them rather than skipping, so the platform is pinned. Don't "fix" this by rewriting
+rdev; it is go-fuse's loopback, and device nodes are not ours to invent.
+
 ## Multi-account & multi-provider (M8)
 
 One process, N mounts, each with its own credentials, state DB, index and engine.
@@ -703,9 +772,10 @@ the seam clean anyway — the cross-compile shows that costs nothing.
 ## Build / test / run
 
 ```sh
-make help                                      # every gate, as a target
+make help                                      # every gate as a target, plus examples
 make check                                     # everything CI runs, in CI's order
 make hooks                                     # install the git hooks (once per clone)
+make run ARGS='-debug'                         # build, then mount ./mnt over ./data
 
 go build ./...
 go vet ./...

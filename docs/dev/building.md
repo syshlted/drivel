@@ -5,14 +5,42 @@ one: the git hooks and CI both call these targets, so "it passed locally" and "i
 passed in CI" cannot mean different things.
 
 ```sh
-make help         # every target, with a description
+make help         # every target, plus worked examples — the default goal
 make build        # the CLI binary, into bin/
+make run          # build, then mount ./mnt over ./data
 make test         # go test -race ./...
 make lint         # golangci-lint over the whole tree
 make fmt          # apply formatting
 make check        # everything CI runs, in CI's order
 make hooks        # install the git hooks (once per clone)
 ```
+
+`make help` is the default goal, so a bare `make` prints it. Its examples are
+read out of the Makefile itself — a target's description, and any example of
+invoking it, are written where the target is defined, so neither can drift from
+the recipe it describes.
+
+## The run loop
+
+`make run` builds first and then serves, because debugging a mount against a
+stale binary is an expensive way to spend an afternoon. Three variables shape
+the command line, and everything else goes through `ARGS` verbatim:
+
+```sh
+make run                                   # ./mnt, backed by ./data
+make run ARGS='-debug'                     # ...with FUSE tracing
+make run MNT=./dir DATA=                   # in-place: ./dir is its own backing (Linux)
+make run MNT= DATA=                        # serve the mounts in the XDG config file
+make run ARGS='-credentials creds.json'    # sync to Drive, rather than log-only
+```
+
+Empty means omitted rather than passed blank, which is what makes the last two
+work: no `DATA` is in-place mode, and no `MNT` at all leaves the field clear for
+`-config`, which refuses to be combined with flags describing what to mount.
+Without `-credentials` drivel runs log-only — it mounts and logs sync events but
+talks to no provider, which is the shape most of the FUSE work is done in. The
+flags themselves live in [Configuration](../user/configuration.md) and in
+`drivel mount -h`; `make run` adds nothing to them.
 
 The underlying commands are still just the toolchain, and nothing stops you
 running them directly:
@@ -27,6 +55,43 @@ go build -o ./bin/drivel ./cmd/drivel   # the CLI binary
 `go test ./...` runs offline — nothing in the suite touches Drive. For what it
 covers, which tests need kernel facilities that a laptop may lack, and how to run
 it on another platform, see [Testing](testing.md).
+
+## Static by default, dynamic for packagers
+
+`make build` sets **`CGO_ENABLED=0`**, producing a statically linked binary with
+no library dependencies at all.
+
+That is not a size optimisation — it is worth about 200 KB. It is what makes the
+shipped artifact match the property DESIGN.md §2.9 rests on. Drivel's own code
+uses no cgo, but the *standard library* does: `net` and `os/user` carry cgo
+implementations for NSS-backed DNS and user lookup, and Go compiles them in
+whenever cgo is available. Since Go defaults `CGO_ENABLED` to 1 on a native build
+with a C compiler on `PATH`, leaving it unset silently produces a binary linked
+against the build host's glibc — which then refuses to start on any distro whose
+glibc is older.
+
+```sh
+make build                    # static; runs anywhere
+make build CGO_ENABLED=1      # dynamic; links the host's libc
+```
+
+**Enabling cgo runs counter to the project's philosophy, and there is exactly one
+sanctioned reason to do it: distro-specific packaged builds.** There, linking the
+system's libraries is the point — the package tracks the OS's patch level, and
+patching those libraries becomes the distribution's responsibility rather than a
+reason for us to cut a release. Offloading that is worth the portability cost
+*when something downstream is actually doing the patching*. Nowhere else is.
+
+Two things not to do with this. Don't hoist `CGO_ENABLED=0` to a global in the
+Makefile — **`go test -race` requires cgo**, so a global setting fails the entire
+suite with `-race requires cgo`. And don't reach for it to shrink the binary;
+stripping is the lever that matters:
+
+| build | size |
+| --- | --- |
+| `CGO_ENABLED=1` (the old default) | 28.7 MB |
+| `CGO_ENABLED=0` | 28.5 MB |
+| `CGO_ENABLED=0 -trimpath -ldflags="-s -w"` | 19.6 MB |
 
 ## Upgrading the Go toolchain
 
@@ -169,9 +234,11 @@ and event layers.
   is retaining memory, `.../goroutine?debug=1` for a leak (a count that climbs
   over a long run is the signature), `.../profile?seconds=30` for CPU. Off unless
   an address is given — it serves the heap, which holds synced file paths and
-  contents, to anyone who can reach it. A non-loopback bind is warned about; a
-  port it cannot bind is a startup error, so a run you started in order to
-  measure never quietly produces nothing.
+  contents, to anyone who can reach it. A non-loopback bind is **refused** and
+  needs `-pprof-allow-remote`; a bare `-pprof 6060` means loopback; a port it
+  cannot bind is a startup error, so a run you started in order to measure never
+  quietly produces nothing. `/debug/pprof/cmdline` is not served — argv names the
+  credentials file, the token, the backing tree and the account.
 - **Log-only mode** (omit `-credentials`) isolates the FS/event layers from sync:
   if a bug reproduces here, it's not in the provider or network path.
 - **Sync bugs** are usually echo/loop-suppression (DESIGN.md §4). Inspect the

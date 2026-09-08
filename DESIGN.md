@@ -499,9 +499,11 @@ the program is intercepting a mount point.
 
 #### 2.9.1 What degrades off Linux
 
-Three things, and the second is a correctness matter rather than a missing feature
+Four things, and the second is a correctness matter rather than a missing feature
 — and since M10 it is no longer strictly an off-Linux one, because what decides it
-is the backing filesystem rather than the kernel.
+is the backing filesystem rather than the kernel. The fourth arrived with M15 and
+is the cheapest kind of platform fact to have: one the tests assert rather than one
+a user discovers.
 
 1. **In-place mode is unavailable** (`mount.openInPlace` refuses off Linux).
    `/proc/self/fd/N` is the Linux shortcut that lets the path-based loopback work
@@ -571,6 +573,29 @@ is the backing filesystem rather than the kernel.
    problem that §2.9.4 names as a reason not to build a Windows frontend, arriving
    on a platform that is otherwise Tier 1. Nothing handles it today, and a live
    macOS run should establish what actually happens before anything is promised.
+
+4. **FreeBSD cannot create a special file through the mount, and its compulsory
+   mount options are a shorter list** (M15 items 1 and 3). Both were found by
+   running `internal/vfs` on FreeBSD 15.1 on 2026-09-08, and neither was predicted.
+
+   `mkfifo` on the mountpoint returns `EINVAL`. The MKNOD does reach drivel — a
+   `-debug` trace shows `MKNOD n1 {010644 (022), 4294967295}` — so the override
+   runs and delegates, and the loss happens below: fusefs sends `rdev = ~0`, and
+   FreeBSD's `mknod(2)` accepts `S_IFIFO` only when `dev == 0`, so go-fuse's
+   loopback, which passes rdev through verbatim, cannot spell a fifo on this
+   platform. Independently, FreeBSD's `mknod(2)` refuses `S_IFREG` outright — on an
+   ordinary ZFS directory as much as through a mount — so the "a regular file made
+   by mknod must still sync" case does not exist there either. Neither risks data:
+   the caller gets `EINVAL` and no file, and none of these would have synced. The
+   tests assert both rather than skipping, so a change in either is a failure and
+   not a surprise. Symlinks are unaffected and work normally.
+
+   And FreeBSD requests only `nosuid`. `MNT_NODEV` was removed from the kernel —
+   only devfs may hold device nodes, so the guarantee holds by construction — while
+   `mount_fusefs` parses `-o` against a fixed table and exits non-zero on an
+   unknown option, reporting it with the `no` prefix stripped: `mount_fusefs: -o
+   dev: option not supported`. Asking for a flag this platform does not have would
+   have cost every FreeBSD mount, to tighten nothing.
 
 #### 2.9.2 macOS: AGPLv3 and macFUSE
 
@@ -2083,6 +2108,25 @@ are both lossy and racy.
    not a place to add state to the engine: if a field cannot be read from something
    that already exists for another reason, it does not belong in v1 of the schema.
 
+   **The profiling endpoint's remaining hardening belongs here, not to `-pprof`.**
+   Three of the five things worth doing to it were done when the question was asked
+   (2026-09-08): `/debug/pprof/cmdline` is not registered, because argv names the
+   credentials file, the token, the backing tree and the account; a non-loopback
+   bind is refused rather than warned about, and takes an explicit
+   `-pprof-allow-remote`; and `IdleTimeout` is set, which it had to be, since it
+   falls back to an unset `ReadTimeout` and an idle keep-alive was therefore held
+   forever. The two that remain are this milestone's shape rather than that flag's.
+   **Splitting the heavy routes** — `profile` and `trace` are what let a caller make
+   a busy mount slower on request, and MC-53 uses neither, so a default set of
+   `heap`/`goroutine`/`allocs` would cost the soak nothing — is a second surface
+   with its own default, which is question (a) above wearing different clothes. And
+   **serving profiles over the unix socket** removes the port altogether: filesystem
+   permissions become the authorisation, `go tool pprof` reads a file that `curl
+   --unix-socket` wrote, and nothing is left for a container's port forwarder to
+   publish. That last one is not hypothetical — an editor's auto-forwarder will
+   publish a loopback bind off the host, which is precisely the case the old warning
+   never fired for.
+
    **Shape and acceptance.** `internal/control` holds the server (provider-agnostic,
    above `app`, driven by `App` because `App` owns the mounts), the engine and
    downloader grow read-only snapshot accessors, and the versioned artefact is
@@ -2096,11 +2140,43 @@ are both lossy and racy.
    byte like a signal.
 
 
-17. **M15 — Special files, POSIX metadata, and the mount's safety options.** Not
-   started. This is MC-13 (`docs/dev/multiclient-test-plan.md` §3, Group II) promoted
-   from "define the behaviour and write it down" to a set of decisions, because an
-   audit found half of them already true by accident and the other half one-line
-   changes that close a security surface.
+17. **M15 — Special files, POSIX metadata, and the mount's safety options.**
+   **Items 1–3 shipped (2026-09-08); 4 and 5 remain, in that order.** This is MC-13
+   (`docs/dev/multiclient-test-plan.md` §3, Group II) promoted from "define the
+   behaviour and write it down" to a set of decisions, because an audit found half
+   of them already true by accident and the other half one-line changes that close
+   a security surface.
+
+   **What shipping 1–3 changed about the entry below, all of it found by running
+   the tests rather than by reading the code.** The one-line changes were one-line
+   changes and the platform was not. Three things:
+
+   - **The compulsory options cannot be one list.** FreeBSD's kernel dropped
+     `MNT_NODEV` — only devfs may hold device nodes, so the property holds there by
+     construction — and `mount_fusefs` parses `-o` against a fixed table and
+     **fails the mount** on an option it does not know: `mount_fusefs: -o dev:
+     option not supported`, and no mount at all. Item 1 as written would have made
+     drivel unmountable on FreeBSD. `compulsoryOptions()` is therefore per platform
+     (`internal/vfs/mountopts_*.go`), which is also the honest place to say that
+     macOS has the flag and no maintainer has run it.
+   - **On FreeBSD a special file cannot be created through the mount at all**, so
+     item 3's log line has nothing to describe there. Two independent causes:
+     fusefs sends `rdev = ~0` on the MKNOD for a fifo while FreeBSD's `mknod(2)`
+     accepts `S_IFIFO` only when `dev == 0`, so go-fuse's loopback — which passes
+     rdev through verbatim — yields `EINVAL` before drivel's override decides
+     anything; and FreeBSD's `mknod(2)` refuses `S_IFREG` outright, on an ordinary
+     ZFS directory as much as through a mount. Neither is drivel's to fix here and
+     neither risks data (a loud `EINVAL`, no file), so the tests **assert** that
+     rather than skipping, and the platform behaviour is pinned.
+   - **`Mknod` had to grow a case the entry did not have.** `mknod(2)` with no type
+     bits creates a *regular* file, which must sync like any other, or the mount
+     and the sweep disagree about the same file — the walk pushes whatever is
+     regular, so syncing would depend on which syscall created it. That is MC-12's
+     shape (§4.14 of the test plan) arriving by a second route, and it is a bug
+     wherever it appears, so the regular-file branch emits `OpCreate`.
+
+   Item 4 is unchanged and still waits on the provider-metadata capability; item 5
+   still waits on item 4.
 
    **What the audit found, which is most of the answer.** The M7b local walk
    already skips everything that is not a regular file (`reconcile.go`,
@@ -2115,7 +2191,7 @@ are both lossy and racy.
    and silence is what turns "unsupported" into a support question.
 
    1. **`nodev` and `nosuid` are compulsory mount options, with no flag to disable
-      them.** This is a cloud-storage client: a device node or a setuid binary
+      them. ✅ Shipped.** This is a cloud-storage client: a device node or a setuid binary
       arriving from a remote is never something a user asked for, and there is no
       legitimate case to weigh against refusing it. On the unprivileged path they
       are already forced — fusermount mounts FUSE filesystems `nodev,nosuid` by
@@ -2133,7 +2209,7 @@ are both lossy and racy.
       discharge §10.4's rule that permission metadata from a remote source is
       executable trust and that setuid/setgid are masked by default.
 
-   2. **Hard links are refused, with `EPERM`.** No provider on the roadmap can
+   2. **Hard links are refused, with `EPERM`. ✅ Shipped.** No provider on the roadmap can
       represent them, and there is no benefit in inventing a representation: what a
       hard link buys — two names, one inode, one copy of the bytes — is precisely
       what a path-addressed remote cannot express. `link(2)` documents `EPERM` as
@@ -2150,15 +2226,15 @@ are both lossy and racy.
       been told the link succeeded. Revisit if enough users ask for it; this
       decision is reversible in a way that silently-broken links are not.
 
-   3. **Non-regular files are skipped, and the skip is logged once per path.**
-      Fifos, sockets and device nodes have no byte stream to sync, so the local file
+   3. **Non-regular files are skipped, and the skip is logged once per path.
+      ✅ Shipped.** Fifos, sockets and device nodes have no byte stream to sync, so the local file
       stays and the remote never learns of it — the behaviour the walk already has.
       What is added is *saying so*, at both sites that make the decision (the mount,
       when it declines to emit; the sweep, when it steps over one), plus a note in
       the man page. A cost the user cannot see is a cost they report as a bug.
 
    4. **POSIX mode, ownership and ACLs get two interchangeable channels, chosen per
-      mount** — the provider's own metadata where it has some, or a sidecar in the
+      mount.** *(Not started; a milestone of its own.)* — the provider's own metadata where it has some, or a sidecar in the
       backing store. Both are needed and neither is a default for everyone: putting
       permissions into a cloud API is a disclosure some users will refuse outright,
       and a sidecar is a file in the tree that syncs like any other. This is §10
@@ -2237,11 +2313,13 @@ are both lossy and racy.
       `.rclonelink` on materialisation costs almost nothing and makes an existing
       rclone tree work, which is worth doing when the rest lands.
 
-   **Sequencing.** 1–3 are small, independent of everything else, and belong
+   **Sequencing.** 1–3 were small, independent of everything else, and belonged
    *before* the next Tier B round rather than after it: they change what a fleet
    does with a file it cannot represent, which is a thing the fleet tests observe.
-   4 is a milestone of its own and waits on the provider-metadata capability. 5
-   waits on both.
+   They landed on 2026-09-08, so MC-13 is now answered for everything except
+   metadata, and the Tier B rounds can be read against the behaviour above. 4 is a
+   milestone of its own and waits on the provider-metadata capability. 5 waits on
+   both.
 
 ### M0 — Test & CI (cross-cutting, always open)
 

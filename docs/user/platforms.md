@@ -29,6 +29,19 @@ filesystems that cannot, is in [lazy mode](lazy-mode.md#the-one-rule-the-backing
 On FreeBSD in particular: UFS and ZFS carry them, **tmpfs does not**, so a tmpfs
 `/tmp` is not a usable `-data`.
 
+**Special files cannot be created through the mount on FreeBSD.** `mkfifo` on the
+mountpoint fails with `EINVAL` — FreeBSD's FUSE layer and its `mknod(2)` disagree
+about how to spell a FIFO, below anything Drivel controls — and FreeBSD's
+`mknod(2)` refuses to create a *regular* file at all, on an ordinary directory as
+much as on a mount. Neither loses data: you get a clear error and no file, and
+none of these would have synced anyway ([data safety](data-safety.md#files-drivel-does-not-sync)).
+Symlinks work normally.
+
+**`nodev` is not requested on FreeBSD**, because the kernel no longer has such a
+flag — only `devfs` may hold device nodes there, so the guarantee holds without
+one. `nosuid` is requested on every platform. Asking for `nodev` on FreeBSD would
+not tighten anything; it would fail the mount outright.
+
 **`-lazy` has never been run on macOS.** The attribute code there is largely the
 same body Linux runs and is covered by Linux CI, but the platform as a whole is
 unverified. Prefer eager mode on a Mac until someone has run it.

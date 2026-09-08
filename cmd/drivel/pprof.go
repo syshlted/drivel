@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/pprof"
+	"strings"
 	"time"
 )
 
@@ -25,6 +26,14 @@ import (
 // a filesystem means path names, and in a buffer somewhere, file bytes — and
 // lets them start a CPU profile or an execution trace, which is a plausible way
 // to make a busy mount slower on request.
+//
+// So a bind that is not loopback is *refused*, and takes an explicit
+// -pprof-allow-remote to proceed. It was warned about and served until the
+// warning was found to be arguing with the wrong threat: typing `:6060` is a
+// muscle-memory default rather than a decision, and inside a dev container even
+// a loopback bind can be published by an editor's port forwarder, which the
+// warning never fires for. What the refusal buys is that the exposure is now
+// something someone typed a second flag to get.
 
 // startPprof serves the profiling endpoints on addr until ctx is cancelled. It
 // returns the address it actually bound — which is not the one passed in when
@@ -34,7 +43,12 @@ import (
 // to run this is to be measuring during a long run, and a soak that spent a day
 // producing nothing because the port was busy is worse than one that refused to
 // start.
-func startPprof(ctx context.Context, addr string) (bound net.Addr, stop func(), err error) {
+func startPprof(ctx context.Context, addr string, allowRemote bool) (bound net.Addr, stop func(), err error) {
+	addr = withLoopbackHost(addr)
+	if !allowRemote && remoteBind(addr) {
+		return nil, nil, errRemote(addr)
+	}
+
 	// ListenConfig rather than net.Listen: ctx bounds the name resolution, and it
 	// is the form the rest of the tree uses (internal/gauth's loopback server).
 	var lc net.ListenConfig
@@ -43,13 +57,24 @@ func startPprof(ctx context.Context, addr string) (bound net.Addr, stop func(), 
 		return nil, nil, fmt.Errorf("pprof endpoint: %w", err)
 	}
 
+	// The backstop for what the string could not decide: a hostname resolves at
+	// bind time, and only the listener knows what it landed on. Closing it again
+	// costs a socket that existed for microseconds and never served a request.
+	if !allowRemote && !loopback(ln.Addr()) {
+		_ = ln.Close()
+		return nil, nil, errRemote(ln.Addr().String())
+	}
+
 	// Registered explicitly rather than by importing for side effect. The side
 	// effect is registration on http.DefaultServeMux, which is a mux this process
 	// does not serve today and might tomorrow; naming the routes here keeps the
 	// exposed surface to what is written down.
 	mux := http.NewServeMux()
 	mux.HandleFunc("/debug/pprof/", pprof.Index) // also heap, goroutine, allocs, block, mutex
-	mux.HandleFunc("/debug/pprof/cmdline", pprof.Cmdline)
+	// pprof.Cmdline is deliberately not registered. It returns this process's
+	// argv, which under M8 names the credentials file, the token file, the
+	// backing tree and the account — a map to the secrets rather than the
+	// secrets, and nothing in the soak (MC-53) or in `go tool pprof` needs it.
 	mux.HandleFunc("/debug/pprof/profile", pprof.Profile)
 	mux.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
 	mux.HandleFunc("/debug/pprof/trace", pprof.Trace)
@@ -65,14 +90,22 @@ func startPprof(ctx context.Context, addr string) (bound net.Addr, stop func(), 
 		// progress — so any value here would silently become the longest profile
 		// this build can ever take. Same shape as gdrive's ChunkTransferTimeout.
 		WriteTimeout: 0,
+		// Between requests, though, an idle keep-alive connection should not be
+		// held open forever — and it would be, since IdleTimeout falls back to
+		// ReadTimeout, which is also unset. A sampler polling every few seconds
+		// reconnects without noticing; nothing here streams between requests.
+		IdleTimeout: 60 * time.Second,
 	}
 
 	log.Printf("pprof endpoint on http://%s/debug/pprof/", ln.Addr())
+	// Reachable only with -pprof-allow-remote, which is consent rather than a
+	// mistake — so this is a reminder of what is now exposed, not a warning about
+	// something that can still be taken back.
 	if !loopback(ln.Addr()) {
-		log.Printf("WARNING: the pprof endpoint at %s is not on a loopback address. "+
-			"It serves this process's heap — which holds the paths, and somewhere the bytes, "+
-			"of files being synced — to anyone who can reach it, and lets them start a CPU "+
-			"profile. Bind it to localhost and tunnel instead.", ln.Addr())
+		log.Printf("WARNING: the pprof endpoint at %s is not on a loopback address, as "+
+			"-pprof-allow-remote asked for. It serves this process's heap — which holds the "+
+			"paths, and somewhere the bytes, of files being synced — to anyone who can reach "+
+			"it, and lets them start a CPU profile.", ln.Addr())
 	}
 
 	go func() {
@@ -99,7 +132,7 @@ func startPprof(ctx context.Context, addr string) (bound net.Addr, stop func(), 
 }
 
 // loopback reports whether addr is reachable only from this host. A wildcard
-// bind ("" / 0.0.0.0 / ::) is not, which is the case the warning is really for:
+// bind ("" / 0.0.0.0 / ::) is not, which is the case the refusal is really for:
 // it is what a user types when they want to reach the endpoint from outside a
 // container and have not thought about who else can.
 func loopback(addr net.Addr) bool {
@@ -112,4 +145,52 @@ func loopback(addr net.Addr) bool {
 		return host == "localhost"
 	}
 	return ip.IsLoopback()
+}
+
+// withLoopbackHost expands a bare port to a loopback address, so `-pprof 6060`
+// means the thing a user typing it intends. It defines an input that was
+// previously invalid — net.Listen rejects "6060" outright — rather than
+// reinterpreting a valid one, which is the line that keeps this from being a
+// silent change of what was asked for. A wildcard `:6060` is left exactly as
+// written, to be refused by name below.
+func withLoopbackHost(addr string) string {
+	if addr == "" || strings.Contains(addr, ":") {
+		return addr
+	}
+	return net.JoinHostPort("127.0.0.1", addr)
+}
+
+// remoteBind reports whether addr names something reachable from off this host,
+// when the string alone settles it: a wildcard host (the empty half of ":6060")
+// binds every interface, and an IP literal answers for itself. A hostname does
+// not settle it — that waits for the address the listener actually took.
+func remoteBind(addr string) bool {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return false // malformed: let Listen produce the error, which says more
+	}
+	if host == "" {
+		return true
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		return !ip.IsLoopback()
+	}
+	return false
+}
+
+func errRemote(addr string) error {
+	return fmt.Errorf("pprof endpoint: refusing to serve %s, which is not a loopback address. "+
+		"It serves this process's heap — which holds the paths, and somewhere the bytes, of files "+
+		"being synced — to anyone who can reach it, and lets them start a CPU profile. Bind it to "+
+		"localhost and tunnel, or pass -pprof-allow-remote to accept that", addr)
+}
+
+// validatePprofFlags rejects -pprof-allow-remote given without -pprof. A flag
+// that is accepted and does nothing is M8 rule 6's failure wearing a new hat:
+// the user believes they asked for something, and nothing says otherwise.
+func validatePprofFlags(addr string, allowRemoteGiven bool) error {
+	if allowRemoteGiven && addr == "" {
+		return errors.New("-pprof-allow-remote has no effect without -pprof ADDR")
+	}
+	return nil
 }

@@ -86,6 +86,18 @@ recognises the expiry and recovers by re-enumerating; if you suspect it has not,
 backing filesystem supports extended attributes — this is the failure mode that
 rule exists to prevent. See [lazy mode](lazy-mode.md#the-one-rule-the-backing-filesystem-must-support-extended-attributes).
 
+**`ln: failed to create hard link: Operation not permitted`.** Deliberate. Drivel
+refuses hard links because no cloud store it can talk to represents them, and
+permitting one produced two files that silently diverged. Symlinks work; see
+[data safety](data-safety.md#hard-links).
+
+**A symlink, FIFO or socket is not appearing on my other machines.** It never
+will. Those have no content to upload and no representation on Drive, so they stay
+in the backing directory on the machine that made them. Drivel logs a
+`skip … no remote representation, stays local` line for each one, from the mount
+and from the sweep. On FreeBSD, creating one on the mount fails outright with
+`EINVAL` — see [platforms](platforms.md#what-changes-off-linux).
+
 **Everything is slow to appear.** Inbound changes arrive by polling, on an
 adaptive interval: about every 2 seconds while the feed is active, backing off
 toward 30 seconds once it goes quiet. There is no push channel — Drivel follows

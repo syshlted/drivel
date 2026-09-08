@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"io/fs"
 	"log"
 	"os"
 	"path/filepath"
@@ -782,6 +783,69 @@ func TestDeletesExactlyAtTheCapStillRun(t *testing.T) {
 	for i := 0; i < 3; i++ {
 		if f.exists(fmt.Sprintf("f%d.txt", i)) {
 			t.Fatalf("f%d.txt survived a delete pass within the cap", i)
+		}
+	}
+}
+
+// --- special files (M15) ----------------------------------------------------
+
+// The sweep's local walk steps over anything that is not a regular file, and now
+// says which file and what kind.
+//
+// The stepping-over is not new — a symlink, fifo, socket or device node has no
+// byte stream to upload, so there is nothing to push and never was. What M15 adds
+// is the line. Silence here is how "drivel does not sync symlinks" reaches a user
+// as "drivel lost my file": the walk is the one place that sees the file and
+// declines it, and it was the only decision in the sweep that logged nothing at
+// all.
+//
+// A symlink rather than a fifo because os.Symlink is stdlib on every platform:
+// this package must keep building where internal/vfs does not, so its tests do
+// not reach for unix-only syscalls. kindOf's other branches are covered below.
+func TestSweepLogsTheLocalFilesItCannotSync(t *testing.T) {
+	f := newSweepFixture(t, ReconcileOptions{Force: true, Fetch: true})
+	logs := &capture{}
+	f.dl.Logger(log.New(logs, "", 0))
+
+	writeFile(t, f.dir, "real.txt", "syncs")
+	if err := os.Symlink("real.txt", filepath.Join(f.dir, "alias.txt")); err != nil {
+		t.Skipf("this filesystem cannot make symlinks: %v", err)
+	}
+
+	f.run(t)
+
+	if n := logs.count("[sweep] skip    alias.txt (symbolic link: no remote representation, stays local)"); n != 1 {
+		t.Errorf("logged the skip %d time(s); want exactly 1\nfull log:\n%s", n, strings.Join(logs.lines(), "\n"))
+	}
+	// The summary carries the count, so an operator watching a large tree sees the
+	// total without reading every line.
+	if n := logs.count("1 local special file(s) skipped"); n != 1 {
+		t.Errorf("the sweep summary does not report the skip\nfull log:\n%s", strings.Join(logs.lines(), "\n"))
+	}
+	// The point of the skip is that nothing is pushed for it — and that the
+	// regular file beside it still is, so this is a filter and not a stall.
+	if got, want := f.push.ops(), []string{"write real.txt"}; !equal(got, want) {
+		t.Fatalf("pushes = %v; want %v (the symlink must not be pushed, the regular file must)", got, want)
+	}
+}
+
+// kindOf names every type the walk can meet. It is a duplicate of vfs.specialKind
+// on purpose — the engine must not import the mount backend — so the two must be
+// kept saying the same words, and this table is half of what says they do.
+func TestKindOfNamesEveryType(t *testing.T) {
+	for _, tc := range []struct {
+		mode fs.FileMode
+		want string
+	}{
+		{fs.ModeSymlink, "symbolic link"},
+		{fs.ModeNamedPipe, "named pipe"},
+		{fs.ModeSocket, "socket"},
+		{fs.ModeDevice | fs.ModeCharDevice, "character device"},
+		{fs.ModeDevice, "block device"},
+		{fs.ModeIrregular, "special file"},
+	} {
+		if got := kindOf(tc.mode | 0o644); got != tc.want {
+			t.Errorf("kindOf(%v) = %q; want %q", tc.mode, got, tc.want)
 		}
 	}
 }

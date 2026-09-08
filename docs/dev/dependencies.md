@@ -10,6 +10,12 @@ the cross-compile matrix honest. And **nothing may be a process-global**: the
 registry is a value, not an `init()`-populated package map, so two independently
 configured providers can run in one process.
 
+The first constraint is enforced at build time rather than assumed: `make build`
+sets `CGO_ENABLED=0`, because the *standard library* reaches for cgo even when
+your code does not. The single exception — distro packaging, where linking the
+system's libraries deliberately offloads their security patching to the
+distribution — is in [Building](building.md#static-by-default-dynamic-for-packagers).
+
 ## Direct
 
 ### `github.com/hanwen/go-fuse/v2` — the FUSE binding
@@ -126,7 +132,7 @@ the reason TOML was chosen.
 | **A CLI framework** | `flag`, plus a hand-written subcommand switch. Two subcommands do not justify a framework, and the flag→config mapping has to be explicit anyway. |
 | **A test framework** | Standard `testing` only. No assertion DSL. |
 | **A metrics library** | Counters are plain fields. If a control API lands (M14), it serves a snapshot, not a Prometheus registry. |
-| **cgo, anywhere** | It would end the cross-compile matrix and the pure-Go build. This is the constraint that rules out libfuse, WinFsp/cgofuse, and every cgo SQLite. |
+| **cgo, anywhere** | It would end the cross-compile matrix and the pure-Go build. This is the constraint that rules out libfuse, WinFsp/cgofuse, and every cgo SQLite. Distro packaging may enable it for the system libc alone; nothing in the tree may *require* it. |
 | **A cloud SDK beyond Drive's** | A second provider brings its own client, inside its own package, below the seam. |
 
 ## Upgrading

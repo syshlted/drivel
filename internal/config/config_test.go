@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/zishmusic/drivel/internal/hydrate"
 	"github.com/zishmusic/drivel/internal/syncengine"
 )
 
@@ -399,5 +400,51 @@ func TestDefaultPathsFollowXDG(t *testing.T) {
 	// A name that escapes its directory must never reach a path join.
 	if _, err := StateDir("../elsewhere"); err == nil {
 		t.Error("StateDir accepted a traversing name")
+	}
+}
+
+// Both pool sizes reach the spec, default independently, and are refused at zero.
+// Separate keys because the directions are tuned separately: one number carried
+// into both fields would pass a test that used the same value for each.
+func TestWorkerPools(t *testing.T) {
+	c := load(t, `
+[[mount]]
+path = "./defaults"
+[[mount]]
+path            = "./tuned"
+upload-workers  = 11
+hydrate-workers = 13
+`)
+	specs, err := c.Specs()
+	if err != nil {
+		t.Fatalf("Specs: %v", err)
+	}
+	if specs[0].UploadWorkers != syncengine.DefaultWorkers {
+		t.Errorf("unset upload-workers = %d; want the default %d", specs[0].UploadWorkers, syncengine.DefaultWorkers)
+	}
+	if specs[0].HydrateWorkers != hydrate.DefaultWorkers {
+		t.Errorf("unset hydrate-workers = %d; want the default %d", specs[0].HydrateWorkers, hydrate.DefaultWorkers)
+	}
+	if specs[1].UploadWorkers != 11 || specs[1].HydrateWorkers != 13 {
+		t.Errorf("workers = up %d / hydrate %d; want 11 / 13", specs[1].UploadWorkers, specs[1].HydrateWorkers)
+	}
+}
+
+// Zero is a request, not an omission — `max-deletes = 0` means "no limit" three
+// lines up in the same file, so reading `upload-workers = 0` as "use the default"
+// is the M8 rule 6 failure: a setting that looks applied and is not.
+func TestWorkerPoolOfZeroIsRefused(t *testing.T) {
+	for _, key := range []string{"upload-workers", "hydrate-workers"} {
+		for _, val := range []string{"0", "-1"} {
+			c := load(t, "[[mount]]\npath = \"./a\"\n"+key+" = "+val+"\n")
+			_, err := c.Specs()
+			if err == nil {
+				t.Errorf("%s = %s was accepted", key, val)
+				continue
+			}
+			if !strings.Contains(err.Error(), key) {
+				t.Errorf("error %q does not name %s", err, key)
+			}
+		}
 	}
 }

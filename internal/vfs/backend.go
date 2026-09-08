@@ -30,6 +30,10 @@ func (backend) Serve(ctx context.Context, opts mount.Options) error {
 			Debug:  opts.Debug,
 			FsName: opts.FsName,
 			Name:   "drivel",
+			// nodev and nosuid are compulsory: there is no flag to turn them off,
+			// and the per-platform list is the only thing that varies. See
+			// mountopts_*.go for what each platform can express and why.
+			Options: compulsoryOptions(),
 			// Xattrs are off unless the mount asked for them (mount.Options.Xattr).
 			// go-fuse answers ENOSYS to the first getxattr, after which the kernel
 			// stops issuing xattr operations for this mount at all — so the cost of

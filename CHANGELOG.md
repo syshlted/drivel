@@ -9,6 +9,86 @@ from source.
 
 ## Unreleased
 
+### Hard links are refused, and the files Drivel skips now say so — 2026-09-08
+
+Mounts are now always `nodev` and `nosuid`, with no option to turn them off. A
+device node or a setuid binary arriving from a remote is never something you asked
+for. This covers the mountpoint; with `-data`, the backing directory is an
+ordinary directory and is unaffected either way. FreeBSD requests only `nosuid`,
+because its kernel has no `nodev` flag to request.
+
+**Hard links now fail with `EPERM`** — the error `link(2)` defines for a
+filesystem that cannot create them. Before, the link succeeded and the outcome was
+worse than the error: both names were ordinary files, so both were uploaded, as
+two independent remote objects that diverged on the first write. You were told it
+worked. Symlinks are unaffected.
+
+Symlinks, FIFOs, sockets and device nodes are still created locally and still
+never synced — but Drivel now **logs one line naming each one**, when you create
+it and when the enumeration sweep walks past it, and the sweep's summary counts
+them. Silence was how "Drivel does not sync symlinks" reached people as "Drivel
+lost my file".
+
+One inconsistency fixed while writing that down: a regular file created with
+`mknod(2)` rather than `open(O_CREAT)` emitted no event, so whether it synced
+depended on which syscall made it and on whether Drivel was watching. It now syncs
+like any other regular file.
+
+On FreeBSD, creating a FIFO or a device node through the mount fails with
+`EINVAL`. That is the platform, below anything Drivel controls; nothing is lost,
+because none of these ever synced.
+
+### The profiling endpoint stops trusting the network — 2026-09-08
+
+`-pprof` now binds **loopback only**. A non-loopback address is refused at
+startup and takes a new `-pprof-allow-remote` to proceed; before, it was served
+with a warning, which arrives after the heap is already exposed. `-pprof 6060`
+(a bare port) now means `127.0.0.1:6060` instead of failing to parse.
+
+`/debug/pprof/cmdline` is no longer served at all. It returned the process's
+command line, which names your credentials file, your token, your backing
+directory and your account — a map to the secrets rather than the secrets.
+
+Idle connections to the endpoint are now closed after a minute rather than held
+open indefinitely. Nothing else about profiling changes: it is still off unless
+you ask for it, still one endpoint for the whole process, and a port it cannot
+bind is still a startup error.
+
+### Tunable transfer concurrency, and a cap on lazy fetches — 2026-09-08
+
+Two new per-mount settings: `-upload-workers` / `upload-workers` (default 4) for
+how many files are uploaded at once, and `-hydrate-workers` / `hydrate-workers`
+(default 8) for how many placeholders are fetched at once in lazy mode.
+
+The upload pool was always four and could not be changed. The fetch pool did not
+exist: a recursive read over a lazy tree faulted in every file simultaneously, so
+a `grep -r` across a thousand placeholders opened a thousand downloads. It is now
+bounded by default, which is a behaviour change for lazy mounts — a large parallel
+read is paced rather than issued all at once.
+
+They are two numbers rather than one because the directions are not alike: a
+typical link's downlink is several times its uplink, the pools bound different
+work, and a provider may cap the two differently. Both are per mount and nothing
+budgets across mounts — a shared limit would let one account's traffic starve
+another's and let each infer when the other was busy.
+
+Raising the upload count buys less than it looks like it should, and
+[the configuration guide](docs/user/configuration.md#transfer-concurrency) says
+why. Writes to the same path stay serialised whatever you set. The inbound change
+feed is unaffected: it still applies remote changes one at a time.
+
+### Release builds are now statically linked — 2026-09-08
+
+`make build` produces a binary with no library dependencies, so it runs on any
+Linux of the same architecture regardless of that machine's glibc version.
+Previously the default build linked the build host's C library, which meant a
+binary built on a recent distro would refuse to start on an older one.
+
+Distribution packagers can opt back in with `make build CGO_ENABLED=1`, which is
+the point: a distro package should link the system's libraries so its security
+updates arrive through the package manager rather than waiting on a Drivel
+release.
+
 ### Cheaper first sync for folder mounts — 2026-09-07
 
 If you mount a *folder* rather than your whole Drive, the initial scan now

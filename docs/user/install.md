@@ -52,9 +52,15 @@ cd drivel
 go build -o ./bin/drivel ./cmd/drivel
 ```
 
-Or `make build`, which does the same thing and is what CI uses. `make help` lists
-every target; contributors should read [the developer build
-guide](../dev/building.md) instead of this page.
+Or `make build`, which is what CI uses and produces a **statically linked** binary
+with no library dependencies — it runs on any Linux of the same architecture,
+whatever glibc that machine has. `make help` lists every target; contributors
+should read [the developer build guide](../dev/building.md) instead of this page.
+
+If you are **packaging Drivel for a distribution**, build with `make build
+CGO_ENABLED=1` instead. That links the system's C library, so the package tracks
+your distribution's patch level and its security updates arrive through your
+package manager rather than waiting on a Drivel release.
 
 Cross-compiling works for every Linux architecture, `darwin/amd64`,
 `darwin/arm64` and FreeBSD:

@@ -11,6 +11,7 @@ import (
 	"github.com/BurntSushi/toml"
 
 	"github.com/zishmusic/drivel/internal/app"
+	"github.com/zishmusic/drivel/internal/hydrate"
 	"github.com/zishmusic/drivel/internal/syncengine"
 )
 
@@ -33,19 +34,21 @@ type account struct {
 }
 
 type mountEntry struct {
-	name          string
-	accountName   string
-	path          string
-	data          string
-	state         string
-	lazy          bool
-	xattr         bool
-	debug         bool
-	resync        bool
-	materialize   bool
-	maxDeletes    *int
-	sweepInterval *string
-	provider      map[string]any
+	name           string
+	accountName    string
+	path           string
+	data           string
+	state          string
+	lazy           bool
+	xattr          bool
+	debug          bool
+	resync         bool
+	materialize    bool
+	maxDeletes     *int
+	sweepInterval  *string
+	uploadWorkers  *int
+	hydrateWorkers *int
+	provider       map[string]any
 }
 
 // The TOML shapes. They are separate from the resolved types above so that
@@ -61,19 +64,27 @@ type accountTOML struct {
 }
 
 type mountTOML struct {
-	Name          string         `toml:"name"`
-	Account       string         `toml:"account"`
-	Path          string         `toml:"path"`
-	Data          string         `toml:"data"`
-	State         string         `toml:"state"`
-	Lazy          bool           `toml:"lazy"`
-	Xattr         bool           `toml:"xattr"`
-	Debug         bool           `toml:"debug"`
-	Resync        bool           `toml:"resync"`
-	Materialize   bool           `toml:"materialize"`
-	MaxDeletes    *int           `toml:"max-deletes"`
-	SweepInterval *string        `toml:"sweep-interval"`
-	Provider      map[string]any `toml:"provider"`
+	Name          string  `toml:"name"`
+	Account       string  `toml:"account"`
+	Path          string  `toml:"path"`
+	Data          string  `toml:"data"`
+	State         string  `toml:"state"`
+	Lazy          bool    `toml:"lazy"`
+	Xattr         bool    `toml:"xattr"`
+	Debug         bool    `toml:"debug"`
+	Resync        bool    `toml:"resync"`
+	Materialize   bool    `toml:"materialize"`
+	MaxDeletes    *int    `toml:"max-deletes"`
+	SweepInterval *string `toml:"sweep-interval"`
+	// Pointers so that an explicit 0 is distinguishable from "not mentioned" and
+	// can be refused. Neither number has a meaning at 0 — an upload pool of that
+	// size never pushes and a fetch pool of it never hydrates — and in a file
+	// where `max-deletes = 0` means "no limit", silently reading it as "use the
+	// default" would be the M8 rule 6 failure: a setting that looks applied and
+	// is not.
+	UploadWorkers  *int           `toml:"upload-workers"`
+	HydrateWorkers *int           `toml:"hydrate-workers"`
+	Provider       map[string]any `toml:"provider"`
 }
 
 // Load parses the config file at path.
@@ -119,19 +130,21 @@ func Load(path string) (*Config, error) {
 	}
 	for i, m := range typed.Mounts {
 		c.mounts = append(c.mounts, mountEntry{
-			name:          m.Name,
-			accountName:   m.Account,
-			path:          m.Path,
-			data:          m.Data,
-			state:         m.State,
-			lazy:          m.Lazy,
-			xattr:         m.Xattr,
-			debug:         m.Debug,
-			resync:        m.Resync,
-			materialize:   m.Materialize,
-			maxDeletes:    m.MaxDeletes,
-			sweepInterval: m.SweepInterval,
-			provider:      m.Provider,
+			name:           m.Name,
+			accountName:    m.Account,
+			path:           m.Path,
+			data:           m.Data,
+			state:          m.State,
+			lazy:           m.Lazy,
+			xattr:          m.Xattr,
+			debug:          m.Debug,
+			resync:         m.Resync,
+			materialize:    m.Materialize,
+			maxDeletes:     m.MaxDeletes,
+			sweepInterval:  m.SweepInterval,
+			uploadWorkers:  m.UploadWorkers,
+			hydrateWorkers: m.HydrateWorkers,
+			provider:       m.Provider,
 		})
 		if m.Path == "" {
 			return nil, fmt.Errorf("%s: mount #%d has no path", path, i+1)
@@ -242,6 +255,23 @@ func (c *Config) spec(m mountEntry) (app.MountSpec, error) {
 			return spec, fmt.Errorf("sweep-interval: %w", err)
 		}
 		spec.SweepInterval = d
+	}
+
+	spec.UploadWorkers = syncengine.DefaultWorkers
+	if m.uploadWorkers != nil {
+		if *m.uploadWorkers < 1 {
+			return spec, fmt.Errorf("upload-workers: %d is not a pool size (1 or more; omit the key for the default of %d)",
+				*m.uploadWorkers, syncengine.DefaultWorkers)
+		}
+		spec.UploadWorkers = *m.uploadWorkers
+	}
+	spec.HydrateWorkers = hydrate.DefaultWorkers
+	if m.hydrateWorkers != nil {
+		if *m.hydrateWorkers < 1 {
+			return spec, fmt.Errorf("hydrate-workers: %d is not a pool size (1 or more; omit the key for the default of %d)",
+				*m.hydrateWorkers, hydrate.DefaultWorkers)
+		}
+		spec.HydrateWorkers = *m.hydrateWorkers
 	}
 
 	// No account means a log-only mount: no provider, no state DB, no network.

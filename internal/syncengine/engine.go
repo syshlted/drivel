@@ -39,9 +39,21 @@ import (
 // Defaults for the outbound uploader. All are overridable via Config.
 const (
 	defaultDebounce     = 300 * time.Millisecond
-	defaultWorkers      = 4
 	defaultDrainTimeout = 30 * time.Second
 )
+
+// DefaultWorkers is the out-of-the-box size of the path-hashed upload pool.
+//
+// It is deliberately small. Concurrency here buys latency-hiding, not bandwidth:
+// every push shares one HTTP/3 connection and therefore one congestion window,
+// so raising it overlaps the per-file round trips (auth, the M6 Stat gate,
+// metadata) rather than moving more bytes. Against that, each in-flight upload
+// can hold a provider-sized chunk buffer, and past the point the provider starts
+// refusing requests, more workers cost quota and gain nothing — the M7c descent
+// measured 97x the ideal request count when it pushed a throttled provider
+// harder. Four is a floor that is never the bottleneck on a consumer uplink;
+// tuning up is the user's call, per mount.
+const DefaultWorkers = 4
 
 // retryPolicy bounds the per-op backoff loop.
 type retryPolicy struct {
@@ -121,13 +133,19 @@ func New(cfg Config) *Engine {
 		e.debounce = defaultDebounce
 	}
 	if e.workers <= 0 {
-		e.workers = defaultWorkers
+		e.workers = DefaultWorkers
 	}
 	if e.drainTimeout <= 0 {
 		e.drainTimeout = defaultDrainTimeout
 	}
 	return e
 }
+
+// Workers reports the size of the upload pool this Engine is running, after
+// Config's defaulting. A read-only view of a value fixed at construction: it
+// exists so the wiring above can be tested end to end, and so a future status
+// endpoint can report the number without reaching into Run's goroutines.
+func (e *Engine) Workers() int { return e.workers }
 
 // Run consumes events until events is closed or ctx is cancelled. On either it
 // drains pending (debounced) and in-flight uploads under drainTimeout before

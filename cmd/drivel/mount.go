@@ -13,6 +13,7 @@ import (
 
 	"github.com/zishmusic/drivel/internal/app"
 	"github.com/zishmusic/drivel/internal/config"
+	"github.com/zishmusic/drivel/internal/hydrate"
 	"github.com/zishmusic/drivel/internal/provider"
 	"github.com/zishmusic/drivel/internal/provider/gdrive"
 	"github.com/zishmusic/drivel/internal/syncengine"
@@ -31,7 +32,7 @@ const driveKind = "gdrive"
 var mountShapingFlags = []string{
 	"mount", "data", "credentials", "token", "state", "index",
 	"drive-root", "drive-sweep-mode", "lazy", "xattr", "resync", "materialize", "max-deletes",
-	"sweep-interval",
+	"sweep-interval", "upload-workers", "hydrate-workers",
 }
 
 func runMount(args []string) error {
@@ -51,12 +52,19 @@ func runMount(args []string) error {
 	materialize := fset.Bool("materialize", false, "during a reconcile in eager mode, download remote files that have no local copy (implied by -lazy, where it costs only a placeholder)")
 	maxDeletes := fset.Int("max-deletes", syncengine.DefaultMaxDeletes, "cap on deletions one reconcile may infer, in either direction; 0 for no limit")
 	sweepInterval := fset.Duration("sweep-interval", syncengine.DefaultSweepInterval, "re-enumerate and reconcile the remote tree this often, timed from the last completed sweep; 0 disables it")
+	uploadWorkers := fset.Int("upload-workers", syncengine.DefaultWorkers, "how many files this mount uploads at once; same-path writes stay ordered whatever this is. Each in-flight upload can hold a provider-sized chunk buffer (16 MiB on Drive), and past the point the provider throttles, more workers cost quota rather than throughput")
+	hydrateWorkers := fset.Int("hydrate-workers", hydrate.DefaultWorkers, "how many placeholders this mount fetches at once under -lazy; bounds a recursive read over a lazy tree, which would otherwise fault every file simultaneously")
 	debug := fset.Bool("debug", false, "enable FUSE debug logging")
-	pprofAddr := fset.String("pprof", "", "serve net/http/pprof on this address (e.g. localhost:6060) for goroutine and heap profiling; empty disables it")
+	pprofAddr := fset.String("pprof", "", "serve net/http/pprof on this address for goroutine and heap profiling; a bare port means loopback, and a non-loopback address needs -pprof-allow-remote; empty disables it")
+	pprofRemote := fset.Bool("pprof-allow-remote", false, "permit -pprof to bind an address other than loopback, publishing this process's heap — and so the paths and some contents of synced files — to whoever can reach it")
 	_ = fset.Parse(args)
 
 	given := map[string]bool{}
 	fset.Visit(func(f *flag.Flag) { given[f.Name] = true })
+
+	if err := validatePprofFlags(*pprofAddr, given["pprof-allow-remote"]); err != nil {
+		return err
+	}
 
 	specs, err := mountSpecs(fset, given, specFlags{
 		configPath: *configPath, mountpoint: *mountpoint, dataDir: *dataDir,
@@ -64,6 +72,7 @@ func runMount(args []string) error {
 		driveRoot: *driveRoot, driveSweepMode: *driveSweepMode,
 		lazy: *lazy, xattr: *xattr, resync: *resync, materialize: *materialize,
 		maxDeletes: *maxDeletes, sweepInterval: *sweepInterval, debug: *debug,
+		uploadWorkers: *uploadWorkers, hydrateWorkers: *hydrateWorkers,
 	})
 	if err != nil {
 		return err
@@ -80,7 +89,7 @@ func runMount(args []string) error {
 	// Before the mounts, so a bad address fails while nothing is mounted yet, and
 	// so a mount that hangs during startup is itself profilable.
 	if *pprofAddr != "" {
-		_, stopPprof, err := startPprof(ctx, *pprofAddr)
+		_, stopPprof, err := startPprof(ctx, *pprofAddr, *pprofRemote)
 		if err != nil {
 			return err
 		}
@@ -119,6 +128,9 @@ type specFlags struct {
 	maxDeletes    int
 	sweepInterval time.Duration
 	debug         bool
+
+	uploadWorkers  int
+	hydrateWorkers int
 }
 
 // mountSpecs decides between the config file and the flags, and returns what to
@@ -163,6 +175,15 @@ func mountSpecs(fset *flag.FlagSet, given map[string]bool, f specFlags) ([]app.M
 		fset.Usage()
 		return nil, errors.New("-mount is required (or -config, or a config file at the default path)")
 	}
+	// Zero is refused rather than read as "use the default": a pool of that size
+	// transfers nothing, and -max-deletes 0 means "no limit" three flags away, so
+	// a user has every reason to expect 0 to mean something here too.
+	if f.uploadWorkers < 1 {
+		return nil, fmt.Errorf("-upload-workers %d is not a pool size (1 or more; omit the flag for the default of %d)", f.uploadWorkers, syncengine.DefaultWorkers)
+	}
+	if f.hydrateWorkers < 1 {
+		return nil, fmt.Errorf("-hydrate-workers %d is not a pool size (1 or more; omit the flag for the default of %d)", f.hydrateWorkers, hydrate.DefaultWorkers)
+	}
 	if f.lazy && f.credentials == "" {
 		// A placeholder is a promise that the bytes can be fetched later; without a
 		// provider there is nothing to redeem it against. Checked here as well as in
@@ -181,6 +202,9 @@ func mountSpecs(fset *flag.FlagSet, given map[string]bool, f specFlags) ([]app.M
 		Materialize:   f.materialize,
 		MaxDeletes:    f.maxDeletes,
 		SweepInterval: f.sweepInterval,
+
+		UploadWorkers:  f.uploadWorkers,
+		HydrateWorkers: f.hydrateWorkers,
 	}
 	// Credentials are what turn cloud sync on; without them the mount runs
 	// log-only (M1 behaviour) and never reaches a provider.

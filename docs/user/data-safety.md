@@ -80,11 +80,42 @@ delete, **not** a move to the trash. That is precisely why the cap exists.
   is no honest size for a placeholder and no content to compare. They are listed
   and counted — so their absence is never mistaken for a deletion — but never
   materialised locally.
-- **Non-regular files** — sockets, FIFOs, device nodes — are skipped. Drive has no
-  representation for them.
+- **Symlinks, sockets, FIFOs and device nodes** are created normally in the backing
+  directory and stay there. They have no byte stream, and Drive has no
+  representation for them. Drivel now **logs one line naming each one it steps
+  over**, from the mount when you create it and from the enumeration sweep when it
+  walks past it, so a file that is not syncing says so instead of just being
+  absent on your other machines.
+- **Hard links are refused** with `Operation not permitted` — see below.
 - **Extended attributes** are never synced, in either direction, whatever `-xattr`
   is set to.
 - **Conflict copies** and Drivel's own temporary files (`.drivel-*`).
+
+## Hard links
+
+`ln`, `cp -l` and anything else asking for a hard link on the mount fails with
+`EPERM` (`Operation not permitted`), which is the error `link(2)` defines for a
+filesystem that cannot make them.
+
+This is a refusal, not a bug. What a hard link buys — two names, one inode, one
+copy of the bytes — is exactly what a cloud store addressed by path cannot
+express. Earlier versions let the link succeed, and it was worse than it looked:
+the two names were then ordinary regular files, so both were uploaded, as two
+independent objects that diverged from each other on the first write. You were
+told the link worked and got two files that quietly stopped agreeing.
+
+Symlinks still work; only hard links are refused.
+
+## Mount safety options
+
+Drivel always mounts `nodev` and `nosuid`, and there is no flag to turn them off.
+A device node or a setuid binary arriving from a remote is never something you
+asked for, so nothing at the mountpoint can gain privilege or reach a device.
+
+**This covers the mountpoint, not the backing directory.** With `-data` the
+backing directory is an ordinary directory on an ordinary filesystem, reachable
+without going through Drivel at all — so if you put a setuid binary there
+yourself, it is live there. Drivel never sets those bits on your behalf.
 
 ## Same-name siblings
 
@@ -123,6 +154,7 @@ which lives on the file itself and has no database fallback by design.
   synced — it falls back to a whole-file upload, or a conflict copy.
 - Delete anything on the first run.
 - Publish a conflict copy.
+- Create a hard link, or let one become two diverging remote files.
 - Re-serialize your config file, discarding comments.
 - Send anything anywhere except Google, under credentials you created. There is no
   telemetry and no hosted service.

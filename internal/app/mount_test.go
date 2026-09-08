@@ -12,7 +12,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/zishmusic/drivel/internal/hydrate"
 	"github.com/zishmusic/drivel/internal/provider"
+	"github.com/zishmusic/drivel/internal/syncengine"
 	"github.com/zishmusic/drivel/internal/testenv"
 )
 
@@ -334,4 +336,55 @@ func waitFor(d time.Duration, cond func() bool) bool {
 		time.Sleep(20 * time.Millisecond)
 	}
 	return false
+}
+
+// The two pool sizes must reach the two different components. Asserted with
+// distinct values because the failure this guards is a crossed assignment, which
+// equal numbers would hide — and because the numbers are the whole reason the
+// directions are configured separately.
+func TestWorkerPoolsReachTheirComponents(t *testing.T) {
+	spec := baseSpec(t)
+	spec.Provider = "fake"
+	spec.Lazy = true
+	spec.UploadWorkers = 11
+	spec.HydrateWorkers = 13
+
+	m, err := Open(t.Context(), spec, registryWith(t, "fake", newFakeStore()))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer m.Close() //nolint:errcheck // the assertions below are what this test is for
+
+	if got := m.engine.Workers(); got != 11 {
+		t.Errorf("engine workers = %d; want the spec's UploadWorkers, 11", got)
+	}
+	if m.hyd == nil {
+		t.Fatal("lazy mount has no hydrator")
+	}
+	if got := m.hyd.FetchLimit(); got != 13 {
+		t.Errorf("hydrator fetch limit = %d; want the spec's HydrateWorkers, 13", got)
+	}
+}
+
+// An unset spec — a caller that builds one by hand, which is every test and the
+// M9 plugin path later — gets the package defaults rather than a pool of zero.
+// The hydrator's matters most: a zero-sized channel would block the first fetch
+// forever rather than fail.
+func TestWorkerPoolsDefaultWhenUnset(t *testing.T) {
+	spec := baseSpec(t)
+	spec.Provider = "fake"
+	spec.Lazy = true
+
+	m, err := Open(t.Context(), spec, registryWith(t, "fake", newFakeStore()))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer m.Close() //nolint:errcheck // as above
+
+	if got := m.engine.Workers(); got != syncengine.DefaultWorkers {
+		t.Errorf("engine workers = %d; want %d", got, syncengine.DefaultWorkers)
+	}
+	if got := m.hyd.FetchLimit(); got != hydrate.DefaultWorkers {
+		t.Errorf("hydrator fetch limit = %d; want %d", got, hydrate.DefaultWorkers)
+	}
 }

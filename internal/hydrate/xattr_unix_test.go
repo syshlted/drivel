@@ -87,7 +87,7 @@ func TestMissingAttributeIsNotAnError(t *testing.T) {
 
 	// And the classification the caller actually makes: a marker that is not there
 	// is "not a placeholder", never an error to fail safe on.
-	h := New(filepath.Dir(p), nil, nil)
+	h := New(filepath.Dir(p), nil, nil, 0)
 	if _, ok, err := h.Marker(filepath.Base(p)); err != nil || ok {
 		t.Errorf("Marker on an unmarked file = (ok %v, err %v); want (false, nil)", ok, err)
 	}
@@ -102,7 +102,7 @@ func TestMissingAttributeIsNotAnError(t *testing.T) {
 // reachable only on a volume xattr_darwin.go describes.
 func TestXattrsUsableOnANativeStore(t *testing.T) {
 	dir := filepath.Dir(probeFile(t))
-	if !New(dir, nil, nil).XattrsUsable() {
+	if !New(dir, nil, nil, 0).XattrsUsable() {
 		t.Error("XattrsUsable = false on a filesystem that just stored an attribute")
 	}
 	if _, err := os.Lstat(filepath.Join(dir, ".drivel-xattr-probe")); !os.IsNotExist(err) {

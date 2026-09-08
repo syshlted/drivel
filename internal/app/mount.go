@@ -78,6 +78,19 @@ type MountSpec struct {
 	Materialize   bool
 	MaxDeletes    int
 	SweepInterval time.Duration
+
+	// Transfer concurrency, per mount and deliberately not per process. Two
+	// mounts are two sets of credentials; a limiter they shared would let either
+	// one starve the other and read its activity off the contention, which is the
+	// cross-mount coupling Validate exists to prevent. Zero selects the package
+	// default in each case.
+	//
+	// They are separate numbers because the directions are not alike: a link's
+	// uplink and downlink differ, the pools bound different work (whole-file
+	// pushes off the FUSE path against hydrations blocking a read on it), and a
+	// provider may well cap the two differently.
+	UploadWorkers  int // size of the outbound path-hashed pool (syncengine)
+	HydrateWorkers int // concurrent lazy fetches (hydrate); ignored unless Lazy
 }
 
 // label is what this mount is called in a message.
@@ -216,7 +229,7 @@ func Open(ctx context.Context, spec MountSpec, reg *provider.Registry) (*Mount, 
 	// of content, and the uploader consults it to avoid pushing a placeholder's
 	// zeros over the real remote file.
 	if spec.Lazy {
-		m.hyd = hydrate.New(backing.Path, m.store, m.state)
+		m.hyd = hydrate.New(backing.Path, m.store, m.state, spec.HydrateWorkers)
 		if !m.hyd.XattrsUsable() {
 			// Without the xattr there is no placeholder record at all: IsPlaceholder
 			// reads the marker and nothing else, so an unmarked placeholder is an
@@ -243,6 +256,7 @@ func Open(ctx context.Context, spec MountSpec, reg *provider.Registry) (*Mount, 
 		State:   m.state,
 		Holes:   holesOf(m.hyd),
 		Logger:  m.lg,
+		Workers: spec.UploadWorkers,
 	})
 
 	// Inbound pull loop (M3), only if the store offers a change feed.

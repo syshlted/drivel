@@ -334,6 +334,27 @@ type sweepStats struct {
 	remoteDel   int
 	kept        int // would have been deleted locally, but the local copy diverged
 	orphaned    int // baselines dropped without acting: gone locally, unlisted remotely
+	special     int // local non-regular files stepped over: no byte stream to sync (M15)
+}
+
+// kindOf names a file type for the one job of telling a user which of their files
+// is not being synced. The mount reports the same skip from the other side and has
+// its own copy (vfs.specialKind) — see the comment there for why the engine must
+// not import the mount backend to share one. Keep the wording identical.
+func kindOf(m fs.FileMode) string {
+	switch {
+	case m&fs.ModeSymlink != 0:
+		return "symbolic link"
+	case m&fs.ModeNamedPipe != 0:
+		return "named pipe"
+	case m&fs.ModeSocket != 0:
+		return "socket"
+	case m&fs.ModeCharDevice != 0:
+		return "character device"
+	case m&fs.ModeDevice != 0:
+		return "block device"
+	}
+	return "special file"
 }
 
 func (s sweepStats) String() string {
@@ -352,6 +373,9 @@ func (s sweepStats) String() string {
 	}
 	if s.orphaned > 0 {
 		out += fmt.Sprintf(", %d stale record(s) dropped", s.orphaned)
+	}
+	if s.special > 0 {
+		out += fmt.Sprintf(", %d local special file(s) skipped", s.special)
 	}
 	return out
 }
@@ -466,6 +490,18 @@ func (d *Downloader) pushLocalOnly(ctx context.Context, sw state.Sweep, st *swee
 			return nil // Put creates ancestors; an empty dir is not worth a request
 		}
 		if !e.Type().IsRegular() {
+			// A symlink, fifo, socket or device node has no byte stream to upload, so
+			// it stays local — the behaviour this walk always had. What M15 adds is
+			// saying so: silence is what turns "unsupported" into a support question,
+			// and this is one of the two sites that make the decision (the other is
+			// the mount, in vfs/special.go, when it declines to emit).
+			//
+			// One line per path per sweep, not one ever: deduplicating across sweeps
+			// would take persistent state to record that a user has been told, and a
+			// tree full of sockets is a fact worth repeating at the interval the
+			// sweep already logs everything else at.
+			d.logf("[sweep] skip    %s (%s: no remote representation, stays local)", rel, kindOf(e.Type()))
+			st.special++
 			return nil
 		}
 		// A placeholder is remote-born by definition — never a local-only file —

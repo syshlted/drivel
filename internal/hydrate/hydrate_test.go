@@ -66,7 +66,7 @@ func newHydrator(t *testing.T, content map[string]string) (*Hydrator, *fakeStore
 	t.Helper()
 	dir := t.TempDir()
 	fs := &fakeStore{content: content}
-	h := New(dir, fs, nil)
+	h := New(dir, fs, nil, 0)
 	if !h.XattrsUsable() {
 		testenv.Unavailable(t, testenv.Xattr, "backing filesystem does not store user.* attributes")
 	}
@@ -200,7 +200,7 @@ func TestPlaceholderIsNeverMistakenForEmptyFile(t *testing.T) {
 func TestFailedHydrationKeepsPlaceholderMark(t *testing.T) {
 	dir := t.TempDir()
 	fs := &fakeStore{content: map[string]string{}, err: errors.New("network is down")}
-	h := New(dir, fs, nil)
+	h := New(dir, fs, nil, 0)
 	if !h.XattrsUsable() {
 		testenv.Unavailable(t, testenv.Xattr, "backing filesystem does not store user.* attributes")
 	}
@@ -246,7 +246,7 @@ func TestHydrateSingleflight(t *testing.T) {
 	const body = "concurrent"
 	dir := t.TempDir()
 	fs := &fakeStore{content: map[string]string{"a.txt": body}, delay: 50 * time.Millisecond}
-	h := New(dir, fs, nil)
+	h := New(dir, fs, nil, 0)
 	if !h.XattrsUsable() {
 		testenv.Unavailable(t, testenv.Xattr, "backing filesystem does not store user.* attributes")
 	}
@@ -333,7 +333,7 @@ func TestRangesTrackHydration(t *testing.T) {
 	defer st.Close()
 
 	fs := &fakeStore{content: map[string]string{"a.txt": body}}
-	h := New(dir, fs, st)
+	h := New(dir, fs, st, 0)
 	if !h.XattrsUsable() {
 		testenv.Unavailable(t, testenv.Xattr, "backing filesystem does not store user.* attributes")
 	}

@@ -83,6 +83,14 @@ type Hydrator struct {
 	ranges  provider.RangeGetter // nil when the store has no ranged reads
 	cache   Cache
 
+	// sem bounds how many DISTINCT paths fault at once. The singleflight below
+	// collapses concurrent opens of one path; nothing collapsed concurrent opens
+	// of a thousand, so a `grep -r` over a lazy tree used to issue one download
+	// per file simultaneously. It is a per-Hydrator channel, never a package
+	// global: two mounts are two accounts, and a limiter they shared would let
+	// either one stall the other and time its activity.
+	sem chan struct{}
+
 	mu       sync.Mutex
 	inflight map[string]*fetch // singleflight: concurrent opens fault once
 }
@@ -93,14 +101,30 @@ type fetch struct {
 	err  error
 }
 
+// DefaultWorkers is the out-of-the-box cap on concurrent hydrations.
+//
+// Higher than the upload default because the asymmetry is real — a consumer
+// downlink is typically several times its uplink — and because this one is on
+// the FUSE read path: a caller is blocked on every fetch it bounds, so a cap set
+// too low turns a parallel read into a queue the user waits in. Eight is also
+// what the M7c descent settled on as a ceiling against Drive. The right number is
+// ultimately the provider's to suggest, not this package's; until a provider can
+// say so, it is a constant here and a knob per mount.
+const DefaultWorkers = 8
+
 // New returns a Hydrator writing into dataDir (the backing store path — in
 // in-place mode this is the /proc/self/fd/N handle, never the mountpoint).
-// cache may be nil.
-func New(dataDir string, store provider.Store, cache Cache) *Hydrator {
+// cache may be nil. workers caps concurrent fetches; zero or less selects
+// DefaultWorkers — a zero-sized channel would block the first fetch forever.
+func New(dataDir string, store provider.Store, cache Cache, workers int) *Hydrator {
+	if workers <= 0 {
+		workers = DefaultWorkers
+	}
 	h := &Hydrator{
 		dataDir:  dataDir,
 		store:    store,
 		cache:    cache,
+		sem:      make(chan struct{}, workers),
 		inflight: map[string]*fetch{},
 	}
 	// Ranged reads are an optional provider capability; absent it, M5b would fall
@@ -110,6 +134,10 @@ func New(dataDir string, store provider.Store, cache Cache) *Hydrator {
 	}
 	return h
 }
+
+// FetchLimit reports how many hydrations may run at once, after New's defaulting.
+// A read-only view of a value fixed at construction; see Engine.Workers.
+func (h *Hydrator) FetchLimit() int { return cap(h.sem) }
 
 // SupportsRanges reports whether the store offers ranged reads (M5b/M6 input).
 func (h *Hydrator) SupportsRanges() bool { return h.ranges != nil }
@@ -280,13 +308,34 @@ func (h *Hydrator) Hydrate(ctx context.Context, rel string) error {
 	h.inflight[rel] = f
 	h.mu.Unlock()
 
-	f.err = h.fetchWhole(ctx, rel, m)
+	f.err = h.fetchLimited(ctx, rel, m)
 
 	h.mu.Lock()
 	delete(h.inflight, rel)
 	h.mu.Unlock()
 	close(f.done)
 	return f.err
+}
+
+// fetchLimited waits for a slot in the fetch pool and then hydrates rel.
+//
+// It runs INSIDE the singleflight — the caller is already registered in inflight
+// — so later arrivals for this same path wait on f.done rather than queueing for
+// a slot of their own. That ordering is what keeps one hot file from consuming
+// the whole pool, and it is why a path may never appear twice in it.
+//
+// Cancellation while queued returns without touching the store. Every waiter on
+// this path then sees that error, which is the singleflight's existing behaviour
+// for any failed fetch: the caller's read fails with EIO rather than reading a
+// placeholder's zeros as if they were content.
+func (h *Hydrator) fetchLimited(ctx context.Context, rel string, m Marker) error {
+	select {
+	case h.sem <- struct{}{}:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	defer func() { <-h.sem }()
+	return h.fetchWhole(ctx, rel, m)
 }
 
 // fetchWhole downloads all of rel and writes it into the existing backing file.

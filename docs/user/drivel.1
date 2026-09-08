@@ -58,9 +58,14 @@ drivel \- Drive-backed FUSE interceptor filesystem
 .IR n ]
 .RB [ -sweep-interval
 .IR d ]
+.RB [ -upload-workers
+.IR n ]
+.RB [ -hydrate-workers
+.IR n ]
 .RB [ -debug ]
 .RB [ -pprof
 .IR addr ]
+.RB [ -pprof-allow-remote ]
 .SH DESCRIPTION
 .B drivel
 mounts a local directory as a loopback FUSE filesystem that acts as an
@@ -319,6 +324,42 @@ that means a first run, a resumed sweep, an expired cursor or
 .BR -resync ,
 which for a long-lived mount can be never.
 .TP
+.BI -upload-workers " n"
+How many files this mount uploads at once. Default:
+.BR 4 .
+Must be 1 or more; an explicit
+.B 0
+is refused rather than read as \(lquse the default\(rq.
+.IP
+Writes to the same path are serialised whatever this is set to, because concurrent
+uploads of one file can land out of order; the concurrency is across files. Raising
+it buys less than it appears to: every push shares one HTTP/3 connection and so one
+congestion window, meaning extra workers overlap the per-file round trips rather
+than moving more bytes. Each in-flight upload can also hold a chunk buffer \(em
+16 MiB on Drive \(em and past the point the provider begins throttling, more
+workers cost quota and gain nothing.
+.TP
+.BI -hydrate-workers " n"
+How many placeholders this mount fetches at once under
+.BR -lazy .
+Default:
+.BR 8 .
+Must be 1 or more, on the same grounds as
+.BR -upload-workers .
+Ignored in eager mode, where nothing hydrates.
+.IP
+This is what bounds a recursive read over a lazy tree, which would otherwise fault
+every file simultaneously. It is higher than the upload default because a typical
+link's downlink is several times its uplink, and because it sits on the read path:
+a caller is blocked on every fetch it governs, so
+.B 1
+turns a parallel read into a queue.
+.IP
+Both counts are per mount. A limit shared between mounts would let either one
+starve the other and let each infer, from how long it waited, when the other was
+busy; Drivel budgets nothing across mounts. Neither number governs the inbound
+change feed, which applies remote changes one at a time and has no knob.
+.TP
 .B -debug
 Enable FUSE debug logging.
 .TP
@@ -328,18 +369,34 @@ Serve Go's
 profiling endpoints on
 .I addr
 (for example
-.BR localhost:6060 ),
-giving
+.BR localhost:6060 ,
+or a bare
+.B 6060
+for the same thing), giving
 .B go tool pprof
 goroutine, heap, CPU and trace profiles of the running process. One endpoint
 serves the whole process, not one per mount. Empty, the default, starts nothing.
 .IP
 This endpoint serves the process's heap \(em which for a filesystem holds the
 paths, and in a buffer somewhere the contents, of the files being synced \(em to
-anyone who can reach it, and lets them start a CPU profile. Bind it to a loopback
-address and tunnel to it; a bind that is not loopback is served but warned about.
-A port that cannot be bound is a startup error rather than a warning, so a run
-started in order to be measured never silently produces nothing.
+anyone who can reach it, and lets them start a CPU profile. It therefore binds
+only a loopback address: anything else is refused at startup unless
+.B -pprof-allow-remote
+is also given. Bind it to localhost and tunnel to it. A port that cannot be
+bound is a startup error rather than a warning, so a run started in order to be
+measured never silently produces nothing.
+.IP
+.B /debug/pprof/cmdline
+is not served. It would return this process's command line, which names the
+credentials file, the token, the backing directory and the account.
+.TP
+.B -pprof-allow-remote
+Permit
+.B -pprof
+to bind an address that is not loopback, publishing the profiling endpoint \(em
+and so the paths and some contents of synced files \(em to whoever can reach
+that address. Refused on its own, without
+.BR -pprof .
 .SH LOGIN OPTIONS
 .TP
 .BI -account " name"
@@ -479,6 +536,47 @@ and the files remain in place after unmount. In-place mode is Linux-only; on
 other platforms supply a separate
 .I -data
 directory.
+.SH SPECIAL FILES AND MOUNT SAFETY
+.B drivel
+always mounts
+.B nodev
+and
+.BR nosuid ,
+and there is no option to disable them: a device node or a setuid binary arriving
+from a remote is never something a user asked for. This protects the mountpoint
+only \(em with
+.I -data
+the backing directory is an ordinary directory reachable without going through
+.BR drivel ,
+and nothing there is affected. On FreeBSD only
+.B nosuid
+is requested, because the kernel has no
+.B nodev
+flag and only
+.B devfs
+may hold device nodes.
+.PP
+.B Hard links are refused
+with
+.BR EPERM ,
+the error
+.BR link (2)
+defines for a filesystem that cannot create them. A path\-addressed cloud store
+cannot express two names sharing one copy of the bytes. Permitting the link would
+leave two ordinary files that are both uploaded and diverge from each other on the
+first write, having reported success.
+.PP
+.BR Symlinks ,
+FIFOs, sockets and device nodes are created normally in the backing directory and
+are never synced \(em they carry no byte stream, and no provider can represent
+them.
+.B drivel
+logs one line naming each one, from the mount when it is created and from the
+enumeration sweep when the local walk steps over it, so a file that is not syncing
+says so rather than merely being absent elsewhere. On FreeBSD such a file cannot be
+created through the mount at all: the attempt fails with
+.B EINVAL
+and creates nothing.
 .SH ENVIRONMENT AND REQUIREMENTS
 .B drivel
 requires the FUSE mount helper
