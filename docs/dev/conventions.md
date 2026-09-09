@@ -125,6 +125,10 @@ The short form:
   case above).
 - Reconcile pushes go through `Engine.Push`, never straight to the store, so they
   get the same gates, echo recording and retries as a write from the mount.
+- A remote deletion should be **recoverable where the provider can make it so**
+  (`gdrive` trashes by default; `delete = "permanent"` opts out). It is the last
+  guard behind the four above, not a replacement for any of them — the cap still
+  refuses a pass it cannot justify.
 
 ## Special files and mount safety
 

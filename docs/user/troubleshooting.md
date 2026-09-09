@@ -98,6 +98,14 @@ in the backing directory on the machine that made them. Drivel logs a
 and from the sweep. On FreeBSD, creating one on the mount fails outright with
 `EINVAL` — see [platforms](platforms.md#what-changes-off-linux).
 
+**A file was deleted and you want it back.** Deletions go to the Drive trash, so
+look in [drive.google.com](https://drive.google.com/drive/trash) and restore it
+there; it comes back down to your machines as an ordinary change. Drive purges the
+trash after 30 days, and `-drive-delete permanent` skips it entirely — with that
+set there is nothing to recover from. If a *sweep* deleted more than you expected,
+read [data safety](data-safety.md#deletion) before re-mounting: the same premise
+that produced the first pass will produce the second.
+
 **Everything is slow to appear.** Inbound changes arrive by polling, on an
 adaptive interval: about every 2 seconds while the feed is active, backing off
 toward 30 seconds once it goes quiet. There is no push channel — Drivel follows
@@ -110,6 +118,11 @@ can take up to half a minute to show up.
 the whole Drive, make sure the sweep is descending it rather than listing the
 account: `-drive-sweep-mode scoped`. See
 [configuration](configuration.md#-drive-sweep-mode).
+
+**Deleting files does not free space.** Deletions go to the Drive trash by
+default, and a trashed file counts against your quota until the trash is emptied.
+Empty it from the web UI, or run the mount with `-drive-delete permanent` if
+reclaiming space as you delete matters more to you than being able to undo one.
 
 **Several mounts of one account each poll the whole change feed.** Drive's change
 feed has no folder filter, so this is inherent, not a misconfiguration. It costs

@@ -90,6 +90,12 @@ type Store interface {
 	// Move relocates/renames oldPath to newPath.
 	Move(ctx context.Context, oldPath, newPath string) (RemoteFile, error)
 	// Remove deletes the object at path (recursively, for directories).
+	//
+	// Where the bytes go is the provider's business and the seam does not ask:
+	// backends differ on what "deleted" can mean (Drive has a trash, a bucket may
+	// be versioned, a content-addressed store has a GC policy). A provider with a
+	// recoverable form should prefer it — reconcile *infers* some of these
+	// deletions from a baseline, and there is no fallback above this call.
 	Remove(ctx context.Context, path string) error
 	// Get opens the object at path for reading.
 	Get(ctx context.Context, path string) (io.ReadCloser, error)

@@ -71,8 +71,26 @@ together**. Raising the cap alone does nothing until the next scheduled sweep,
 because a refused pass still counts as a completed one. Drivel's refusal message
 says so.
 
-One Drive-specific note: a remote deletion goes through the API's permanent
-delete, **not** a move to the trash. That is precisely why the cap exists.
+### Where a deleted file goes
+
+A remote deletion is a **move to the Drive trash**, so it is recoverable from
+[drive.google.com](https://drive.google.com/drive/trash) for 30 days. That is the
+default because of everything above: a deletion Drivel *inferred* rests on a
+premise, and a premise can be wrong. The trash is the last guard, the one that
+works after all the others have been satisfied by a mistake.
+
+It is a real removal all the same. The path is gone, your other machines delete
+their copies, and a folder takes its contents with it — Drive's trash hides the
+whole subtree, not just the folder. What survives is the ability to put it back.
+
+Two consequences: a trashed file **still counts against your Drive quota** until
+you empty the trash, and deleting a file and recreating it under the same name
+leaves the old copy in the trash beside the new one.
+
+`-drive-delete permanent` restores the old behaviour — the API's outright delete,
+no undo anywhere — which is what you want if the mount is how you reclaim space.
+The cap in guard 4 applies either way: a thousand files in your trash is better
+than a thousand files gone, and still not what you asked for.
 
 ## Files Drivel does not sync
 

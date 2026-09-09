@@ -91,6 +91,22 @@ type MountSpec struct {
 	// provider may well cap the two differently.
 	UploadWorkers  int // size of the outbound path-hashed pool (syncengine)
 	HydrateWorkers int // concurrent lazy fetches (hydrate); ignored unless Lazy
+
+	// FsName is the device name the mount reports to the kernel — the source
+	// column in findmnt(8) and /proc/self/mountinfo. Empty means "drivel", which
+	// is what every mount said before there was a reason to differ.
+	//
+	// The fstab helper sets it to the spec field of the fstab line, so that
+	// mount(8) and umount(8) can match the mount by the name the admin wrote.
+	FsName string
+
+	// AllowOther and BackendOptions are passed to the mount backend unchanged;
+	// see mount.Options for what they cost.
+	AllowOther     bool
+	BackendOptions []string
+
+	// Ready, if non-nil, is called once this mount is live. See mount.Options.
+	Ready func()
 }
 
 // label is what this mount is called in a message.
@@ -99,6 +115,17 @@ func (s MountSpec) label() string {
 		return s.Name
 	}
 	return s.Mountpoint
+}
+
+// fsName is the device name this mount reports to the kernel. It defaults to
+// "drivel" rather than to the mount's own name so that an existing mount's entry
+// in /proc/self/mountinfo is byte-for-byte what it was before FsName existed;
+// anything matching on it keeps working.
+func (s MountSpec) fsName() string {
+	if s.FsName != "" {
+		return s.FsName
+	}
+	return "drivel"
 }
 
 // logName is label shortened for a log prefix. The flag path has no name and
@@ -307,14 +334,17 @@ func (m *Mount) Run(ctx context.Context) error {
 	backend := vfs.NewBackend()
 	m.logf("mounting %s (%s backend, Ctrl-C to unmount)", m.spec.Mountpoint, backend.Name())
 	err := backend.Serve(ctx, mount.Options{
-		Mountpoint: m.spec.Mountpoint,
-		Backing:    m.backing.Path,
-		Events:     m.events,
-		FsName:     "drivel",
-		Debug:      m.spec.Debug,
-		Xattr:      m.spec.Xattr,
-		Hydrator:   hydratorOf(m.hyd),
-		Logger:     m.lg,
+		Mountpoint:     m.spec.Mountpoint,
+		Backing:        m.backing.Path,
+		Events:         m.events,
+		FsName:         m.spec.fsName(),
+		Debug:          m.spec.Debug,
+		Xattr:          m.spec.Xattr,
+		AllowOther:     m.spec.AllowOther,
+		BackendOptions: m.spec.BackendOptions,
+		Ready:          m.spec.Ready,
+		Hydrator:       hydratorOf(m.hyd),
+		Logger:         m.lg,
 	})
 	if err != nil {
 		// Deliberately not fatal here. Serve returns after unmount as well as on

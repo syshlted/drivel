@@ -168,7 +168,7 @@ func peerBody(i int) string {
 	return strings.Repeat(string(rune('a'+i)), 32)
 }
 
-// Once the siblings exist, deleting "the file" deletes one of them — and the
+// Once the siblings exist, deleting "the file" removes one of them — and the
 // next-newest surfaces at that path with different content.
 //
 // This is the sharp end of MC-30 and it is worth being explicit about: to every
@@ -176,6 +176,10 @@ func peerBody(i int) string {
 // reappearing with someone else's bytes in it. Nothing is corrupt and no rule
 // has been broken; a path simply names three objects and removal uncovers the
 // next one. A fleet-wide mitigation would have to make this stop.
+//
+// Removing to the trash does not change the shape of this, and adds one turn to
+// it: restoring the trashed sibling from the web UI puts two objects back at one
+// path, and which of them is visible depends on which was modified last.
 func TestRemovingTheVisibleSiblingUncoversTheNextOne(t *testing.T) {
 	_, fake := newFakeDrive(t)
 	oldest := fake.seedFile("same.txt", fakeRootID, []byte("oldest"))
@@ -191,12 +195,12 @@ func TestRemovingTheVisibleSiblingUncoversTheNextOne(t *testing.T) {
 	if err := d.Remove(ctx, "same.txt"); err != nil {
 		t.Fatalf("remove: %v", err)
 	}
-	if fake.has(newest.Id) {
+	if !fake.trashed(newest.Id) {
 		t.Error("the visible sibling survived the removal")
 	}
 	for _, id := range []string{oldest.Id, middle.Id} {
-		if !fake.has(id) {
-			t.Errorf("removing one path deleted sibling %s as well", id)
+		if !fake.has(id) || fake.trashed(id) {
+			t.Errorf("removing one path removed sibling %s as well", id)
 		}
 	}
 

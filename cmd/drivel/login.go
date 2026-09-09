@@ -16,21 +16,45 @@ import (
 	"github.com/zishmusic/drivel/internal/gauth"
 )
 
+// loginCLI is everything `drivel login` accepts.
+type loginCLI struct {
+	account      string
+	configPath   string
+	credPath     string
+	tokenPath    string
+	clientID     string
+	clientSecret string
+	projectID    string
+	scopeName    string
+	port         int
+	openBrowser  bool
+}
+
+// loginFlagSet defines the login command's flags, binding them into c. Separate
+// from runLogin for the reason mountFlagSet is separate from runMount: the
+// completion generator walks this set, so there is one description of these
+// flags rather than one in the program and one in a shell script.
+func loginFlagSet(c *loginCLI) *flag.FlagSet {
+	fs := flag.NewFlagSet("login", flag.ExitOnError)
+	fs.StringVar(&c.account, "account", "", "name this login as an account: store its files under $XDG_CONFIG_HOME/drivel/NAME and add [account.NAME] to the config file")
+	fs.StringVar(&c.configPath, "config", "", "config file to add the account to (default: $XDG_CONFIG_HOME/drivel/config.toml)")
+	fs.StringVar(&c.credPath, "credentials", "credentials.json", "path to read/write the OAuth client secret JSON")
+	fs.StringVar(&c.tokenPath, "token", "token.json", "path to write the OAuth token")
+	fs.StringVar(&c.clientID, "client-id", "", "OAuth client ID (else read from -credentials or prompted)")
+	fs.StringVar(&c.clientSecret, "client-secret", "", "OAuth client secret (else read from -credentials or prompted)")
+	fs.StringVar(&c.projectID, "project-id", "", "GCP project ID (optional)")
+	fs.StringVar(&c.scopeName, "scope", "", "Drive scope: drive | drive.readonly | drive.file (else prompted)")
+	fs.IntVar(&c.port, "port", gauth.DefaultLoopbackPort, "loopback port for the OAuth redirect (0 = auto)")
+	fs.BoolVar(&c.openBrowser, "open", false, "attempt to open the auth URL with the OS browser handler")
+	return fs
+}
+
 // runLogin is an rclone-style interactive OAuth wizard: it collects the client
 // id/secret (from flags, an existing credentials.json, or prompts), writes
 // credentials.json, runs the loopback/paste login flow, and caches the token.
 func runLogin(args []string) error {
-	fs := flag.NewFlagSet("login", flag.ExitOnError)
-	account := fs.String("account", "", "name this login as an account: store its files under $XDG_CONFIG_HOME/drivel/NAME and add [account.NAME] to the config file")
-	configPath := fs.String("config", "", "config file to add the account to (default: $XDG_CONFIG_HOME/drivel/config.toml)")
-	credPath := fs.String("credentials", "credentials.json", "path to read/write the OAuth client secret JSON")
-	tokenPath := fs.String("token", "token.json", "path to write the OAuth token")
-	clientID := fs.String("client-id", "", "OAuth client ID (else read from -credentials or prompted)")
-	clientSecret := fs.String("client-secret", "", "OAuth client secret (else read from -credentials or prompted)")
-	projectID := fs.String("project-id", "", "GCP project ID (optional)")
-	scopeName := fs.String("scope", "", "Drive scope: drive | drive.readonly | drive.file (else prompted)")
-	port := fs.Int("port", gauth.DefaultLoopbackPort, "loopback port for the OAuth redirect (0 = auto)")
-	openBrowser := fs.Bool("open", false, "attempt to open the auth URL with the OS browser handler")
+	var c loginCLI
+	fs := loginFlagSet(&c)
 	_ = fs.Parse(args)
 
 	given := map[string]bool{}
@@ -39,11 +63,11 @@ func runLogin(args []string) error {
 	// An account keeps its secrets in a directory of its own. One shared
 	// token.json is not a degraded multi-account experience — it is each login
 	// silently overwriting the previous one's credentials.
-	if *account != "" {
-		if err := config.ValidName(*account); err != nil {
+	if c.account != "" {
+		if err := config.ValidName(c.account); err != nil {
 			return fmt.Errorf("-account: %w", err)
 		}
-		dir, err := config.AccountDir(*account)
+		dir, err := config.AccountDir(c.account)
 		if err != nil {
 			return err
 		}
@@ -52,10 +76,10 @@ func runLogin(args []string) error {
 			return fmt.Errorf("creating %s: %w", dir, err)
 		}
 		if !given["credentials"] {
-			*credPath = filepath.Join(dir, "credentials.json")
+			c.credPath = filepath.Join(dir, "credentials.json")
 		}
 		if !given["token"] {
-			*tokenPath = filepath.Join(dir, "token.json")
+			c.tokenPath = filepath.Join(dir, "token.json")
 		}
 	}
 
@@ -64,21 +88,21 @@ func runLogin(args []string) error {
 
 	in := bufio.NewReader(os.Stdin)
 
-	creds, err := resolveCredentials(in, *credPath, *clientID, *clientSecret, *projectID)
+	creds, err := resolveCredentials(in, c.credPath, c.clientID, c.clientSecret, c.projectID)
 	if err != nil {
 		return err
 	}
-	if err := gauth.WriteCredentials(*credPath, creds); err != nil {
-		return fmt.Errorf("writing %s: %w", *credPath, err)
+	if err := gauth.WriteCredentials(c.credPath, creds); err != nil {
+		return fmt.Errorf("writing %s: %w", c.credPath, err)
 	}
-	fmt.Printf("Wrote client credentials to %s\n", *credPath)
+	fmt.Printf("Wrote client credentials to %s\n", c.credPath)
 
-	scope := resolveScope(in, *scopeName)
+	scope := resolveScope(in, c.scopeName)
 	rootFolder := prompt(in, "\nRoot folder ID to sync (leave blank for My Drive root): ")
 
 	tok, err := gauth.Login(ctx, creds, []string{scope}, gauth.LoginOptions{
-		Port:        *port,
-		OpenBrowser: *openBrowser,
+		Port:        c.port,
+		OpenBrowser: c.openBrowser,
 		// Share the one stdin reader: a separate reader here would race the
 		// prompt reader above, which may have buffered the pasted line already.
 		In: in,
@@ -86,10 +110,10 @@ func runLogin(args []string) error {
 	if err != nil {
 		return fmt.Errorf("login: %w", err)
 	}
-	if err := gauth.SaveToken(*tokenPath, tok); err != nil {
-		return fmt.Errorf("saving token to %s: %w", *tokenPath, err)
+	if err := gauth.SaveToken(c.tokenPath, tok); err != nil {
+		return fmt.Errorf("saving token to %s: %w", c.tokenPath, err)
 	}
-	fmt.Printf("\nSaved token to %s\n", *tokenPath)
+	fmt.Printf("\nSaved token to %s\n", c.tokenPath)
 
 	if who, err := gauth.WhoAmI(ctx, creds, scope, tok); err == nil && who != "" {
 		fmt.Printf("Authenticated as %s\n", who)
@@ -101,12 +125,12 @@ func runLogin(args []string) error {
 	if driveRoot == "" {
 		driveRoot = "root"
 	}
-	if *account == "" {
+	if c.account == "" {
 		fmt.Printf("\nDone. Mount with:\n\n  drivel mount -mount ./mnt -data ./data \\\n    -credentials %s -token %s -drive-root %s\n\n",
-			*credPath, *tokenPath, driveRoot)
+			c.credPath, c.tokenPath, driveRoot)
 		return nil
 	}
-	return recordAccount(*configPath, *account, *credPath, *tokenPath, scope, driveRoot)
+	return recordAccount(c.configPath, c.account, c.credPath, c.tokenPath, scope, driveRoot)
 }
 
 // recordAccount adds the account to the config file and shows the mount block to
@@ -204,6 +228,13 @@ func resolveCredentials(in *bufio.Reader, path, id, secret, project string) (gau
 }
 
 // resolveScope maps a scope name (flag or prompted menu) to a scope URL.
+// loginScopeNames are the scope names -scope accepts, in menu order. Named here
+// so the shell completions offer exactly what resolveScope resolves rather than
+// a copy of it, and so the refusal below can list them rather than leaving
+// someone who typed one wrong to guess. TestLoginScopeNamesAllResolve is what
+// keeps the list and the switch honest.
+var loginScopeNames = []string{"drive", "drive.readonly", "drive.file"}
+
 func resolveScope(in *bufio.Reader, name string) string {
 	for {
 		switch strings.TrimSpace(name) {
@@ -216,7 +247,7 @@ func resolveScope(in *bufio.Reader, name string) string {
 		case "":
 			// no value yet — show the menu and prompt below
 		default:
-			fmt.Printf("unrecognised scope %q\n", name)
+			fmt.Printf("unrecognised scope %q (want %s)\n", name, strings.Join(loginScopeNames, ", "))
 		}
 		fmt.Print(`
 Choose a scope:

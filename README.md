@@ -36,6 +36,10 @@ drivel mount -mount ./mnt -data ./data \
 Omit `-credentials` and Drivel runs log-only: it mounts and prints what it *would*
 sync, without contacting Google.
 
+On Linux a mount can also be an `/etc/fstab` line, brought up by `mount -a` or at
+boot with no terminal attached — see **[mounting from
+/etc/fstab](docs/user/fstab.md)**.
+
 Full walkthrough: **[docs/user/quickstart.md](docs/user/quickstart.md)**. You will
 need [your own Google API credentials](docs/user/google-cloud-setup.md) — free,
 about five minutes.
@@ -50,6 +54,7 @@ about five minutes.
 [data safety](docs/user/data-safety.md) ·
 [troubleshooting](docs/user/troubleshooting.md) ·
 [platform support](docs/user/platforms.md) ·
+[fstab mounts](docs/user/fstab.md) ·
 [`drivel(1)`](docs/user/drivel.1)
 
 **[Developing Drivel](docs/dev/)** — [architecture](docs/dev/architecture.md) ·

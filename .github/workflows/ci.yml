@@ -54,6 +54,12 @@ jobs:
       - run: make vet
       - run: make build
 
+      # The committed completion files against the flags they were generated
+      # from. It belongs with the static gates rather than with the tests: what
+      # it catches is a flag added without a completion, which is a stale file in
+      # the tree and not a failing behaviour.
+      - run: make completions-check
+
       - run: make lint
 
   test:

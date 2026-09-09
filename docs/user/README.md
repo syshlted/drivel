@@ -26,6 +26,8 @@ Then, as you need them:
   hit, and what each one means.
 - **[Platform support](platforms.md)** — Linux, macOS, FreeBSD; what is verified
   and what is not.
+- **[Mounting from /etc/fstab](fstab.md)** — describe a mount as an fstab line and
+  bring it up with `mount -a` or at boot, with no terminal attached. Linux only.
 
 The [`drivel(1)` man page](drivel.1) is the complete reference for both
 subcommands: `man ./docs/user/drivel.1`.

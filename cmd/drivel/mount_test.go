@@ -50,6 +50,7 @@ func TestFlagsReachTheSpec(t *testing.T) {
 	f.stateDB = "/state.db"
 	f.indexDB = "/index.db"
 	f.driveRoot = "0Bfolder"
+	f.driveDelete = "permanent"
 	f.lazy = true
 	f.xattr = true
 	f.debug = true
@@ -95,7 +96,10 @@ func TestFlagsReachTheSpec(t *testing.T) {
 	if err := s.ProviderConfig(&got); err != nil {
 		t.Fatalf("decoding provider config: %v", err)
 	}
-	want := gdrive.Config{Credentials: "/creds.json", Token: "/tok.json", RootID: "0Bfolder", IndexPath: "/index.db"}
+	want := gdrive.Config{
+		Credentials: "/creds.json", Token: "/tok.json", RootID: "0Bfolder",
+		IndexPath: "/index.db", Delete: gdrive.DeletePermanent,
+	}
 	if got != want {
 		t.Errorf("provider config = %+v; want %+v", got, want)
 	}

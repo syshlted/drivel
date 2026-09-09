@@ -94,8 +94,12 @@ the expiry through the same door.
 1. **A dedicated Drive folder, and pass its ID.** `-drive-root root` maps the
    mount to the whole of My Drive. Combined with an empty `-data` and a reconcile,
    that is the documented catastrophic configuration.
-2. **`Store.Remove` is `Files.Delete` — permanent.** Deletions in these tests do
-   not go to the trash and cannot be undone from the web UI.
+2. **`Store.Remove` trashes rather than deletes, and the trash fills up.**
+   Deletions in these tests are recoverable from the web UI for 30 days, which is
+   a safety net and not a reason to relax: several cases delete thousands of files
+   at a time, and everything they trash keeps counting against the account's quota
+   until it is emptied. Empty it between runs. Run any case with
+   `delete = "permanent"` and the old rule applies instead — gone is gone.
 3. **A throwaway Google account.** The delete and conflict cases are designed to
    destroy data.
 4. **One token per client.** `token.json` is rewritten on refresh; three processes
@@ -156,9 +160,9 @@ Several cases are counting arguments — MC-11 writes 10 000 files and asks how 
 `[sync] upload` lines came out — and that is subtraction only while the folder
 holds nothing else. Against a populated folder every derived count needs
 path-prefix filtering, including the count the case exists to produce. The
-cheaper-looking fix, clearing the folder first, is worse: `Store.Remove` is
-`Files.Delete`, so it is a thousand irreversible deletes spent to reach a state a
-new folder gives away.
+cheaper-looking fix, clearing the folder first, is worse: it is a thousand deletes
+and a thousand trashed objects still on the quota, spent to reach a state a new
+folder gives away.
 
 A scenario is one physical directory and never a symlink into another. drivel's
 cardinal rule is about backing-tree and mountpoint overlap and `app.Validate`
@@ -338,7 +342,7 @@ is not worth its wall-clock.
 | **MC-20** | 1 GiB file, then `dd conv=notrunc` 4 KiB at offset 512 MiB, on A. | `gdrive` implements no `RangePutter`, so this is a whole-file `Put`: **≈3 GiB of traffic for a 4 KiB change** (1 up + 2 down). Verify integrity; record the number. | This is the headline overhead figure for a multi-client fleet. Also confirms zero `[sync] range write` lines against Drive. |
 | **MC-21** | `touch` an unmodified file on A. | M6 gate 3: `[sync] skip … remote already holds these bytes`. **Zero** downloads on B and C. | A regression here turns every `touch` into a full 3× file-size fleet event. |
 | **MC-22** | Append 1 MiB, 20 times, 1s apart, to a file on A (i.e. spaced wider than the 300 ms debounce). | ≈20 uploads of growing size — ≈210 MiB pushed and ≈420 MiB pulled for a 20 MiB file. Quantify it; it is the cost of append-style workloads (logs, databases). | Nothing is broken here; the point is to measure an amplification the design implies and users will hit. |
-| **MC-23** | `rm -rf` a 5000-file subtree on A, all clients online. | Propagates via the change feed. `-max-deletes` is **not** consulted (it bounds reconcile inference, not feed deletes). Verify nothing survives and nothing is in the trash. | Feed-driven bulk delete throughput; the `kids` index keeping `forgetLocked` linear rather than quadratic. |
+| **MC-23** | `rm -rf` a 5000-file subtree on A, all clients online. | Propagates via the change feed. `-max-deletes` is **not** consulted (it bounds reconcile inference, not feed deletes). Verify nothing survives at the mountpoint and that the whole subtree is *in* the trash — 5000 trashed objects is also the case that shows what the default costs in quota. | Feed-driven bulk delete throughput; the `kids` index keeping `forgetLocked` linear rather than quadratic. |
 | **MC-24** | Stop C. Delete 5000 files on A. Restart C with its cursor still valid. | Feed replays the deletes; C converges. No sweep involved. | The normal offline-catch-up path. |
 | **MC-25** | Stop C. Delete 5000 files on A. Kill C's cursor (write garbage into the `cursor` bucket of C's state DB — Drive answers a malformed token with 400/`pageToken`, which classifies with 410 as `ErrCursorExpired`). Restart C. | **Confirmed in Tier A**, exactly as predicted: `[pull] cursor expired: re-enumerating` → the sweep infers more deletes than the cap → **`[sweep] REFUSING to delete`, whole pass abandoned** → C stays diverged with every stale copy intact. Then the part the prediction missed: restarting with a raised cap does **nothing**, because the refused pass still recorded itself as a *completed* sweep, so there is no cursor to recover, no interrupted sweep to resume and (until `-sweep-interval`) no schedule. Recovery is `-resync` **and** the raised cap; the refusal message now says so. | The most likely real-world operational stall in a multi-client deployment: the guard is correct, and the recovery was manual, two-part, and misdescribed by the message that told you to perform it. |
 | **MC-26** | Rename one file on A: `x.txt` → `y.txt`. | **Confirmed in Tier A, and fixed.** Drive's feed reports a rename as the file at its *new* name; `provider.RemoteChange` carries no identity, so `toRemoteChange` yielded a create at `y.txt` and nothing removed `x.txt`. `gdrive.vacatedPathLocked` now emits the removal for the path the object left, derived from the in-memory reverse map — not the persistent index, and not for directories (see DESIGN.md §2.5 for why both). A **folder** move is still left to the sweep; that half of the case is still open against real Drive. | A rename silently duplicated every renamed file on every other client for up to `sweep-interval` (default **24h**). Invisible to single-client testing: a client never sees its own renames come back. |

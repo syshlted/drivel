@@ -96,9 +96,12 @@ type ReconcileOptions struct {
 
 // DefaultMaxDeletes is the out-of-the-box cap on reconcile-inferred deletions.
 // Routine offline activity produces a handful; hundreds means the premise is
-// broken. Deletions applied to the remote go through provider.Store.Remove, which
-// on Drive is permanent rather than a move to the trash — which is exactly why
-// there is a cap at all.
+// broken. Deletions applied to the remote go through provider.Store.Remove, and
+// what that costs is the provider's to decide: Drive trashes by default, so a
+// pass this cap fails to catch is recoverable for 30 days, and permanent when the
+// operator asked for permanent. Neither weakens the case for the cap — the shapes
+// that produce a huge count are broken premises, and a thousand files in someone's
+// trash is still a thousand files they did not mean to delete.
 const DefaultMaxDeletes = 100
 
 // DefaultSweepInterval is how often a running mount re-enumerates the remote.

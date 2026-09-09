@@ -24,11 +24,18 @@ bidirectional sync — don't regress it.
 ## Layout
 
 - `cmd/drivel` — entrypoint; flag parsing, the flag→spec mapping, signal context.
+  `fstab.go` is the M16 mount(8) helper — argv0 dispatch, the `-o` option table
+  and the spec mapping (portable, so its tests run everywhere); `fstab_linux.go`
+  holds the privilege drop and the daemonize handshake.
 - `internal/app` — the composition root below `main` (M8): `Mount` (Open/Run/Close
   for one mount) and `App` (N of them, with the cross-mount guards in
   `validate.go`). Provider-agnostic; it names a provider *kind*, never a type.
 - `internal/config` — the TOML config file (M8): accounts, mounts, XDG paths, and
   the append-only account writer `drivel login` uses. Knows no provider.
+- `internal/completion` — leaf, pure: renders bash/zsh completion scripts from a
+  description of a program. Imported **only** by `cmd/drivel/completions.go`,
+  which is behind the `completions` build tag, so no release binary contains it.
+  See "Shell completions" below.
 - `internal/fsevent` — backend-neutral change `Event`/`Op` types (shared by any
   mount backend and the sync engine).
 - `internal/mount` — the mount-backend seam: `Backend` interface + `Options`, and
@@ -131,6 +138,32 @@ deletions, default 100, 0 = unlimited), `-sweep-interval D` (re-enumerate this
 often, default 24h, 0 disables). M7c adds `-drive-sweep-mode` (`auto`|`flat`|
 `scoped`, config `sweep-mode` in the provider table).
 
+**`-drive-delete` (`trash`|`permanent`, config `delete`, default `trash`) decides
+what a removal does to the remote object, and the default is the safety property.**
+A trashing removal is `files.update{trashed:true}` and is indistinguishable above
+the seam — every `gdrive` query carries `trashed = false`, `changes()` already
+reads a trashed file as `Removed`, `verifyLocked` already rejects a trashed index
+hint, and Drive's `trashed` covers a trashed parent's whole subtree, so the
+recursion `Store.Remove` documents still holds — **but that last one propagates
+asynchronously**, which the live test found and no fake would have: right after a
+folder was trashed its child still read `trashed = false`. Nothing depends on the
+timing (an `rm -rf` unlinks the children first, and a sweep racing it parks the
+child on a missing parent and drops it), so don't write code that assumes the flag
+is set the moment `Remove` returns. **Verified against real Drive on 2026-09-09**
+via `TestLiveRemoveTrashes` (`DRIVEL_LIVE_RIG`, gated and skipped by default,
+self-cleaning); the fake models the settled state. It defaults to the recoverable
+form because **not every deletion drivel performs was typed by a user**: reconcile
+*infers* them from a baseline, every input that makes that wrong is an accident
+rather than a corruption, and this was the one operation with no fallback — M5
+refuses to push a placeholder, M6 falls back to a whole-file `Put`, M7 verifies a
+hint, M7b abandons a pass it cannot justify. `permanent` exists and is not
+vestigial: a trashed object still costs quota, so a mount that is how someone
+reclaims space needs it. An unreadable value is refused at open, M8 rule 6 applied
+to a value like `sweep-mode` — and here the misspelling gives the operator the
+*opposite* of what they asked for in the direction that loses files. It **is** in
+the M16 option table (`-o drive-delete=permanent`), together with the three
+shaping flags that had drifted out of it; see the fstab section below.
+
 **Transfer concurrency is two numbers, both per mount**: `-upload-workers`
 (config `upload-workers`, default `syncengine.DefaultWorkers` = 4) sizes the
 push pool, `-hydrate-workers` (config `hydrate-workers`, default
@@ -159,6 +192,11 @@ cursor-advance ordering and per-path ordering within a page. Anyone adding a
 "download-workers" name must not point it at hydration — the two are different
 pools. The right default is ultimately the *provider's* to suggest (they cap
 up/down differently); nothing crosses the seam for that yet.
+
+From M16 `drivel` is also the **mount(8) helper**, when reached through
+`/sbin/mount.fuse.drivel` (argv[0] dispatch) or as `drivel mount-helper` — so a
+mount can live in `/etc/fstab` and come up at boot. **Linux only.** `make install`
+places the symlinks. See "fstab" below and `docs/user/fstab.md`.
 
 `-pprof ADDR` on `mount` serves `net/http/pprof` for the process (not per mount),
 off unless given. It is a debug endpoint that hands out the heap — synced paths
@@ -252,6 +290,11 @@ capability first. **Symlinks are deferred on purpose** (item 5, and it needs ite
 content-as-identity forces the sweep to download every small file to classify it,
 and it is a symlink-injection channel. Cygwin and Git LFS both use two signals with
 the out-of-band one primary; that is the shape to copy when it lands.
+
+**M16** fstab & non-interactive mount **shipped** (Linux only): `drivel` is a
+`mount(8)` helper as well as a command. See "fstab" below. It was built as "M15"
+before that number went to special files; if you meet a stray M15 in an old
+branch or note meaning the mount helper, this is it.
 
 **v2, backends on the roadmap** (DESIGN.md §9 has the reasoning; all three are
 unscheduled, none is started, and each one's shape is *decided* — the entries say
@@ -482,8 +525,11 @@ elapsed, and on `-resync`.
    copy that diverged from its baseline is kept and pushed back, never deleted; and
    `-max-deletes` abandons the whole pass rather than trimming it, because a huge
    count means the premise is broken (wrong `-drive-root`, empty `-data`), not that
-   there are 4000 real deletions. Note `Store.Remove` on Drive is permanent, not a
-   move to the trash. A refused pass still counts as a *completed* sweep, so
+   there are 4000 real deletions. `Store.Remove` on Drive now trashes rather than
+   deletes (see the CLI note on `-drive-delete`), which makes a pass this cap
+   failed to catch recoverable for 30 days — the trash is the guard *behind* this
+   one, never a reason to soften it, and `delete = "permanent"` turns it off. A
+   refused pass still counts as a *completed* sweep, so
    recovery is `-resync` **and** a higher cap — raising the cap alone changes
    nothing until the next `-sweep-interval`, and the refusal message says so.
 3. **The marks are persistent, and the reason is resume.** An in-memory seen-set
@@ -657,6 +703,102 @@ composition — and about the ways several mounts can corrupt each other.
    byte for byte what it was pre-M8. New log calls belong on `e.logf`/`d.logf`/
    `d.logf`/`n.logf`, never `log.Printf`.
 
+## fstab & non-interactive mount (M16)
+
+`drivel` is a `mount(8)` helper when reached as `/sbin/mount.fuse.drivel` (or
+`drivel mount-helper`), so a mount can live in `/etc/fstab`. **Linux only.**
+`docs/user/fstab.md` is the user-facing half. Four things carry the correctness.
+
+1. **The fstab type is `fuse.drivel`, not `drivel`.** go-fuse mounts as `fuse.` +
+   `MountOptions.Name`, so `/proc/self/mountinfo` says `fuse.drivel` whatever the
+   line says — and systemd's fstab-generator compares the two. `mount.drivel` is
+   installed as an alias only. `MountSpec.FsName` carries the fstab device field
+   for the same class of reason (`findmnt`/`umount` match on it); empty still means
+   `"drivel"`, so nothing pre-M16 changed.
+2. **The helper exits once the filesystem is live, and not before.** `mount(8)`
+   blocks until the helper returns, so serving in the foreground hangs the boot,
+   and exiting early makes `mount` report success for a mount that may never
+   appear. The parent re-execs `/proc/self/exe` with the original argv and a marker
+   env var; the child mounts and reports `ok` or the error through an inherited
+   pipe (fd 3). This is what `mount.Options.Ready` is for — **do not replace it
+   with polling `/proc/self/mountinfo`**, which cannot tell "starting" from
+   "wedged" and has to guess which entry is ours.
+3. **The daemon's stdio goes to `logfile=` or `/dev/null`, never to the caller's.**
+   An inherited descriptor stays open for the life of the mount, so a caller
+   capturing output through a pipe (`out=$(mount -a 2>&1)`, Go's `CombinedOutput`)
+   blocks until unmount — the exact opposite of daemonizing. Journal integration is
+   what this gives up; `logfile=` is the replacement. Relatedly there is **no
+   default `mount-timeout`**: systemd already bounds a mount unit's startup, and a
+   second bound with a different default is a second answer to one question.
+4. **The privilege option is `run-as=`, never `user=`.** `user` is fstab's "a
+   non-root user may mount this", and util-linux passes `user=NAME` down to the
+   helper to record who did — acting on it would act on an option nobody aimed at
+   us. `user`/`users`/`owner`/`group` are accepted and ignored. In `runAsEnv`,
+   **unsetting the inherited `XDG_*` variables is the load-bearing half**: root's
+   `XDG_CONFIG_HOME` surviving the drop leaves the mount running as the user while
+   reading the wrong account's token.
+
+**Every mount-shaping flag has an option, and `TestEveryShapingFlagHasAnFstabOption`
+is what keeps it that way** — it walks `mountShapingFlags` and fails on "unknown
+option", asserting only that the name is *recognised* (the value it passes is
+deliberately nonsense, so a type error still counts and the test needs no table of
+plausible values to drift). It was added because four flags had already gone
+missing: `drive-delete`, `drive-sweep-mode`, `upload-workers`, `hydrate-workers`.
+`-pprof`/`-pprof-allow-remote` are the deliberate exception — a debug endpoint on
+the *process* is not something an unattended boot mount should open — and they are
+not shaping flags, so the test does not ask for them.
+
+Below that it is a translation layer and must stay one: the option table ends in
+the same `app.MountSpec` the flag and config paths build, so validation, opening
+and the shutdown ordering keep one implementation. `config=` refuses the shaping
+options exactly as `-config` does, and **derives that set from
+`mountShapingFlags`** rather than restating it. `ro`/`remount`/`bind`/`move` are
+*refused*, not ignored — a line claiming a read-only mount over a writable one is
+`lazzy = true` in a new place — and an unknown option is an error unless `mount
+-s` asked otherwise. The state DB defaults under `$XDG_STATE_HOME`, because an
+fstab mount's working directory is `/`, where the flag path's `drivel-state.db`
+would mean `/drivel-state.db`.
+
+**Untested: systemd.** The daemon stays in the generated `.mount` unit's cgroup
+and no systemd host was available. `mount`, `mount -a` (`-T`) and `umount` are all
+verified for real. Don't promote it to "works under systemd" without a run.
+
+## Shell completions
+
+`completions/drivel.bash` and `completions/_drivel` are **generated, not written**
+— `make completions`, gated in `make check` by `make completions-check`. Four
+things carry it.
+
+1. **The flags are the source.** `mountFlagSet`/`loginFlagSet` exist so the
+   program and the generator walk one `flag.FlagSet`; that is why flag definition
+   is a function rather than a block inside `runMount`. Nothing in the generator
+   lists a flag by name.
+2. **The generator is build-tagged and the reason is layering, not size.**
+   `cmd/drivel/completions.go` is `//go:build completions`; `completions_off.go`
+   is its `!completions` half, holding the `runExtraCommand` stub. That pair is
+   the same shape `mountopts_{linux,darwin,freebsd}.go` uses — no `init()`, no
+   package-global registry to mutate (M8 rule 3), the compiler decides. It is also
+   what keeps `internal/completion` out of every release binary.
+   `runExtraCommand` returns `(handled, err)` and not just `err`: a generator that
+   ran and failed must report why, not fall through to "unknown command".
+3. **`completionHints` is the only hand-written part, and it fails both ways.** A
+   flag with no entry fails the generator; an entry naming a flag that no longer
+   exists fails it too. The kind is cross-checked against `IsBoolFlag`, and enum
+   values are the program's own constants (`gdrive.DeleteTrash`, …) so a renamed
+   mode cannot leave the completions offering a word the binary refuses. The
+   summary is deliberately *not* the flag's usage string — usage is a paragraph,
+   a menu line is a line.
+4. **The generated files are committed** (a distro package has no Go toolchain)
+   and installed by `make install`. `App.Validate` refuses one flag name meaning
+   two different things across subcommands, because bash completes a value from
+   the previous word alone and cannot tell which subcommand it is in.
+
+The renderers are tested by **running** the output — bash sources the generated
+script and answers a real completion; zsh parses the file. An assertion that
+cannot fail is worse than none: the opaque-value case only discriminates when the
+half-typed value starts with a dash, since with an empty one the flag branch
+declines too and the test passes either way.
+
 ## Transport
 
 All Drive traffic goes over **HTTP/3** (QUIC), required by project decision. Go 1.27
@@ -736,6 +878,13 @@ the mount layer has to accommodate:
    macFUSE does the same thing the case is already covered. `Create` needs no
    equivalent: its handle only ever needs blocks it authored.
 
+5. **The fstab mount helper (M16) is Linux-only**, by mechanism rather than
+   omission: the `/sbin/mount.<type>` lookup, the helper argument protocol, the
+   privilege drop and the re-exec handshake are all how Linux brings a filesystem
+   up unattended. `runMountHelper` refuses elsewhere and says to run `drivel
+   mount`. The *option parser* is deliberately in the portable file, so its tests
+   run on every platform.
+
 **On macOS a successful `setxattr` does not mean the filesystem stored it.** On a
 volume without native EAs (exFAT, FAT, some SMB/NFS) macOS emulates them in an
 AppleDouble `._name` sidecar, which would put M5's marker in a *file inside the
@@ -774,6 +923,7 @@ the seam clean anyway — the cross-compile shows that costs nothing.
 ```sh
 make help                                      # every gate as a target, plus examples
 make check                                     # everything CI runs, in CI's order
+make completions                               # regenerate completions/ after a flag change
 make hooks                                     # install the git hooks (once per clone)
 make run ARGS='-debug'                         # build, then mount ./mnt over ./data
 
@@ -784,6 +934,8 @@ DRIVEL_REQUIRE_TESTENV=all go test -race ./... # ...and nothing silently skipped
 go build -o ./bin/drivel ./cmd/drivel
 ./bin/drivel mount -mount ./mnt -data ./data   # separate backing dir; -debug for FUSE tracing
 ./bin/drivel mount -mount ./dir                # in-place: ./dir is its own backing (Linux)
+
+sudo make install                              # + /sbin/mount.fuse.drivel for fstab
 ```
 
 `./mnt` and `./data` are gitignored scratch dirs; create them (the binary

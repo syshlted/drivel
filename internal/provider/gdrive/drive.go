@@ -92,6 +92,9 @@ type Drive struct {
 
 	// sweepMode selects how Enumerate walks the tree (M7c). Fixed at open time.
 	sweepMode SweepMode
+	// deleteMode selects whether Remove trashes or permanently deletes. Fixed at
+	// open time; "" means DeleteTrash.
+	deleteMode DeleteMode
 	// fanout overrides how many folder listings a scoped sweep issues at once.
 	// Zero means enumFanout. It exists as a field rather than a constant so a test
 	// can run the same fixture at one and at eight and compare, which is the only
@@ -171,6 +174,11 @@ type Config struct {
 	// "" or "auto" picks by whether RootID names a concrete folder. See
 	// enumerate_scoped.go for why neither is right for every shape of Drive.
 	SweepMode SweepMode `toml:"sweep-mode"`
+	// Delete selects what a removal does to the remote object: "trash" (or "",
+	// the default) moves it to the Drive trash, "permanent" unlinks it outright.
+	// See DeleteMode — the default is the recoverable one because not every
+	// deletion drivel performs was asked for by a user.
+	Delete DeleteMode `toml:"delete"`
 	// Scope is the OAuth scope the token was granted, as `drivel login` recorded
 	// it. Empty means gauth.ScopeDrive.
 	//
@@ -196,6 +204,12 @@ func open(ctx context.Context, cfg Config, lg *log.Logger) (*Drive, error) {
 	if !cfg.SweepMode.valid() {
 		return nil, fmt.Errorf("sweep-mode %q: want \"auto\", \"flat\" or \"scoped\"", cfg.SweepMode)
 	}
+	// Same rule, and it bites harder here: a misspelling that fell back to the
+	// default would leave someone who asked for permanent deletes filling their
+	// trash, and someone who asked for the trash losing files outright.
+	if !cfg.Delete.valid() {
+		return nil, fmt.Errorf("delete %q: want \"trash\" or \"permanent\"", cfg.Delete)
+	}
 	client, closer, err := buildHTTPClient(ctx, cfg.Credentials, cfg.Token, cfg.Scope)
 	if err != nil {
 		return nil, err
@@ -206,14 +220,15 @@ func open(ctx context.Context, cfg Config, lg *log.Logger) (*Drive, error) {
 		return nil, fmt.Errorf("creating drive service: %w", err)
 	}
 	d := &Drive{
-		svc:       svc,
-		close:     closer,
-		lg:        lg,
-		root:      cfg.RootID,
-		sweepMode: cfg.SweepMode,
-		idByPath:  map[string]string{"": cfg.RootID},
-		pathByID:  map[string]string{cfg.RootID: ""},
-		kids:      map[string]map[string]struct{}{},
+		svc:        svc,
+		close:      closer,
+		lg:         lg,
+		root:       cfg.RootID,
+		sweepMode:  cfg.SweepMode,
+		deleteMode: cfg.Delete,
+		idByPath:   map[string]string{"": cfg.RootID},
+		pathByID:   map[string]string{cfg.RootID: ""},
+		kids:       map[string]map[string]struct{}{},
 	}
 	if cfg.IndexPath != "" {
 		// A failure here is not fatal: the index only ever saves work, so we log it
@@ -318,6 +333,35 @@ func (d *Drive) Move(ctx context.Context, oldPath, newPath string) (provider.Rem
 	return d.rememberLocked(ctx, newPath, moved), nil
 }
 
+// DeleteMode selects what Remove does to an object remotely.
+//
+// The distinction exists because a deletion drivel performs is not always one a
+// user asked for. Every other guard in the tree fails towards keeping bytes —
+// M5 refuses to push a placeholder, M6 falls back to a whole-file Put, M7b
+// abandons a delete pass it cannot justify — and this one operation used to be
+// the exception: a mount pointed at the wrong -drive-root, or an inference
+// from a baseline that turned out to be stale, destroyed the remote copy with no
+// undo anywhere. The trash is Drive's own answer to that, so the default is to
+// use it and the old behaviour is what has to be asked for.
+type DeleteMode string
+
+const (
+	// DeleteTrash moves the object to the Drive trash, where the web UI can
+	// restore it (for 30 days, after which Drive purges it). The default, and
+	// what "" means.
+	DeleteTrash DeleteMode = "trash"
+	// DeletePermanent unlinks the object outright, which is what every release
+	// through M16 did. There is no undo, and the bytes are not recoverable from
+	// anywhere.
+	// Worth choosing when a mount is how storage gets reclaimed: trashed objects
+	// still count against the account's quota until the trash is emptied.
+	DeletePermanent DeleteMode = "permanent"
+)
+
+func (m DeleteMode) valid() bool {
+	return m == "" || m == DeleteTrash || m == DeletePermanent
+}
+
 func (d *Drive) Remove(ctx context.Context, p string) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -326,11 +370,42 @@ func (d *Drive) Remove(ctx context.Context, p string) error {
 	if !ok {
 		return nil // no such object remotely; nothing to remove
 	}
-	if err := d.svc.Files.Delete(id).Context(ctx).Do(); err != nil {
+	if err := d.removeLocked(ctx, id); err != nil {
 		return classify(err)
 	}
 	d.forgetLocked(ctx, p)
 	return nil
+}
+
+// removeLocked performs the removal itself, in whichever of the two senses this
+// mount was configured for.
+//
+// Both are equivalent to everything above the seam, and deliberately so. A
+// trashed object stops matching the resolver's queries (they all carry
+// "trashed = false"), so the path is as absent as a deleted one; the change feed
+// reports the trashing to every other client as a removal, because changes()
+// reads a trashed file as Removed; and trashing a folder carries its whole
+// subtree with it, which is the recursion Store.Remove documents. What differs
+// is only whether anybody can get the bytes back.
+//
+// One measured caveat on that last one, from the live test: the subtree's own
+// `trashed` flags are set ASYNCHRONOUSLY. Immediately after trashing a folder
+// against real Drive its child still read trashed=false, and read
+// trashed=true/explicitlyTrashed=false a little later. Nothing here depends on
+// the timing — an rm -rf unlinks the children first, so each is trashed in its
+// own right, and a sweep that raced the propagation would park a still-listed
+// child on a parent no longer in the listing and drop it as outside the mount —
+// but do not write code that assumes the flag is there the moment Remove
+// returns.
+func (d *Drive) removeLocked(ctx context.Context, id string) error {
+	if d.deleteMode == DeletePermanent {
+		return d.svc.Files.Delete(id).Context(ctx).Do()
+	}
+	// Fields("id") because the response is discarded: the caller is about to
+	// forget the path, so a full projection would be a bigger reply for nothing.
+	_, err := d.svc.Files.Update(id, &drive.File{Trashed: true}).
+		Fields("id").Context(ctx).Do()
+	return err
 }
 
 func (d *Drive) Get(ctx context.Context, p string) (io.ReadCloser, error) {

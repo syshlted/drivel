@@ -22,6 +22,20 @@ LEFTHOOK_GOTOOLCHAIN  ?= go1.26.1
 # Branch that lint-new measures "new" against.
 MAIN_BRANCH ?= master
 
+# Install locations. SBINDIR is not under PREFIX by default: mount(8) looks for a
+# helper in /sbin and /usr/sbin only, so a helper in /usr/local/sbin is a helper
+# mount(8) will never find.
+PREFIX  ?= /usr/local
+MANDIR  ?= $(PREFIX)/share/man
+SBINDIR ?= /sbin
+
+# Where the shell completions go. Both are the conventional locations rather than
+# the only ones: bash-completion also reads $XDG_DATA_HOME, and zsh reads whatever
+# is on $fpath, which is why the generated files carry per-user instructions of
+# their own at the top.
+BASHCOMPDIR ?= $(PREFIX)/share/bash-completion/completions
+ZSHCOMPDIR  ?= $(PREFIX)/share/zsh/site-functions
+
 # Tool binaries are stamped with both the tool version and the Go version that
 # built them, so either changing forces a reinstall.
 #
@@ -126,11 +140,62 @@ ARGS ?=
 run: build
 	$(BIN)/drivel mount $(if $(MNT),-mount $(MNT)) $(if $(DATA),-data $(DATA)) $(ARGS)
 
+# The shell completions are generated from the flag definitions in cmd/drivel,
+# under the `completions` build tag — the renderer is build-time machinery and a
+# released binary has no reason to carry it. See cmd/drivel/completions.go.
+#
+# The generated files are committed because whoever installs drivel from a
+# tarball or a distro package has no Go toolchain to run this with; the check
+# target below is what stops them going stale.
+#> make completions                  # regenerate completions/ after adding a flag
+## completions: regenerate the shell completion files from drivel's own flags
+.PHONY: completions
+completions:
+	go run -tags completions ./cmd/drivel gen-completions -o completions
+
+## completions-check: fail if the committed completions no longer match the flags
+.PHONY: completions-check
+completions-check:
+	go run -tags completions ./cmd/drivel gen-completions -o completions -check
+
 ## clean: remove build output, installed tools and the test cache
 .PHONY: clean
 clean:
 	rm -rf $(BIN)
 	go clean -testcache
+
+## install: binary, man page, shell completions + the mount(8) helper symlinks (Linux)
+.PHONY: install
+install: build
+	install -d $(DESTDIR)$(PREFIX)/bin $(DESTDIR)$(MANDIR)/man1
+	install -m0755 $(BIN)/drivel $(DESTDIR)$(PREFIX)/bin/drivel
+	install -m0644 docs/user/drivel.1 $(DESTDIR)$(MANDIR)/man1/drivel.1
+# The helper is the same binary under another name: mount(8) picks a program by
+# the filesystem type, and argv[0] is the whole difference. A symlink rather than
+# a second binary means there is no second thing to keep in version lockstep.
+#
+# Both names are installed because both fstab types are reasonable to write.
+# fuse.drivel is the one the docs use: go-fuse mounts as "fuse." + its subtype, so
+# that type is what /proc/self/mountinfo already reports, and systemd's
+# fstab-generator compares the two.
+	install -d $(DESTDIR)$(SBINDIR)
+	ln -sf $(PREFIX)/bin/drivel $(DESTDIR)$(SBINDIR)/mount.fuse.drivel
+	ln -sf $(PREFIX)/bin/drivel $(DESTDIR)$(SBINDIR)/mount.drivel
+# The completion files, under the names each shell looks for: bash loads
+# "drivel" (the command name) from its completions directory, zsh autoloads
+# "_drivel" from $fpath. They are the committed, generated copies — `make
+# completions` is what regenerates them, and completions-check is what keeps the
+# committed pair honest.
+	install -d $(DESTDIR)$(BASHCOMPDIR) $(DESTDIR)$(ZSHCOMPDIR)
+	install -m0644 completions/drivel.bash $(DESTDIR)$(BASHCOMPDIR)/drivel
+	install -m0644 completions/_drivel $(DESTDIR)$(ZSHCOMPDIR)/_drivel
+
+## uninstall: remove what install placed
+.PHONY: uninstall
+uninstall:
+	rm -f $(DESTDIR)$(PREFIX)/bin/drivel $(DESTDIR)$(MANDIR)/man1/drivel.1
+	rm -f $(DESTDIR)$(SBINDIR)/mount.fuse.drivel $(DESTDIR)$(SBINDIR)/mount.drivel
+	rm -f $(DESTDIR)$(BASHCOMPDIR)/drivel $(DESTDIR)$(ZSHCOMPDIR)/_drivel
 
 # ---------------------------------------------------------------------- test
 
@@ -207,7 +272,7 @@ tidy-check:
 #> make check                       # everything CI runs, in CI's order
 ## check: everything CI runs, in CI's order
 .PHONY: check
-check: tidy-check fmt-check lint test-full vuln
+check: tidy-check fmt-check completions-check lint test-full vuln
 
 ## precommit: the fast gate the pre-commit hook runs
 .PHONY: precommit

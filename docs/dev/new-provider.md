@@ -44,6 +44,14 @@ Rules the engine relies on:
   implement it as copy+delete — note in your docs that this resets object
   identity. Return `provider.ErrNotExist` when the source path is unknown; the
   engine treats that as "upload the destination as fresh content."
+- **`Remove` deletes recursively, and should prefer whatever the backend's
+  recoverable form is.** The seam says nothing about where the bytes go, because
+  backends differ (Drive has a trash, an S3 bucket may have versioning, a CAS
+  store has a GC policy). Take the recoverable one where there is a choice, and
+  give the operator an explicit way to ask for the outright form: not every
+  deletion the engine performs was typed by a user — `syncengine/reconcile.go`
+  *infers* them from a baseline — and this is the one operation with no fallback
+  above your package. `gdrive`'s `DeleteMode` is the worked example.
 - **Concurrency-safe.** The uploader and downloader call your `Store` from
   different goroutines. Guard shared state.
 

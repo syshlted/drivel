@@ -125,6 +125,7 @@ and in the file they live in an account table or `[mount.provider]`.
 | `-drive-root ID` | `root` | `root` | The Drive folder mapped to the mount root. `root` means all of My Drive. |
 | `-index FILE` | `index` | `drivel-index.db` | The persistent path↔file-ID cache. `""` disables persistence, which costs API round trips and nothing else. |
 | `-drive-sweep-mode M` | `sweep-mode` | `auto` | How the enumeration sweep walks Drive: see below. |
+| `-drive-delete M` | `delete` | `trash` | What removing a file does remotely: see below. |
 | — | `scope` | `drive` | The OAuth scope the token was granted, as `login` recorded it. |
 
 ### `-drive-sweep-mode`
@@ -147,6 +148,29 @@ a deep tree of near-empty directories is cheaper `flat`. Drivel notices that sha
 and says so in the log rather than leaving you to find out.
 
 An unknown value is refused at startup rather than quietly falling back.
+
+### `-drive-delete`
+
+- **`trash`** (the default) moves the file to the Drive trash. You can restore it
+  from [drive.google.com](https://drive.google.com/drive/trash) for 30 days, after
+  which Drive purges it.
+- **`permanent`** unlinks it outright, which is what Drivel did before. There is
+  no undo, from anywhere.
+
+The default is the recoverable one because not every deletion Drivel performs is
+one you asked for: an enumeration sweep can *infer* a deletion from a baseline,
+and a wrong premise — a mount pointed at the wrong folder, an emptied backing
+directory — makes the inference wrong with it. See
+[data safety](data-safety.md#deletion).
+
+Choose `permanent` when the mount is how you reclaim space: a trashed file still
+counts against your Drive quota until the trash is emptied. An unknown value is
+refused at startup.
+
+The setting applies to every removal this mount makes — the ones you type and the
+ones a sweep infers alike. It does not affect deletions made *to* you: a file
+another client removes is deleted from your backing directory whichever mode you
+run.
 
 ## Login options
 

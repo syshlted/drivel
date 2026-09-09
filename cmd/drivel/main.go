@@ -6,6 +6,9 @@
 //	drivel login  [flags]   # interactive OAuth setup (writes credentials.json + token.json)
 //	drivel mount  [flags]   # mount and sync (default if no subcommand given)
 //
+// It is also the mount(8) helper for /etc/fstab, when invoked through the
+// /sbin/mount.fuse.drivel symlink or as `drivel mount-helper` (Linux only).
+//
 // See DESIGN.md for the architecture.
 //
 // Copyright (C) 2026 SystemHalted and Jeremy Melanson. Drivel is free software
@@ -17,11 +20,21 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"path/filepath"
 	"strings"
 )
 
 func main() {
 	args := os.Args[1:]
+	// Invoked through /sbin/mount.fuse.drivel (or mount.drivel): mount(8) chose
+	// this program by name, and passes an argument shape that has nothing to do
+	// with drivel's flags. One binary rather than a second one to keep in version
+	// lockstep — the name it was reached by is the whole difference.
+	if isMountHelper(os.Args[0]) {
+		failHelper(runMountHelper(args))
+		return
+	}
+
 	cmd := ""
 	// Accept a leading subcommand; anything starting with '-' means the default
 	// (mount) command with flags, preserving `drivel -mount ... -data ...`.
@@ -36,12 +49,35 @@ func main() {
 		fail(runMount(args))
 	case "login":
 		fail(runLogin(args))
+	case "mount-helper":
+		// The same entry point, reachable without the symlink: it is how the helper
+		// is tested, and how you debug an fstab line by hand.
+		failHelper(runMountHelper(args))
 	case "help", "-h", "--help":
 		usage(os.Stdout)
 	default:
+		// Build-tagged subcommands (today: gen-completions, under `completions`)
+		// get a chance before this is an error. `handled` is separate from the
+		// error on purpose: a generator that ran and failed must report why, not
+		// fall through to "unknown command" and print the usage text instead.
+		if handled, err := runExtraCommand(cmd, args); handled {
+			fail(err)
+			return
+		}
 		fmt.Fprintf(os.Stderr, "unknown command %q\n\n", cmd)
 		usage(os.Stderr)
 		os.Exit(2)
+	}
+}
+
+// failHelper reports a mount-helper failure the way mount(8) expects: the
+// program name, the reason, and a non-zero exit. Not log.Fatal, because a
+// timestamped line is noise in the middle of `mount`'s own output, and this text
+// is what an admin sees when a boot mount does not come up.
+func failHelper(err error) {
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "%s: %v\n", filepath.Base(os.Args[0]), err)
+		os.Exit(1)
 	}
 }
 
@@ -64,5 +100,8 @@ Usage:
   drivel mount [flags]   Mount a directory and sync it with Google Drive
 
 Run 'drivel login -h' or 'drivel mount -h' for command flags.
+
+As /sbin/mount.fuse.drivel (or 'drivel mount-helper') this is also the mount(8)
+helper for /etc/fstab; see drivel(1) and docs/user/fstab.md. Linux only.
 `)
 }

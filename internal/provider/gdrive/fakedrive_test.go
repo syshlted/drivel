@@ -352,6 +352,36 @@ func (f *fakeDrive) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		f.gets++
 		writeJSON(w, got)
 
+	case reFileID.MatchString(r.URL.Path) && r.Method == http.MethodPatch:
+		// Metadata-only update. The one shape implemented is the trash flag, which
+		// is how a default removal reaches Drive. A move (addParents/removeParents)
+		// is refused outright rather than half-applied: silently ignoring the
+		// parents would let a future Move test pass against a tree this fake never
+		// rearranged.
+		if r.URL.Query().Get("addParents") != "" || r.URL.Query().Get("removeParents") != "" {
+			writeErr(w, http.StatusNotImplemented, "fakeDrive: move is not implemented")
+			return
+		}
+		id := f.normalize(reFileID.FindStringSubmatch(r.URL.Path)[1])
+		got, ok := f.files[id]
+		if !ok {
+			writeErr(w, http.StatusNotFound, "File not found: "+id)
+			return
+		}
+		var in drive.File
+		_ = json.NewDecoder(r.Body).Decode(&in)
+		f.updates++
+		if in.Name != "" {
+			got.Name = in.Name
+		}
+		if in.Trashed {
+			// Drive trashes a folder's whole subtree with it, and every query the
+			// provider issues carries "trashed = false", so a fake that trashed only
+			// the named object would show children the real API hides.
+			f.trashLocked(got)
+		}
+		writeJSON(w, got)
+
 	case reFileID.MatchString(r.URL.Path) && r.Method == http.MethodDelete:
 		f.deletes++
 		delete(f.files, f.normalize(reFileID.FindStringSubmatch(r.URL.Path)[1]))
@@ -519,6 +549,37 @@ func (f *fakeDrive) has(id string) bool {
 	defer f.mu.Unlock()
 	_, ok := f.files[id]
 	return ok
+}
+
+// trashLocked marks file trashed, and everything beneath it if it is a folder —
+// Drive's `trashed` is "explicitly, or from a trashed parent folder".
+//
+// The fake settles that instantly and real Drive does not: measured against the
+// rig, a child still read trashed=false right after its parent was trashed. This
+// models the settled state on purpose, because nothing above the seam depends on
+// the timing; TestLiveRemoveTrashes is where the propagation itself is asserted.
+func (f *fakeDrive) trashLocked(file *drive.File) {
+	file.Trashed = true
+	if file.MimeType != folderMIME {
+		return
+	}
+	for _, child := range f.files {
+		for _, parent := range child.Parents {
+			if parent == file.Id && !child.Trashed {
+				f.trashLocked(child)
+			}
+		}
+	}
+}
+
+// trashed reports whether an object is in the trash: still there, and invisible
+// to every query the provider makes. A test distinguishing the two removals
+// needs both this and has().
+func (f *fakeDrive) trashed(id string) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	file, ok := f.files[id]
+	return ok && file.Trashed
 }
 
 // namedChildren is every non-trashed object called name in parent — the fake's

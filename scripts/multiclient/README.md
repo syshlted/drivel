@@ -9,8 +9,10 @@ no network and runs under `-race` with the rest of the suite.
 
 1. **A dedicated Drive folder, and its ID** — not `root`. `-drive-root root` maps
    the mount to the whole of My Drive.
-2. **`Store.Remove` is `Files.Delete`.** Deletions here are permanent; they do not
-   go to the trash and cannot be undone from the web UI.
+2. **`Store.Remove` trashes by default.** Deletions here are recoverable from the
+   web UI for 30 days — but the cases delete thousands of files at a time and a
+   trashed file still counts against the quota, so empty the trash between runs.
+   With `delete = "permanent"` they are gone for good instead.
 3. **A throwaway Google account.** The delete and conflict cases are designed to
    destroy data.
 4. **One token per client.** `token.json` is rewritten on refresh, and three

@@ -31,49 +31,67 @@ const driveKind = "gdrive"
 // inspected, not what any of it is.
 var mountShapingFlags = []string{
 	"mount", "data", "credentials", "token", "state", "index",
-	"drive-root", "drive-sweep-mode", "lazy", "xattr", "resync", "materialize", "max-deletes",
-	"sweep-interval", "upload-workers", "hydrate-workers",
+	"drive-root", "drive-sweep-mode", "drive-delete", "lazy", "xattr", "resync",
+	"materialize", "max-deletes", "sweep-interval", "upload-workers", "hydrate-workers",
+}
+
+// mountCLI is everything `drivel mount` accepts: the mount description in
+// specFlags, plus the two process-level flags that describe how this *process*
+// reports rather than what it mounts.
+type mountCLI struct {
+	specFlags
+
+	pprofAddr   string
+	pprofRemote bool
+}
+
+// mountFlagSet defines the mount command's flags, binding them into c.
+//
+// It is a function rather than a block inside runMount so that exactly one
+// description of these flags exists: the completion generator (build tag
+// `completions`) walks this same set, so a flag cannot be added to drivel and
+// missing from the shell completions. Binding directly into the struct also
+// removes the pointer-and-copy block that used to sit between the definitions
+// and specFlags, where a flag could be defined and then never carried.
+func mountFlagSet(c *mountCLI) *flag.FlagSet {
+	fset := flag.NewFlagSet("mount", flag.ExitOnError)
+	fset.StringVar(&c.configPath, "config", "", "TOML config file describing one or more mounts; defaults to $XDG_CONFIG_HOME/drivel/config.toml when no mount flags are given")
+	fset.StringVar(&c.mountpoint, "mount", "", "path to mount the filesystem (required unless -config is used)")
+	fset.StringVar(&c.dataDir, "data", "", "backing directory (source of truth). If omitted, in-place mode uses the mount dir as its own backing (Linux only)")
+	fset.StringVar(&c.credentials, "credentials", "", "OAuth client secret JSON; enables Drive sync (else log-only)")
+	fset.StringVar(&c.token, "token", "token.json", "path to the cached OAuth token (from 'drivel login')")
+	fset.StringVar(&c.stateDB, "state", "drivel-state.db", "path to the sync-state DB (cursor + echo records); kept outside the backing tree")
+	fset.StringVar(&c.indexDB, "index", "drivel-index.db", "path to the provider's path↔ID index (a cache; safe to delete); \"\" disables it")
+	fset.StringVar(&c.driveRoot, "drive-root", "root", "Drive folder ID mapped to the mount root")
+	fset.StringVar(&c.driveSweepMode, "drive-sweep-mode", "", "how the enumeration sweep walks Drive: \"scoped\" descends from -drive-root, \"flat\" lists the whole account, \"auto\" (default) descends unless -drive-root names the whole Drive")
+	fset.StringVar(&c.driveDelete, "drive-delete", "", "what removing a file does remotely: \"trash\" (default) moves it to the Drive trash, where it can be restored for 30 days but still counts against your quota; \"permanent\" unlinks it outright, with no undo")
+	fset.BoolVar(&c.lazy, "lazy", false, "lazy hydration (M5): materialise remote files as placeholders and fetch content on first read (requires -credentials)")
+	fset.BoolVar(&c.xattr, "xattr", false, "serve extended attributes through the mountpoint by passing them to the backing store; off by default because it exposes drivel's own placeholder marker to anything that can write to the mount")
+	fset.BoolVar(&c.resync, "resync", false, "enumerate the whole remote tree and reconcile it against the backing dir at startup, even if a baseline already exists")
+	fset.BoolVar(&c.materialize, "materialize", false, "during a reconcile in eager mode, download remote files that have no local copy (implied by -lazy, where it costs only a placeholder)")
+	fset.IntVar(&c.maxDeletes, "max-deletes", syncengine.DefaultMaxDeletes, "cap on deletions one reconcile may infer, in either direction; 0 for no limit")
+	fset.DurationVar(&c.sweepInterval, "sweep-interval", syncengine.DefaultSweepInterval, "re-enumerate and reconcile the remote tree this often, timed from the last completed sweep; 0 disables it")
+	fset.IntVar(&c.uploadWorkers, "upload-workers", syncengine.DefaultWorkers, "how many files this mount uploads at once; same-path writes stay ordered whatever this is. Each in-flight upload can hold a provider-sized chunk buffer (16 MiB on Drive), and past the point the provider throttles, more workers cost quota rather than throughput")
+	fset.IntVar(&c.hydrateWorkers, "hydrate-workers", hydrate.DefaultWorkers, "how many placeholders this mount fetches at once under -lazy; bounds a recursive read over a lazy tree, which would otherwise fault every file simultaneously")
+	fset.BoolVar(&c.debug, "debug", false, "enable FUSE debug logging")
+	fset.StringVar(&c.pprofAddr, "pprof", "", "serve net/http/pprof on this address for goroutine and heap profiling; a bare port means loopback, and a non-loopback address needs -pprof-allow-remote; empty disables it")
+	fset.BoolVar(&c.pprofRemote, "pprof-allow-remote", false, "permit -pprof to bind an address other than loopback, publishing this process's heap — and so the paths and some contents of synced files — to whoever can reach it")
+	return fset
 }
 
 func runMount(args []string) error {
-	fset := flag.NewFlagSet("mount", flag.ExitOnError)
-	configPath := fset.String("config", "", "TOML config file describing one or more mounts; defaults to $XDG_CONFIG_HOME/drivel/config.toml when no mount flags are given")
-	mountpoint := fset.String("mount", "", "path to mount the filesystem (required unless -config is used)")
-	dataDir := fset.String("data", "", "backing directory (source of truth). If omitted, in-place mode uses the mount dir as its own backing (Linux only)")
-	credentials := fset.String("credentials", "", "OAuth client secret JSON; enables Drive sync (else log-only)")
-	token := fset.String("token", "token.json", "path to the cached OAuth token (from 'drivel login')")
-	stateDB := fset.String("state", "drivel-state.db", "path to the sync-state DB (cursor + echo records); kept outside the backing tree")
-	indexDB := fset.String("index", "drivel-index.db", "path to the provider's path↔ID index (a cache; safe to delete); \"\" disables it")
-	driveRoot := fset.String("drive-root", "root", "Drive folder ID mapped to the mount root")
-	driveSweepMode := fset.String("drive-sweep-mode", "", "how the enumeration sweep walks Drive: \"scoped\" descends from -drive-root, \"flat\" lists the whole account, \"auto\" (default) descends unless -drive-root names the whole Drive")
-	lazy := fset.Bool("lazy", false, "lazy hydration (M5): materialise remote files as placeholders and fetch content on first read (requires -credentials)")
-	xattr := fset.Bool("xattr", false, "serve extended attributes through the mountpoint by passing them to the backing store; off by default because it exposes drivel's own placeholder marker to anything that can write to the mount")
-	resync := fset.Bool("resync", false, "enumerate the whole remote tree and reconcile it against the backing dir at startup, even if a baseline already exists")
-	materialize := fset.Bool("materialize", false, "during a reconcile in eager mode, download remote files that have no local copy (implied by -lazy, where it costs only a placeholder)")
-	maxDeletes := fset.Int("max-deletes", syncengine.DefaultMaxDeletes, "cap on deletions one reconcile may infer, in either direction; 0 for no limit")
-	sweepInterval := fset.Duration("sweep-interval", syncengine.DefaultSweepInterval, "re-enumerate and reconcile the remote tree this often, timed from the last completed sweep; 0 disables it")
-	uploadWorkers := fset.Int("upload-workers", syncengine.DefaultWorkers, "how many files this mount uploads at once; same-path writes stay ordered whatever this is. Each in-flight upload can hold a provider-sized chunk buffer (16 MiB on Drive), and past the point the provider throttles, more workers cost quota rather than throughput")
-	hydrateWorkers := fset.Int("hydrate-workers", hydrate.DefaultWorkers, "how many placeholders this mount fetches at once under -lazy; bounds a recursive read over a lazy tree, which would otherwise fault every file simultaneously")
-	debug := fset.Bool("debug", false, "enable FUSE debug logging")
-	pprofAddr := fset.String("pprof", "", "serve net/http/pprof on this address for goroutine and heap profiling; a bare port means loopback, and a non-loopback address needs -pprof-allow-remote; empty disables it")
-	pprofRemote := fset.Bool("pprof-allow-remote", false, "permit -pprof to bind an address other than loopback, publishing this process's heap — and so the paths and some contents of synced files — to whoever can reach it")
+	var c mountCLI
+	fset := mountFlagSet(&c)
 	_ = fset.Parse(args)
 
 	given := map[string]bool{}
 	fset.Visit(func(f *flag.Flag) { given[f.Name] = true })
 
-	if err := validatePprofFlags(*pprofAddr, given["pprof-allow-remote"]); err != nil {
+	if err := validatePprofFlags(c.pprofAddr, given["pprof-allow-remote"]); err != nil {
 		return err
 	}
 
-	specs, err := mountSpecs(fset, given, specFlags{
-		configPath: *configPath, mountpoint: *mountpoint, dataDir: *dataDir,
-		credentials: *credentials, token: *token, stateDB: *stateDB, indexDB: *indexDB,
-		driveRoot: *driveRoot, driveSweepMode: *driveSweepMode,
-		lazy: *lazy, xattr: *xattr, resync: *resync, materialize: *materialize,
-		maxDeletes: *maxDeletes, sweepInterval: *sweepInterval, debug: *debug,
-		uploadWorkers: *uploadWorkers, hydrateWorkers: *hydrateWorkers,
-	})
+	specs, err := mountSpecs(fset, given, c.specFlags)
 	if err != nil {
 		return err
 	}
@@ -88,8 +106,8 @@ func runMount(args []string) error {
 
 	// Before the mounts, so a bad address fails while nothing is mounted yet, and
 	// so a mount that hangs during startup is itself profilable.
-	if *pprofAddr != "" {
-		_, stopPprof, err := startPprof(ctx, *pprofAddr, *pprofRemote)
+	if c.pprofAddr != "" {
+		_, stopPprof, err := startPprof(ctx, c.pprofAddr, c.pprofRemote)
 		if err != nil {
 			return err
 		}
@@ -120,6 +138,7 @@ type specFlags struct {
 	indexDB        string
 	driveRoot      string
 	driveSweepMode string
+	driveDelete    string
 
 	lazy          bool
 	xattr         bool
@@ -215,6 +234,7 @@ func mountSpecs(fset *flag.FlagSet, given map[string]bool, f specFlags) ([]app.M
 			Token:       f.token,
 			RootID:      f.driveRoot,
 			SweepMode:   gdrive.SweepMode(f.driveSweepMode),
+			Delete:      gdrive.DeleteMode(f.driveDelete),
 			IndexPath:   f.indexDB,
 		})
 	}

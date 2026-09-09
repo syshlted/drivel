@@ -1,6 +1,6 @@
 .\" Manpage for drivel.
 .\" Render with:  man ./docs/drivel.1     or     mandoc -a docs/drivel.1
-.TH DRIVEL 1 "2026-09-05" "drivel" "User Commands"
+.TH DRIVEL 1 "2026-09-06" "drivel" "User Commands"
 .SH NAME
 drivel \- Drive-backed FUSE interceptor filesystem
 .SH SYNOPSIS
@@ -50,6 +50,8 @@ drivel \- Drive-backed FUSE interceptor filesystem
 .IR id ]
 .RB [ -drive-sweep-mode
 .IR mode ]
+.RB [ -drive-delete
+.IR mode ]
 .RB [ -lazy ]
 .RB [ -xattr ]
 .RB [ -resync ]
@@ -66,6 +68,12 @@ drivel \- Drive-backed FUSE interceptor filesystem
 .RB [ -pprof
 .IR addr ]
 .RB [ -pprof-allow-remote ]
+.br
+.B mount.fuse.drivel
+.I spec dir
+.RB [ -sfnv ]
+.RB [ -o
+.IR options ]
 .SH DESCRIPTION
 .B drivel
 mounts a local directory as a loopback FUSE filesystem that acts as an
@@ -92,6 +100,19 @@ all Drive traffic is directly between your machine and Google under an app
 identity you control. All Drive traffic uses HTTP/3 (QUIC) with an automatic
 fallback to HTTP/2.
 .SH COMMANDS
+.TP
+.B mount-helper
+The
+.BR mount (8)
+helper for
+.IR /etc/fstab .
+Normally reached through the
+.I /sbin/mount.fuse.drivel
+symlink rather than by this name: the helper is selected by
+.BR argv [0],
+so the same binary serves both. Linux only. See
+.B MOUNT HELPER
+below.
 .TP
 .B login
 Interactive, rclone-style OAuth wizard. Collects the client ID/secret (from
@@ -204,6 +225,22 @@ near-empty directories can be cheaper to sweep
 .BR flat .
 Drivel logs when a descent looks folder-dense rather than leaving it to be
 discovered.
+.TP
+.BI -drive-delete " mode"
+What removing a file does to the remote copy.
+.B trash
+(the default) moves it to the Drive trash, where it can be restored for 30 days.
+.B permanent
+unlinks it outright, with no undo anywhere, which is what Drivel did before this
+option existed.
+.IP
+The default is the recoverable one because not every deletion Drivel performs was
+typed by a user: an enumeration sweep infers deletions from a baseline, and a
+wrong premise makes the inference wrong with it. Choose
+.B permanent
+when the mount is how storage gets reclaimed \(em a trashed file still counts
+against the account's quota until the trash is emptied. An unknown value is
+refused at startup.
 .TP
 .B -lazy
 Enable lazy hydration. Remote files are materialised in the backing directory as
@@ -454,6 +491,152 @@ picks a free port automatically. Default:
 .B -open
 Attempt to open the authorization URL with the operating system's browser
 handler.
+.SH MOUNT HELPER
+Installed as
+.I /sbin/mount.fuse.drivel
+(and
+.IR /sbin/mount.drivel ),
+drivel is a
+.BR mount (8)
+helper, so a mount can be described in
+.I /etc/fstab
+and brought up by
+.BR mount ,
+.B mount -a
+or systemd at boot with no terminal attached.
+.B Linux only.
+.PP
+.in +4n
+.EX
+work  /home/j/Drive  fuse.drivel  _netdev,nofail,run\-as=j,account=work,data=/var/cache/drivel/work  0 0
+.EE
+.in
+.PP
+Prefer the
+.B fuse.drivel
+type: go\-fuse mounts as
+.RB \(dq fuse. \(dq
+plus its subtype, so that is what
+.I /proc/self/mountinfo
+reports whichever type is written, and systemd's fstab\-generator compares the
+two.
+.PP
+The device field (column 1) names the mount: with
+.B config=
+it selects the
+.B [[mount]]
+entry, otherwise it becomes the mount's name and the source
+.BR findmnt (8)
+shows.
+.B drivel
+and
+.B none
+are treated as filler and the mountpoint's basename is used instead.
+.SS Helper options
+Given with
+.BR -o .
+Either
+.B config=
+or the shaping options, never both \(em the same rule
+.B -config
+enforces on the command line.
+.TP
+.BI config= file
+Serve the
+.B [[mount]]
+entry of
+.I file
+that this line names. Its
+.B path
+must equal the fstab mountpoint.
+.TP
+.BI account= name
+Credentials and token from
+.IR $XDG_CONFIG_HOME/drivel/name ,
+as
+.B drivel login -account
+.I name
+wrote them.
+.TP
+.BR data= ", " credentials= ", " token= ", " state= ", " index= ", " drive-root= ", " name=
+As the corresponding
+.B mount
+flags. Paths must be absolute, or begin with
+.RB \(dq ~/ \(dq
+for the mounting account's home.
+.TP
+.BR lazy ", " xattr ", " resync ", " materialize ", " "max-deletes=" ", " "sweep-interval="
+As the corresponding
+.B mount
+flags.
+.TP
+.BI run-as= name
+Run the daemon as
+.IR name :
+move
+.BR HOME " and the " XDG_ *
+variables to that account and give up root before reading any credential. This
+is what makes a boot mount own its files as the user rather than as root. Not
+spelled
+.BR user= ,
+which is fstab's own \(lqwho may mount this\(rq and is passed down by
+.BR mount (8)
+to record who did.
+.TP
+.BI logfile= path
+Where the daemon logs. Without it the daemon's output goes to
+.IR /dev/null ,
+because a backgrounded process holding the caller's stdout open would block
+anything reading it through a pipe. Startup failures still reach
+.BR mount (8)
+either way.
+.TP
+.B foreground
+Do not fork. For debugging; an fstab line must not use it.
+.TP
+.BI mount-timeout= d
+Give up if the filesystem is not live within
+.IR d ,
+killing the child. Off by default: systemd already bounds a mount unit's
+startup.
+.TP
+.BR debug ", " fsname= ", " allow_other ", " allow_root ", " default_permissions ", " nosuid ", " nodev ", " noexec ", " noatime
+Tracing, the source name, and mount options passed to the backend verbatim.
+.PP
+.BR defaults ", " auto ", " noauto ", " _netdev ", " nofail ", " user ", " users ", " owner ", " group ", " rw ,
+the
+.B atime
+family,
+.B comment=
+and every
+.BR x- *
+option belong to
+.BR mount (8)
+or systemd and are accepted and ignored.
+.BR ro ", " remount ", " bind " and " move
+are
+.IR refused :
+drivel has no read\-only mode, and a line claiming one over a writable mount
+would be a lie. An unknown option is an error unless
+.B -s
+(sloppy) is given.
+.SS Checking a line
+.B mount -f
+validates an fstab line \(em options, the
+.B run-as
+account, the resolved mount \(em without mounting anything or dropping
+privileges.
+.B mount -v
+logs what it resolved. To test against a file other than
+.IR /etc/fstab ,
+use
+.BR "mount -a -T ./my-fstab" ;
+.BR umount (8)
+has no such option, so unmount by path.
+.PP
+See
+.I docs/user/fstab.md
+for the full guide.
 .SH CONFIGURATION
 .PP
 The config file describes any number of mounts, which one
@@ -677,6 +860,25 @@ drains its bounded queue of in-flight uploads before the process exits. A second
 forces an immediate exit.
 .SH FILES
 .TP
+.I /sbin/mount.fuse.drivel
+Symlink to the drivel binary, making it the
+.BR mount (8)
+helper for the
+.B fuse.drivel
+filesystem type.
+.I /sbin/mount.drivel
+is the same thing for the
+.B drivel
+type. Both are placed by
+.BR "make install" .
+.TP
+.I /etc/fstab
+Mounts brought up by
+.B mount
+and
+.BR "mount -a" ; see
+.BR "MOUNT HELPER" .
+.TP
 .I $XDG_CONFIG_HOME/drivel/config.toml
 Mount and account configuration; see
 .BR CONFIGURATION .
@@ -769,8 +971,11 @@ on a clean unmount,
 on an unknown command or flag-parse error, and non-zero on a fatal mount, auth,
 or sync-setup error.
 .SH SEE ALSO
+.BR mount (8),
+.BR umount (8),
+.BR fstab (5),
 .BR fusermount3 (1),
-.BR mount (8)
+.BR systemd.mount (5)
 .PP
 User documentation in
 .IR docs/user/ :
@@ -780,6 +985,9 @@ to get started,
 for every flag and config key,
 .I google-cloud-setup.md
 for Google credentials,
+.I fstab.md
+for mounting from
+.IR /etc/fstab ,
 .I data-safety.md
 for conflict and deletion behaviour, and
 .I troubleshooting.md

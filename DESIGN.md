@@ -269,6 +269,45 @@ behaviour; the engine does not branch on it. (`Move` on an unknown source return
 `provider.ErrNotExist`, which the engine recovers by uploading the destination as fresh
 content — the one place only the engine has the bytes.)
 
+**Remove semantics — the same class of capability difference, resolved towards the
+recoverable answer.** The seam says `Remove(ctx, path) error` and nothing about
+what becomes of the bytes, because providers genuinely differ: Drive has a trash,
+S3 has versioning or nothing depending on the bucket, a local CAS backend (M11)
+has whatever its GC policy says. Drive's implementation therefore owns the choice,
+and takes the trash by default (`files.update` with `trashed = true`), with
+`delete = "permanent"` restoring the outright `files.delete` that M1–M16 always
+did.
+
+The default is the recoverable one for a reason that is about drivel rather than
+about Drive: **not every deletion the engine performs was typed by a user.** A
+reconcile pass *infers* deletions from a baseline (§9, M7b), and every input that
+makes that inference wrong — a state DB reused against a different `-drive-root`,
+a `-data` directory that came up empty, a mount pointing somewhere new — is an
+accident rather than a corruption, which means the guards can only make the pass
+refuse, never make it right. Everything else in the tree fails towards keeping
+bytes: M5 refuses to push a placeholder, M6 falls back to a whole-file `Put`, M7's
+index is verified before it is believed, M7b abandons a delete pass it cannot
+justify. Remove was the one operation with no such fallback, and the provider had
+one available for free.
+
+It is nonetheless a real removal, and deliberately indistinguishable from one
+above the seam. Every query `gdrive` issues carries `trashed = false`, so a
+trashed object stops resolving, stops appearing in a sweep, and cannot be revived
+by a stale index hint (`verifyLocked` already rejects `Trashed`); `changes()`
+already reads a trashed file as `Removed`, so the fleet applies it as the deletion
+it is; and Drive's `trashed` means "explicitly, or from a trashed parent folder",
+so trashing a directory carries the subtree exactly as the recursive delete did —
+**asynchronously**, which a live run against real Drive found and no fake would
+have (a child read `trashed = false` immediately after its parent was trashed, and
+inherited the flag shortly after). Nothing depends on that timing: `rm -rf`
+unlinks the children first, so each is trashed in its own right, and a sweep that
+raced the propagation would park a still-listed child on a parent the listing no
+longer holds and drop it as outside the mount.
+What differs is one thing only: the bytes are somewhere a user can reach them for
+30 days. What it costs is also one thing: they still count against the account's
+quota until the trash is emptied, which is why the permanent mode exists rather
+than being an option nobody would pick.
+
 **Reporting a move *inbound* is the seam's hardest case, and it is the provider's
 job.** `RemoteChange` is `{Path, File, Removed}` — no identity — so the only way a
 change feed can say an object moved is a removal of the path it left plus an
@@ -1215,8 +1254,11 @@ are both lossy and racy.
       state DB reused against a different `-drive-root`, a fresh empty `-data` dir, a
       mount pointing somewhere new — are ones where the *premise* is broken, not
       where there are genuinely 4000 deletions. This matters more on the remote side
-      than the local one: `Store.Remove` on Drive is a permanent delete, not a move
-      to the trash.
+      than the local one: a remote deletion is not something the local tree can be
+      re-derived from. `Store.Remove` on Drive is a move to the trash (§2.5), so a
+      refused-too-late pass is now recoverable for 30 days — but the trash is the
+      last guard, not a licence to weaken this one, and `delete = "permanent"`
+      turns it off.
 
       The cap is applied *during* the candidate walk, not after it, because the
       input that most needs refusing is also the largest: a state DB whose every
@@ -2320,6 +2362,87 @@ are both lossy and racy.
    metadata, and the Tier B rounds can be read against the behaviour above. 4 is a
    milestone of its own and waits on the provider-metadata capability. 5 waits on
    both.
+18. **M16 — fstab & non-interactive mount (Linux).** ✅ `drivel` is a `mount(8)`
+    helper as well as a command: installed as `/sbin/mount.fuse.drivel`, a mount can
+    be described in `/etc/fstab` and brought up by `mount`, `mount -a` or systemd at
+    boot with no terminal attached. `docs/user/fstab.md` is the user-facing half.
+
+    The milestone is small in code and almost entirely about three decisions, each
+    of which is a way to get it wrong.
+
+    **The type is `fuse.drivel`, and that is a correctness matter rather than a
+    naming one.** go-fuse mounts as `fuse.` + its subtype (`MountOptions.Name`), so
+    `/proc/self/mountinfo` reports `fuse.drivel` whatever the fstab line says.
+    systemd's fstab-generator compares the fstab type against what the kernel
+    reports, so a line saying `drivel` describes a mount that never appears under
+    that name. `mount.drivel` is installed as an alias; the docs use the other.
+    `MountSpec.FsName` now carries the fstab device field for the same reason —
+    `findmnt(8)` and `umount(8)` match on it, and a hard-coded `"drivel"` made every
+    mount on a machine indistinguishable. Empty still means `"drivel"`, so nothing
+    that existed before this changed.
+
+    **The helper must exit once the filesystem is live, and not one moment before.**
+    `mount(8)` does not return until the helper does, so serving the mount in the
+    foreground hangs `mount -a` and with it the boot; exiting early is worse, since
+    `mount` would report success for a filesystem that may never appear. So the
+    parent re-executes itself (`/proc/self/exe`, original argv, a marker in the
+    environment), the child mounts and reports through an inherited pipe, and the
+    parent exits 0 only on `ok` — carrying the child's failure back as its own
+    otherwise. That needs a *signal* that the mount is live, which is why
+    `mount.Options.Ready` exists: polling `/proc/self/mountinfo` needs no seam
+    change but cannot distinguish "still starting" from "wedged", and has to guess
+    which entry is ours.
+
+    Two consequences of the fork are easy to get wrong and both are settled here.
+    The daemon's stdout and stderr go to `logfile=` or to `/dev/null`, **never to
+    the caller's**: an inherited descriptor stays open for the life of the mount, so
+    any caller reading through a pipe — `out=$(mount -a 2>&1)` — would block until
+    the filesystem was unmounted. Journal integration is the thing given up, and
+    `logfile=` is the replacement. And there is no default timeout: systemd already
+    bounds a mount unit's startup, and a second bound here with a different default
+    is a second answer to one question. `mount-timeout=` is available, and kills the
+    child rather than leaving a daemon that mounts later behind `mount(8)`'s back.
+
+    **The privilege option is `run-as=`, not `user=`.** At boot the helper is root
+    while the token, the backing tree and the mount belong to somebody, so
+    `run-as=NAME` moves `HOME` and the XDG variables to that account and gives up
+    root — setgroups, setgid, setuid, in that order, before anything reads a
+    credential. The name matters: `user` is a standard fstab option meaning "a
+    non-root user may mount this", and util-linux passes `user=NAME` down to the
+    helper to record who did, so treating it as a privilege-drop request would act
+    on an option nobody aimed at drivel. **Unsetting the inherited XDG variables is
+    the load-bearing half** of the environment change — root's
+    `XDG_CONFIG_HOME=/root/.config` surviving the drop would leave the mount running
+    as the user while looking for the wrong account's token, which fails looking
+    like a login problem rather than an environment one.
+
+    Below that, the helper is a translation layer and nothing more: the option table
+    ends in the same `app.MountSpec` the flag and config paths produce, so
+    validation, opening and the shutdown ordering keep one implementation. Its
+    `config=` mode refuses the shaping options exactly as `-config` does, and derives
+    that set from `mountShapingFlags` rather than restating it, so the two cannot
+    drift. `ro`, `remount`, `bind` and `move` are **refused** rather than ignored —
+    an fstab line claiming a read-only mount over a writable one is the `lazzy =
+    true` failure wearing a different hat — and an unknown option is an error unless
+    `mount -s` asked otherwise. The state DB defaults under `$XDG_STATE_HOME` rather
+    than to the flag path's bare relative filename, because an fstab mount starts
+    with `/` as its working directory, where `drivel-state.db` means
+    `/drivel-state.db`.
+
+    **Not verified: systemd.** The daemon stays in the generated `.mount` unit's
+    cgroup, and the container this was developed in has no systemd to find out what
+    happens when `ExecMount` finishes. `mount`, `mount -a` and `umount` are all
+    exercised for real. If the daemon does turn out to be killed, the answer is
+    `x-systemd.automount` or a `drivel@.service` with `x-systemd.requires=` — a
+    docs change, not a redesign.
+
+    Linux only, and by mechanism rather than by omission: the helper protocol, the
+    `/sbin/mount.<type>` lookup, the privilege drop and the re-exec handshake are all
+    how Linux specifically brings a filesystem up unattended. macOS and FreeBSD have
+    their own answers (a launchd agent, an rc.d script) and neither is reached by
+    pretending to be a mount helper. The option parser is portable anyway, so its
+    tests run everywhere.
+
 
 ### M0 — Test & CI (cross-cutting, always open)
 

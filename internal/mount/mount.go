@@ -57,6 +57,33 @@ type Options struct {
 	// privilege and both are silent, so the exposure is opt-in.
 	Xattr bool
 
+	// AllowOther lets users other than the one that mounted reach the filesystem.
+	// FUSE denies them by default, and on most distributions the mount helper
+	// refuses this unless /etc/fuse.conf sets user_allow_other.
+	//
+	// It exists for the mount that is not served by the person using it — a boot
+	// mount, or one a daemon owns. Prefer running as the owning user where that is
+	// possible: this opens the tree to every account on the machine, and drivel
+	// serves the backing store's own permission bits only when the caller also
+	// asks for default_permissions.
+	AllowOther bool
+
+	// BackendOptions are backend mount options forwarded verbatim
+	// (default_permissions, nosuid, nodev, noexec, noatime, ...).
+	//
+	// A backend that does not understand one must fail rather than ignore it. The
+	// options here are mostly security-relevant, and one that is silently dropped
+	// is a mount that is less restricted than the line that asked for it says —
+	// the same failure as a config key that stops being read.
+	BackendOptions []string
+
+	// Ready, if non-nil, is called once the filesystem is live and before Serve
+	// blocks. It is what lets a caller that must report "mounted" — the fstab
+	// helper, which has to exit before mount(8) will return — wait for the fact
+	// rather than poll for it. It runs on the serving goroutine, so it must not
+	// block.
+	Ready func()
+
 	// Logger is where the backend reports; nil uses the log package's default.
 	// With several mounts in one process it carries the mount's identity, without
 	// which a hydration failure does not say whose file failed.

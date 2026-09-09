@@ -9,6 +9,97 @@ from source.
 
 ## Unreleased
 
+### Every mount flag now works in /etc/fstab, and completions are generated — 2026-09-09
+
+Four flags described a mount but had no fstab option, so a line using one failed
+with `unknown option` and nothing said why: **`drive-delete=`**,
+`drive-sweep-mode=`, `upload-workers=` and `hydrate-workers=`. All four work now.
+The first is the one that mattered — a mount that comes up at boot is exactly the
+one nobody is watching, and `config=` is a poor answer for a line that is
+otherwise complete.
+
+```
+mydrive /home/you/drive fuse.drivel data=/home/you/.cache/drivel,run-as=you,drive-delete=permanent 0 0
+```
+
+A test now checks that every mount-describing flag has an option, so this
+particular gap cannot come back. `-pprof` is deliberately still absent: it opens a
+debug endpoint for the process, which an unattended boot mount should not be
+doing.
+
+**The shell completions are generated from Drivel's own flag definitions**
+(`make completions`) rather than maintained by hand beside them. The hand-written
+files had drifted — they were missing `-upload-workers`, `-hydrate-workers` and
+`-pprof-allow-remote` — and the generator now fails the build if a flag has no
+completion entry, or if an entry names a flag that no longer exists. Values that
+come from a fixed set are taken from the program's own constants, so
+`-drive-delete <TAB>` cannot offer a word the binary would refuse.
+
+`sudo make install` now installs them too, to
+`$PREFIX/share/bash-completion/completions/drivel` and
+`$PREFIX/share/zsh/site-functions/_drivel`.
+
+### Deleting a file now sends it to the Drive trash — 2026-09-09
+
+When Drivel removes a file from Google Drive it now **moves it to the trash**
+instead of deleting it outright. A deletion is recoverable from
+[drive.google.com](https://drive.google.com/drive/trash) for 30 days, after which
+Drive purges it.
+
+This matters most for the deletions you did not personally ask for. An
+enumeration sweep can *infer* one — you deleted a file on another machine while
+this one was offline, and the sweep works that out from a baseline — and if the
+premise is wrong (a mount pointed at the wrong folder, a backing directory that
+was emptied) the inference is wrong with it. Every other guard in Drivel fails
+towards keeping your bytes; this was the one operation that did not.
+
+Nothing above the change is different: the path stops existing, the removal
+reaches your other machines the same way, and deleting a folder still takes its
+contents with it. Two things do change. Trashed files **still count against your
+Drive quota** until you empty the trash, and a file you delete and immediately
+recreate leaves the old copy in the trash.
+
+If you would rather have the old behaviour — a mount that reclaims space as you
+delete — ask for it:
+
+```sh
+drivel mount ... -drive-delete permanent
+```
+
+```toml
+[account.work.provider]  # or [mount.provider]
+delete = "permanent"
+```
+
+`-max-deletes` is unchanged and still on by default: a sweep that wants to delete
+more than 100 files still refuses the whole pass. Filling your trash with a
+thousand files you did not mean to delete is better than deleting them, but it is
+still not what you wanted.
+
+### Mount from /etc/fstab, and at boot — 2026-09-09
+
+On Linux, Drivel is now a `mount(8)` helper as well as a command. Install it as
+`/sbin/mount.fuse.drivel` (`sudo make install` puts it there) and a mount can be an
+ordinary fstab line, brought up by `mount /your/mountpoint`, by `mount -a`, or by systemd at
+boot with no terminal attached:
+
+```
+mydrive  /home/you/drive  fuse.drivel  data=/home/you/.cache/drivel,run-as=you,lazy  0 0
+```
+
+Three things are worth knowing. The type is **`fuse.drivel`**, not `drivel` —
+that is what the kernel reports for the mount, and systemd compares the two, so an
+fstab line saying `drivel` describes a mount that never appears under that name
+(`mount.drivel` is installed as an alias anyway). **`run-as=NAME`** drops root to
+the account that owns the token and the backing directory, which is what makes a
+boot-time mount work at all; it is spelled `run-as` and not `user` because `user`
+already means something else in fstab. And the helper's output goes to `logfile=`
+or nowhere — never to whoever ran `mount`, because an inherited pipe would hang
+until the filesystem was unmounted.
+
+Full guide: [docs/user/fstab.md](docs/user/fstab.md). Unknown options fail the
+mount rather than being ignored, unless `mount(8)` passes `-s`.
+
 ### Hard links are refused, and the files Drivel skips now say so — 2026-09-08
 
 Mounts are now always `nodev` and `nosuid`, with no option to turn them off. A

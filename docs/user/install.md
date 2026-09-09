@@ -73,7 +73,10 @@ Windows is not supported — see [Platform support](platforms.md#windows).
 
 ## Shell completions
 
-They live in [`completions/`](../../completions):
+`sudo make install` places them, so if you installed that way there is nothing to
+do — start a new shell and `drivel mount -<TAB>` works.
+
+To install them by hand, they live in [`completions/`](../../completions):
 
 ```sh
 # bash — system-wide, or source it from ~/.bashrc
@@ -83,6 +86,11 @@ sudo cp completions/drivel.bash /usr/share/bash-completion/completions/drivel
 cp completions/_drivel ~/.zsh/completions/_drivel
 autoload -Uz compinit && compinit
 ```
+
+Both files are **generated from Drivel's own flag definitions** (`make
+completions`), so they know every flag the binary does, including which ones take
+a directory and which take one of a fixed set of words — `-drive-delete <TAB>`
+offers `trash` and `permanent`.
 
 ## Man page
 

@@ -30,20 +30,30 @@ func (backend) Serve(ctx context.Context, opts mount.Options) error {
 			Debug:  opts.Debug,
 			FsName: opts.FsName,
 			Name:   "drivel",
-			// nodev and nosuid are compulsory: there is no flag to turn them off,
-			// and the per-platform list is the only thing that varies. See
-			// mountopts_*.go for what each platform can express and why.
-			Options: compulsoryOptions(),
 			// Xattrs are off unless the mount asked for them (mount.Options.Xattr).
 			// go-fuse answers ENOSYS to the first getxattr, after which the kernel
 			// stops issuing xattr operations for this mount at all — so the cost of
 			// the default is one syscall, not one per file. See the field comment
 			// for why the passthrough is the dangerous direction.
 			DisableXAttrs: !opts.Xattr,
+			AllowOther:    opts.AllowOther,
+			// Caller options, then the compulsory ones — the order is the
+			// guarantee, not a detail. go-fuse turns nodev/nosuid/noexec into
+			// mount(2) flags and passes the rest to the mount helper, which rejects
+			// what it does not know, so an unsupported option fails the mount rather
+			// than quietly weakening it.
+			Options: withCompulsory(opts.BackendOptions),
 		},
 	})
 	if err != nil {
 		return fmt.Errorf("mount %s: %w", opts.Mountpoint, err)
+	}
+
+	// The filesystem is live from here: fs.Mount returns after the mount syscall
+	// has completed, so anything waiting to hear "mounted" can be told now. Before
+	// Wait, which does not return until unmount.
+	if opts.Ready != nil {
+		opts.Ready()
 	}
 
 	go func() {

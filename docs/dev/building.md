@@ -93,6 +93,35 @@ stripping is the lever that matters:
 | `CGO_ENABLED=0` | 28.5 MB |
 | `CGO_ENABLED=0 -trimpath -ldflags="-s -w"` | 19.6 MB |
 
+## Shell completions are generated
+
+`completions/drivel.bash` and `completions/_drivel` are **not written by hand**.
+They are rendered from the same `flag.FlagSet`s the program parses:
+
+```sh
+make completions        # rewrite them after adding or renaming a flag
+make completions-check  # what `make check` runs: fails if they have drifted
+```
+
+The renderers are in `internal/completion`; the flag→completion table is
+`completionHints` in [cmd/drivel/completions.go](../../cmd/drivel/completions.go),
+which is compiled **only under the `completions` build tag** — a released binary
+has no reason to carry a shell-script renderer, and that file is the only thing
+that imports `internal/completion`.
+
+Adding a flag therefore means adding one line to `completionHints` naming what
+its value looks like (a file, a directory, one of a fixed set of words, or
+opaque). Forgetting is not possible in the quiet way it used to be: the generator
+fails on a flag with no hint *and* on a hint for a flag that no longer exists, and
+`make check` runs it. Enum values come from the program's own constants
+(`gdrive.SweepAuto`, `gdrive.DeleteTrash`, …), so a mode that is renamed cannot
+leave the completions offering a word the binary refuses.
+
+The generated files are committed because whoever installs from a tarball or a
+distro package has no Go toolchain to run the generator with; `make install`
+places them under `$PREFIX/share/bash-completion/completions` and
+`$PREFIX/share/zsh/site-functions`.
+
 ## Upgrading the Go toolchain
 
 Three things move together, and the Makefile enforces the first:
