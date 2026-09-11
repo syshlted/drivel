@@ -1,8 +1,8 @@
 .\" Manpage for drivel.
 .\" Render with:  man ./docs/drivel.1     or     mandoc -a docs/drivel.1
-.TH DRIVEL 1 "2026-09-06" "drivel" "User Commands"
+.TH DRIVEL 1 "2026-09-09" "drivel" "User Commands"
 .SH NAME
-drivel \- Drive-backed FUSE interceptor filesystem
+drivel \- cloud-backed FUSE interceptor filesystem
 .SH SYNOPSIS
 .B drivel
 .RI [ command ]
@@ -80,25 +80,30 @@ mounts a local directory as a loopback FUSE filesystem that acts as an
 .IR interceptor :
 every operation is proxied to an underlying backing directory (the source of
 truth / local cache) and, asynchronously and bidirectionally, synced with a
-cloud-storage provider. The first and currently only provider is
-.BR "Google Drive" ,
-driven by the Drive API v3
+storage provider. Two providers ship:
+.B "Google Drive"
+\(em driven by the Drive API v3
 .I changes.list
-cursor feed \(em not webhooks and not the Workspace Events API.
+cursor feed, not webhooks and not the Workspace Events API \(em and
+.BR SFTP ,
+over an ordinary SSH account, with no software required on the server.
 .PP
 Filesystem operations never block on the network: reads, lookups, and attribute
 calls pass straight through to the backing directory, while each mutation is
 emitted as a change event and handled off the FUSE path by the sync engine.
 Inbound changes from the provider are pulled into the backing directory by a
 cursor-driven poll loop, with echo/loop suppression so a change that originated
-locally is not re-applied when it echoes back from the cloud.
+locally is not re-applied when it echoes back from the remote. A provider with no
+change feed of its own \(em SFTP has none \(em is polled instead by the
+enumeration sweep, which makes
+.I -sweep-interval
+that mount's inbound latency rather than a long-period safety net.
 .PP
 .B drivel
-is a client you run yourself. It ships no application identity and collects no
-analytics or telemetry; you supply your own Google Cloud OAuth credentials, so
-all Drive traffic is directly between your machine and Google under an app
-identity you control. All Drive traffic uses HTTP/3 (QUIC) with an automatic
-fallback to HTTP/2.
+is a client you run yourself. It ships no credentials of its own; you supply the
+ones for the backend you point it at, so it runs under an identity you control.
+Each provider uses its own transport: Drive traffic is HTTP/3 (QUIC) with an
+automatic fallback to HTTP/2, and SFTP is the file transfer subsystem of SSH.
 .SH COMMANDS
 .TP
 .B mount-helper
@@ -292,11 +297,10 @@ reported.
 .IP
 Nothing inside
 .B drivel
-needs the passthrough (em the hydrator reads and writes its marker on the backing
-file directly, below the mount (em so enabling it is for applications on the
+needs the passthrough \(em the hydrator reads and writes its marker on the backing
+file directly, below the mount \(em so enabling it is for applications on the
 mountpoint that want extended attributes of their own. Extended attributes are
-not synced to the provider in any case; see the design note on POSIX metadata in
-DESIGN.md.
+not synced to the provider in any case, whatever this is set to.
 .TP
 .B -resync
 Enumerate the whole remote tree and reconcile it against the backing directory at
@@ -334,9 +338,14 @@ from a file merely being absent on one side), so a large count almost always mea
 the premise is wrong rather than that there are that many real deletions \(em a
 state database reused against a different
 .BR -drive-root ,
-a fresh empty backing directory, a mount pointing somewhere new. Note that removing
-a remote object uses the provider's delete, which on Drive is permanent rather than
-a move to the trash.
+a fresh empty backing directory, a mount pointing somewhere new. A deletion the cap
+does not catch is still recoverable: under the default
+.B -drive-delete trash
+the remote object is moved to the Drive trash rather than destroyed, and Drive keeps
+it for 30 days. That is the guard behind this one rather than a reason to relax it,
+and
+.B -drive-delete permanent
+removes it.
 .IP
 A refused pass still counts as a completed sweep, so raising the cap and restarting
 does not retry it. If the deletions are genuine, re-run with
@@ -558,14 +567,24 @@ as
 .I name
 wrote them.
 .TP
-.BR data= ", " credentials= ", " token= ", " state= ", " index= ", " drive-root= ", " name=
+.BR data= ", " credentials= ", " token= ", " state= ", " index= ", " name=
 As the corresponding
 .B mount
 flags. Paths must be absolute, or begin with
 .RB \(dq ~/ \(dq
 for the mounting account's home.
 .TP
-.BR lazy ", " xattr ", " resync ", " materialize ", " "max-deletes=" ", " "sweep-interval="
+.BR drive-root= ", " drive-delete= ", " drive-sweep-mode=
+As the corresponding
+.B mount
+flags. Note
+.BR drive-delete= ,
+which decides whether a removal is recoverable: a boot mount is the one nobody is
+watching, and
+.B drive-delete=permanent
+is how such a mount reclaims space rather than filling the trash.
+.TP
+.BR lazy ", " xattr ", " resync ", " materialize ", " "max-deletes=" ", " "sweep-interval=" ", " "upload-workers=" ", " "hydrate-workers="
 As the corresponding
 .B mount
 flags.
@@ -600,10 +619,10 @@ Give up if the filesystem is not live within
 killing the child. Off by default: systemd already bounds a mount unit's
 startup.
 .TP
-.BR debug ", " fsname= ", " allow_other ", " allow_root ", " default_permissions ", " nosuid ", " nodev ", " noexec ", " noatime
+.BR debug ", " fsname= ", " allow_other ", " allow_root ", " default_permissions ", " nosuid ", " nodev ", " noexec ", " noatime ", " sync ", " dirsync ", " auto_unmount
 Tracing, the source name, and mount options passed to the backend verbatim.
 .PP
-.BR defaults ", " auto ", " noauto ", " _netdev ", " nofail ", " user ", " users ", " owner ", " group ", " rw ,
+.BR defaults ", " auto ", " noauto ", " _netdev ", " nofail ", " user ", " users ", " nouser ", " owner ", " group ", " rw ,
 the
 .B atime
 family,
@@ -681,9 +700,11 @@ Mount keys mirror the flags:
 .IR debug ,
 .IR resync ,
 .IR materialize ,
-.I max-deletes
+.IR max-deletes ,
+.IR sweep-interval ,
+.I upload-workers
 and
-.IR sweep-interval .
+.IR hydrate-workers .
 An unrecognised key is an error rather than a silent no-op. Relative paths resolve
 against the config file's own directory, so a config directory can be moved or
 kept in a dotfiles repository. Within a
@@ -695,6 +716,69 @@ beginning
 or
 .RI \(dq ../ \(dq
 \(em since a folder ID is a string too.
+.SS Provider accounts
+An account's remaining keys belong to its provider and are never interpreted by
+the config layer.
+.B gdrive
+takes
+.IR credentials ,
+.IR token ,
+.IR root ,
+.IR index ,
+.IR sweep-mode ,
+.I delete
+and
+.IR scope ,
+described under MOUNT OPTIONS above.
+.PP
+.B sftp
+takes
+.I host
+and optionally
+.IR port " (22),"
+.I user
+(required),
+.I key
+and
+.I certificate
+for public-key authentication,
+.IR agent " (true \(em uses"
+.BR $SSH_AUTH_SOCK ),
+.IR known-hosts " (" ~/.ssh/known_hosts ),
+.I root
+(the remote directory the mount maps to; empty means the login directory),
+.IR connect-timeout " (30s)"
+and
+.IR concurrent-requests .
+There is no password or passphrase option and there will not be one; load an
+encrypted key into an agent instead.
+.PP
+.RS
+.EX
+[account.server]
+provider = "sftp"
+host     = "files.example.com"
+user     = "you"
+key      = "~/.ssh/id_ed25519"
+root     = "/srv/share"
+
+[[mount]]
+account        = "server"
+path           = "~/share"
+data           = "~/.cache/drivel/server"
+sweep\-interval = "5m"
+.EE
+.RE
+.PP
+Two things differ from Drive and matter. The server's host key must already be in
+.I known_hosts
+\(em drivel never trusts a key on first use and offers no option to, because an
+.BR fstab (5)
+mount at boot has nobody to answer a prompt. And SFTP has no change feed, so
+.I -sweep-interval
+is the poll interval for inbound changes and its 24h default is wrong; see
+.I docs/user/sftp.md
+for both.
 .PP
 Mounts are validated against each other before any of them is opened, because
 several mounts can damage each other in ways one cannot. Two mounts may not share
@@ -790,7 +874,8 @@ compiles for
 is not supported and is not planned; use WSL2, or Google's native Drive client.
 Other Unixes (OpenBSD, NetBSD, Solaris, illumos, AIX) lack a Go FUSE binding.
 .PP
-Two limitations apply off Linux.
+Four things differ off Linux; the third holds on every platform, and is here
+because it is where it bites.
 .TP
 .B In-place mode is unavailable
 It routes backing I/O through
@@ -985,6 +1070,8 @@ to get started,
 for every flag and config key,
 .I google-cloud-setup.md
 for Google credentials,
+.I sftp.md
+for syncing to an SSH server,
 .I fstab.md
 for mounting from
 .IR /etc/fstab ,

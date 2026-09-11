@@ -16,6 +16,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"time"
 
 	bolt "go.etcd.io/bbolt"
@@ -42,6 +43,34 @@ type Echo struct {
 	Hash    string    `json:"hash,omitempty"`
 	Version string    `json:"version,omitempty"`
 	At      time.Time `json:"at"`
+
+	// LocalSize and LocalMTime fingerprint the *backing* file as it stood when
+	// this baseline was recorded. They exist for providers that expose no content
+	// checksum, where Hash is empty and there is otherwise nothing to answer M7b's
+	// "did the local copy diverge from what we last agreed with the remote?" —
+	// the question that decides whether a remote deletion is applied locally or
+	// the local file is kept and pushed back.
+	//
+	// Without them a hashless provider answers "diverged" to every file forever,
+	// so a deletion made on the remote is undone on the next sweep, permanently.
+	//
+	// A zero LocalMTime means "not recorded" — an echo written before this field
+	// existed, or a directory, which has no content to fingerprint. Callers must
+	// treat that as *no* fingerprint rather than as a match: the wrong answer in
+	// that direction deletes a file somebody edited. LocalSize is not usable as
+	// the presence test because an empty file legitimately has size 0.
+	LocalSize  int64     `json:"local-size,omitempty"`
+	LocalMTime time.Time `json:"local-mtime,omitempty"`
+}
+
+// FingerprintOf returns the local half of an Echo for the backing file described
+// by fi. Directories and a nil fi yield the zero value, which reads as "not
+// recorded".
+func FingerprintOf(fi os.FileInfo) (size int64, mtime time.Time) {
+	if fi == nil || fi.IsDir() {
+		return 0, time.Time{}
+	}
+	return fi.Size(), fi.ModTime()
 }
 
 // Matches reports whether an incoming (hash, version) pair is the content this

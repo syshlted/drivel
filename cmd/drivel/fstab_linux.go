@@ -24,8 +24,6 @@ import (
 	"time"
 
 	"github.com/zishmusic/drivel/internal/app"
-	"github.com/zishmusic/drivel/internal/provider"
-	"github.com/zishmusic/drivel/internal/provider/gdrive"
 )
 
 const (
@@ -154,8 +152,8 @@ func serveHelperMount(h *helperArgs, c *helperOptions, ready func()) error {
 		}
 	}
 
-	reg := provider.NewRegistry()
-	if err := reg.Register(driveKind, gdrive.Factory); err != nil {
+	reg, err := newRegistry()
+	if err != nil {
 		return err
 	}
 

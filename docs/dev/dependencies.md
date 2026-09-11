@@ -108,6 +108,35 @@ buffer as a `uintptr`, which neither keeps the array alive nor survives a stack
 copy. The `//go:uintptrescapes` wrappers are what make it correct, and
 `runtime.KeepAlive` does not substitute.
 
+### `github.com/pkg/sftp` and `golang.org/x/crypto` — the SFTP backend
+
+The SSH transport and the file-transfer subsystem on top of it (M18). Both are
+pure Go, so §2.9's cross-compile proof survives — an SFTP mount builds for every
+target `internal/vfs` does, and for the several it does not.
+
+`pkg/sftp` is used for three things nothing else in the tree needs. `File.WriteAt`
+takes an offset, which is what makes `provider.RangePutter` real on this backend
+and gives M6's range-write path its first run against a server instead of a fake.
+`Client.HasExtension` reports what a *session* advertises, which is how
+`posix-rename@openssh.com` is taken when offered and fallen back on when not.
+And `NewServer` — the library's server half — is what the tests run against, so
+they exercise the real protocol rather than this package's beliefs about it.
+
+`x/crypto/ssh/knownhosts` is load-bearing rather than incidental: host key
+verification fails closed, and `ssh.InsecureIgnoreHostKey` appears nowhere in the
+tree, with a test that greps for it. An fstab mount at boot has nobody to answer a
+trust-on-first-use prompt.
+
+One thing the library does not offer, and the absence is visible in the provider:
+there is no API for sending an arbitrary extended request, so the `check-file`
+digest extension is unreachable. `sftp` therefore does not implement
+`provider.ContentHasher`, which costs nothing — the engine's unchanged-content
+gate short-circuits on an empty `Hash` before it reads a local byte.
+
+`github.com/kr/fs` arrives with it, as the walker behind `Client.Walk`. Drivel's
+enumeration does its own breadth-first descent (it needs a resumable cursor), so
+nothing in the tree calls it.
+
 ### `github.com/BurntSushi/toml` — the config file
 
 TOML was chosen over YAML and JSON because the config is **hand-edited and
@@ -133,7 +162,7 @@ the reason TOML was chosen.
 | **A test framework** | Standard `testing` only. No assertion DSL. |
 | **A metrics library** | Counters are plain fields. If a control API lands (M14), it serves a snapshot, not a Prometheus registry. |
 | **cgo, anywhere** | It would end the cross-compile matrix and the pure-Go build. This is the constraint that rules out libfuse, WinFsp/cgofuse, and every cgo SQLite. Distro packaging may enable it for the system libc alone; nothing in the tree may *require* it. |
-| **A cloud SDK beyond Drive's** | A second provider brings its own client, inside its own package, below the seam. |
+| **A cloud SDK beyond the ones in use** | A new provider brings its own client, inside its own package, below the seam — as `gdrive` and `sftp` each do. |
 
 ## Upgrading
 

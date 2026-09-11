@@ -102,7 +102,7 @@ would leave a mount nothing can address.
 | `drive-sweep-mode=MODE` | `-drive-sweep-mode` | `auto` (default), `scoped` or `flat`. |
 | `name=NAME` | — | Overrides the device field. |
 | `lazy` | `-lazy` | Needs `account=` or `credentials=`. |
-| `xattr` | `-xattr` | Off by default, and [that default is a safety property](../DESIGN.md#21-fuse-layer). |
+| `xattr` | `-xattr` | Off by default, and [that default is a safety property](lazy-mode.md#why--xattr-is-off-by-default). |
 | `resync`, `materialize` | same | |
 | `max-deletes=N` | `-max-deletes` | |
 | `sweep-interval=D` | `-sweep-interval` | A Go duration: `24h`, `90m`. |
@@ -126,11 +126,11 @@ Process and mount options work in **both** modes:
 | `debug` | FUSE tracing. |
 | `fsname=NAME` | Override the source column. Defaults to the device field. |
 | `allow_other` | Let other users reach the mount. Unless the daemon is root — so, with `run-as=` — `fusermount3` refuses this without `user_allow_other` in `/etc/fuse.conf`. |
-| `allow_root`, `default_permissions`, `nosuid`, `nodev`, `noexec`, `noatime`, `sync`, `dirsync` | Passed to the mount backend verbatim. |
+| `allow_root`, `default_permissions`, `nosuid`, `nodev`, `noexec`, `noatime`, `sync`, `dirsync`, `auto_unmount` | Passed to the mount backend verbatim. |
 
-`defaults`, `auto`, `noauto`, `_netdev`, `nofail`, `user`, `users`, `owner`,
-`group`, `rw`, the `atime` family, `comment=` and every `x-*` option are handled
-by `mount(8)` or systemd and are accepted and ignored here.
+`defaults`, `auto`, `noauto`, `_netdev`, `nofail`, `user`, `users`, `nouser`,
+`owner`, `group`, `rw`, the `atime` family, `comment=` and every `x-*` option are
+handled by `mount(8)` or systemd and are accepted and ignored here.
 
 **`ro` is refused**, along with `remount`, `bind` and `move`. Drivel has no
 read-only mode, and a line that says `ro` over a writable mount would be a lie.

@@ -430,7 +430,10 @@ func (e *Engine) push(ctx context.Context, ev fsevent.Event) error {
 			return err
 		}
 		e.forgetPath(ev.Path)
-		e.recordEcho(rf)
+		// The bytes did not move; the name did. Fingerprint the file at its new
+		// local path so the baseline still describes something that exists.
+		fi, _ := os.Stat(filepath.Join(e.dataDir, filepath.FromSlash(ev.NewPath)))
+		e.recordEchoOf(rf, fi)
 		e.logf("[sync] rename   %s -> %s", ev.Path, ev.NewPath)
 		return nil
 
@@ -498,7 +501,7 @@ func (e *Engine) pushContent(ctx context.Context, p string, dirty *ranges.Set) e
 	if err != nil {
 		return err
 	}
-	e.recordEcho(rf)
+	e.recordEchoOf(rf, statOf(f))
 	// Only here, never on the routes above: a range write and both skips log their
 	// own lines, and counting this one as well would report an upload that did not
 	// happen — which is exactly what MC-21 (a touch must cost nothing) asserts.
@@ -546,7 +549,7 @@ func (e *Engine) pushShortcut(ctx context.Context, p string, f *os.File, size in
 				p, len(extents), dirty.Bytes(), size, err)
 		} else {
 			e.logf("[sync] range write %s: %d extent(s), %d of %d B", p, len(extents), dirty.Bytes(), size)
-			e.recordEcho(rf)
+			e.recordEchoOf(rf, statOf(f))
 			return true, nil
 		}
 	}
@@ -634,13 +637,40 @@ func (e *Engine) contentMatches(f *os.File, remote provider.RemoteFile) (bool, e
 	return local != "" && local == remote.Hash, nil
 }
 
+// statOf reports f's current metadata, or nil if it cannot be read. A failed stat
+// costs a fingerprint, never correctness: no fingerprint reads as "not recorded".
+func statOf(f *os.File) os.FileInfo {
+	fi, err := f.Stat()
+	if err != nil {
+		return nil
+	}
+	return fi
+}
+
 // recordEcho notes the content we just pushed at rf.Path so the change-feed
 // report of this same write is recognised as our echo and dropped (DESIGN.md §4).
 func (e *Engine) recordEcho(rf provider.RemoteFile) {
+	e.recordEchoOf(rf, nil)
+}
+
+// recordEchoOf is recordEcho with the local file we just pushed, whose size and
+// mtime become the baseline's local fingerprint (see state.Echo).
+//
+// fi may be nil — for a Mkdir, which has no content, and for any caller that does
+// not have the file open. That records no fingerprint, which is the safe reading:
+// M7b then declines to conclude that the local copy is unmodified, and keeps it.
+//
+// It is deliberately taken *after* the push rather than before. A write that
+// landed while the upload was in flight has already queued another event, so the
+// next push re-records this baseline against the newer bytes; recording the
+// pre-push state instead would leave a fingerprint that matches nothing on disk.
+func (e *Engine) recordEchoOf(rf provider.RemoteFile, fi os.FileInfo) {
 	if e.state == nil {
 		return
 	}
-	if err := e.state.SetEcho(rf.Path, state.Echo{Hash: rf.Hash, Version: rf.Version, At: time.Now()}); err != nil {
+	size, mtime := state.FingerprintOf(fi)
+	echo := state.Echo{Hash: rf.Hash, Version: rf.Version, At: time.Now(), LocalSize: size, LocalMTime: mtime}
+	if err := e.state.SetEcho(rf.Path, echo); err != nil {
 		e.logf("[sync] record echo %s: %v", rf.Path, err)
 	}
 }

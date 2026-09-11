@@ -174,5 +174,3 @@ which lives on the file itself and has no database fallback by design.
 - Publish a conflict copy.
 - Create a hard link, or let one become two diverging remote files.
 - Re-serialize your config file, discarding comments.
-- Send anything anywhere except Google, under credentials you created. There is no
-  telemetry and no hosted service.

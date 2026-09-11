@@ -16,6 +16,7 @@ import (
 	"github.com/zishmusic/drivel/internal/hydrate"
 	"github.com/zishmusic/drivel/internal/provider"
 	"github.com/zishmusic/drivel/internal/provider/gdrive"
+	"github.com/zishmusic/drivel/internal/provider/sftp"
 	"github.com/zishmusic/drivel/internal/syncengine"
 )
 
@@ -23,6 +24,26 @@ import (
 // are Drive-shaped by history (-drive-root, -credentials), so the flag path
 // always selects this one; a config file may name any registered kind.
 const driveKind = "gdrive"
+
+// newRegistry builds the provider registry every entry point mounts through.
+//
+// It exists so the set of backends is written once. Both the flag/config path and
+// the M16 mount helper need it, and a backend registered in one of them but not
+// the other would be a config file that works from the command line and fails at
+// boot — the same drift the fstab option table already suffered once, with four
+// flags missing from it.
+func newRegistry() (*provider.Registry, error) {
+	reg := provider.NewRegistry()
+	for kind, f := range map[string]provider.Factory{
+		driveKind: gdrive.Factory,
+		sftp.Kind: sftp.Factory,
+	} {
+		if err := reg.Register(kind, f); err != nil {
+			return nil, err
+		}
+	}
+	return reg, nil
+}
 
 // mountShapingFlags describe *what* to mount, which is exactly what a config file
 // is for. Mixing the two would need a precedence rule that nobody would remember,
@@ -96,8 +117,8 @@ func runMount(args []string) error {
 		return err
 	}
 
-	reg := provider.NewRegistry()
-	if err := reg.Register(driveKind, gdrive.Factory); err != nil {
+	reg, err := newRegistry()
+	if err != nil {
 		return err
 	}
 

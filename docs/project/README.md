@@ -8,3 +8,5 @@ Neither user nor developer documentation — repo administration.
 - [marketing.md](marketing.md) — reusable website and social copy. A source for
   copy, not a description of the product; the README and `docs/user/` are
   authoritative when they disagree.
+- [mascot.md](mascot.md) — the thirty-headed striped hyena: back-story, what the
+  heads and the drool stand for, and the brief for anyone drawing it.

@@ -26,8 +26,9 @@ flowchart LR
         index[("Path index (M7)<br/>internal/pathindex (bbolt)<br/>path ↔ fileID — a cache")]
     end
 
-    subgraph cloud["Provider (Google Drive)"]
+    subgraph cloud["Provider (one per mount)"]
         drive["internal/provider/gdrive<br/>Store + ChangeSource"]
+        sftp["internal/provider/sftp<br/>Store + Enumerator<br/>no change feed"]
     end
 
     drive -.->|"resolve path → ID<br/>(verified before it is trusted)"| index
@@ -41,6 +42,8 @@ flowchart LR
     engine -.->|"is this a placeholder?<br/>(skip if yes)"| hydrate
 
     downloader -->|"changes.list cursor poll<br/>+ files.list sweep (M7b)"| drive
+    downloader -->|"sweep only — no feed to poll<br/>(-sweep-interval is the poll interval)"| sftp
+    engine -->|"Put / PutRange / Move / Remove"| sftp
     downloader -->|"apply remote edits"| backing
     downloader <-->|"cursor + echo check (§4)"| state
     downloader -.->|"write placeholder<br/>instead of content"| hydrate
@@ -119,6 +122,7 @@ flowchart TD
     hydrate["internal/hydrate<br/>placeholders · fault-in"]
     rangespkg["internal/ranges<br/>extent bitmap (present + dirty)"]
     gdrive["internal/provider/gdrive<br/>Drive impl"]
+    sftppkg["internal/provider/sftp<br/>SFTP impl"]
     pathindex["internal/pathindex<br/>bbolt path↔ID cache"]
     gauth["internal/gauth<br/>OAuth login + token I/O"]
     transport["internal/transport<br/>HTTP/3 → HTTP/2"]
@@ -127,6 +131,7 @@ flowchart TD
     main --> config
     main --> provider
     main --> gdrive
+    main --> sftppkg
     main --> syncengine
     main --> gauth
 
@@ -161,6 +166,9 @@ flowchart TD
     gdrive -.implements.-> provider
     gdrive --> transport
     gdrive --> gauth
+
+    sftppkg -.implements.-> provider
+    sftppkg --> rangespkg
 
     vfs -.implements.-> mount
 

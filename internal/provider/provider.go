@@ -96,6 +96,15 @@ type Store interface {
 	// be versioned, a content-addressed store has a GC policy). A provider with a
 	// recoverable form should prefer it — reconcile *infers* some of these
 	// deletions from a baseline, and there is no fallback above this call.
+	//
+	// "Prefer the recoverable form" means take the one the backend already has,
+	// never manufacture one. A provider whose store offers nothing of the kind
+	// deletes outright and says so in its documentation; -max-deletes is then the
+	// only guard, which is a fact to disclose rather than a gap to paper over. An
+	// emulated trash inside the synced tree is actively wrong — the sweep would
+	// enumerate it and pull every deleted file back — and one outside it is a
+	// second store to garbage-collect, with its own failure modes, bought for a
+	// backend that did not ask for it.
 	Remove(ctx context.Context, path string) error
 	// Get opens the object at path for reading.
 	Get(ctx context.Context, path string) (io.ReadCloser, error)
@@ -106,8 +115,15 @@ type Store interface {
 // ChangeSource is an OPTIONAL capability: an incremental inbound change feed used
 // by the pull loop (M3). Providers with a native cursor feed (Drive's
 // changes.list, Dropbox's list_folder/continue) implement it; providers without
-// one (S3, WebDAV) omit it and run outbound-only. The engine enables inbound sync
-// only for stores that also satisfy this interface.
+// one (SFTP, WebDAV, S3) omit it.
+//
+// Omitting it does not mean outbound-only. A store that implements Enumerator
+// still syncs inbound, through the M7b sweep alone — which is then the entire
+// inbound path rather than a safety net beneath a feed, so -sweep-interval
+// becomes that mount's poll interval and its latency. Only a store with neither
+// capability is outbound-only. Do not synthesize a feed by polling and diffing:
+// the sweep already is that, with the baseline and delete guards that make an
+// inferred deletion safe.
 type ChangeSource interface {
 	// StartCursor returns an opaque token marking "now" in the change feed.
 	StartCursor(ctx context.Context) (string, error)

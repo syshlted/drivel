@@ -71,6 +71,28 @@ GOOS=darwin GOARCH=arm64 go build ./cmd/drivel
 
 Windows is not supported — see [Platform support](platforms.md#windows).
 
+## Installing system-wide
+
+From a checkout, one target places everything:
+
+```sh
+sudo make install         # PREFIX=/usr/local  MANDIR=$PREFIX/share/man  SBINDIR=/sbin
+```
+
+| What | Where |
+| --- | --- |
+| The binary | `$PREFIX/bin/drivel` |
+| The man page | `$MANDIR/man1/drivel.1` |
+| The `mount(8)` helper | `$SBINDIR/mount.fuse.drivel` and `$SBINDIR/mount.drivel`, both symlinks to the binary |
+| Shell completions | `$PREFIX/share/bash-completion/completions/drivel`, `$PREFIX/share/zsh/site-functions/_drivel` |
+
+`SBINDIR` defaults to `/sbin` rather than to something under `PREFIX` because
+`mount(8)` searches `/sbin` and `/usr/sbin` only. Those two symlinks are what let
+a mount be an `/etc/fstab` line — see [mounting from /etc/fstab](fstab.md). They
+are placed on every platform but only work on Linux.
+
+`sudo make uninstall` removes exactly what this placed, and nothing else.
+
 ## Shell completions
 
 `sudo make install` places them, so if you installed that way there is nothing to
@@ -122,9 +144,17 @@ Without `-account`, the flag defaults put `credentials.json`, `token.json`,
 
 ```sh
 fusermount3 -u ~/drive                    # unmount first (or just Ctrl-C the process)
-rm "$(command -v drivel)"
+
+sudo make uninstall                       # if you installed with `sudo make install`
+rm "$(command -v drivel)"                 # if you installed with `go install`
+
 rm -rf ~/.config/drivel ~/.local/state/drivel
 ```
+
+`make uninstall` takes the man page, the `mount(8)` helper symlinks and the shell
+completions with it; `rm "$(command -v drivel)"` removes only the binary, so run
+it on its own only if `go install` is how it got there. Remove any `/etc/fstab`
+lines of type `fuse.drivel` or `drivel` as well.
 
 Revoke the OAuth client from the [Google Cloud
 Console](https://console.cloud.google.com/apis/credentials) if you are done with

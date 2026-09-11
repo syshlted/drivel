@@ -9,6 +9,70 @@ from source.
 
 ## Unreleased
 
+### Drivel now syncs to SFTP servers — 2026-09-10
+
+**Any machine you have an SSH account on can be a Drivel backend.** There is
+nothing to install at the other end — SFTP is a subsystem of OpenSSH — and no
+credentials to create: it is your existing SSH key.
+
+```toml
+[account.server]
+provider = "sftp"
+host     = "files.example.com"
+user     = "you"
+key      = "~/.ssh/id_ed25519"
+root     = "/srv/share"
+
+[[mount]]
+account        = "server"
+path           = "~/share"
+data           = "~/.cache/drivel/server"
+sweep-interval = "5m"
+```
+
+What this gives you over `sshfs` is the thing Drivel is for: a write lands in the
+local backing directory and returns immediately, with the upload happening behind
+it and retrying if the link is down. With `lazy = true` a large remote tree is
+browsable at full size while holding almost none of it, and two machines editing
+one file produce a conflict copy instead of a silent loss.
+
+**Editing part of a large file now uploads only that part.** SFTP writes at an
+offset, so changing one block of a 4 GB file transfers one block. Google Drive
+cannot do this at all — it replaces the whole object — so this is the first
+backend where that saving is real.
+
+Three things behave differently from Drive, and all three are documented on the
+[SFTP page](docs/user/sftp.md):
+
+- **`sweep-interval` is the poll interval.** SFTP has no change notification of
+  any kind, so remote changes are found by walking the tree on a schedule. The
+  24-hour default is tuned for a backend that also has a live feed and is wrong
+  here — set it to the inbound delay you can live with, e.g. `"5m"`.
+- **A deletion has no undo.** There is no trash on an SFTP server and Drivel does
+  not invent one, so `-max-deletes` is not the guard in front of a safety net —
+  it is the only guard.
+- **The server's host key must already be in `known_hosts`.** Drivel never trusts
+  a key on first use and there is no option to make it: a mount brought up from
+  `/etc/fstab` at boot has nobody to answer a prompt. `ssh-keyscan -H host >>
+  ~/.ssh/known_hosts`, after checking the fingerprint.
+
+There is no password or passphrase option, and there will not be one. Use an
+agent for an encrypted key.
+
+**Inbound sync no longer requires a provider with a change feed.** Backends
+without one previously mounted upload-only, silently; they are now polled by the
+enumeration sweep, which already carries the guards that make an inferred
+deletion safe.
+
+**Deletions made on a backend with no content checksum now reach you.** Drivel
+decides whether to apply a remote deletion by asking whether your local copy is
+still the one it last synced, and it could only answer that from a checksum the
+provider supplied — which SFTP servers do not. The file was kept and re-uploaded
+instead, so a file you deleted on the server came back on the next sweep, every
+time. Drivel now also records the local file's size and modification time when it
+syncs, and uses those when there is no checksum. A file you really did edit is
+still kept and pushed back, unchanged. Google Drive is unaffected.
+
 ### Every mount flag now works in /etc/fstab, and completions are generated — 2026-09-09
 
 Four flags described a mount but had no fstab option, so a line using one failed

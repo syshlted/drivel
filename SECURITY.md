@@ -12,14 +12,14 @@ and no bounty; expect a human, not an SLA.
 
 ## Scope
 
-Drivel is a **client you run yourself**. There is no hosted service, no shared
-application identity, and no telemetry — so there is no server-side attack surface
-to report against. What is in scope is the program on your machine and what it
-does with your data and credentials.
+Drivel is a **client you run yourself**. There is no hosted service, so there is
+no server of ours to report a vulnerability against. What is in scope is the
+program on your machine and what it does with your data and credentials.
 
 The security-relevant surfaces, roughly in order of consequence:
 
-**Data loss through sync.** Drivel can overwrite or delete files in Drive and in
+**Data loss through sync.** Drivel can overwrite or delete files in the remote
+store and in
 the backing directory. Several invariants exist specifically to prevent that — a
 placeholder is never uploaded, a deletion is inferred only from a sync baseline, a
 partial write is never spliced into a remote file that has diverged. A way to
@@ -33,8 +33,8 @@ cause data loss — this is why extended-attribute passthrough is
 
 **Credentials.** `credentials.json` and `token.json` are written `0600` and are
 gitignored. They are yours: Drivel bundles no application secrets. If yours leaks,
-delete the OAuth client in the Google Cloud Console — that invalidates every token
-minted from it immediately.
+revoke them with the provider — for Google Drive, delete the OAuth client in the
+Cloud Console, which invalidates every token minted from it immediately.
 
 **The profiling endpoint.** `-pprof` is off unless you pass an address. It serves
 the process heap, which holds synced paths and buffered file content, to anyone
@@ -47,7 +47,8 @@ machine can do with it is governed by the usual permissions and by FUSE's
 
 ## Not in scope
 
-- The security of macFUSE, Google Drive, or your Google account.
+- The security of macFUSE, of any storage provider Drivel is pointed at, or of
+  your account with one.
 - The consequences of running `-lazy` on a filesystem without extended attributes.
   Drivel detects this and warns; proceeding anyway is documented data loss, not a
   vulnerability.

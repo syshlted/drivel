@@ -33,6 +33,8 @@ erDiagram
         string hash "content checksum, e.g. Drive md5Checksum"
         string version "opaque provider version, used when no hash exists"
         timestamp at "when we last synced this content here"
+        int64 local-size "backing file size when this baseline was written"
+        timestamp local-mtime "backing file mtime then; zero means not recorded"
     }
     HYDRATION {
         string path PK "root-relative slash path"
@@ -65,6 +67,24 @@ What each bucket costs if the file is lost:
 | `hydration` | M5 present-ranges cache over the xattr marker | one stat |
 | `sweep` | resume point of an interrupted enumeration, plus when the last one finished | the sweep restarts, and the next mount treats a periodic sweep as overdue |
 | `seen` | which paths one sweep observed remotely | a resumed sweep would infer false deletes — which is why these are on disk and not in memory |
+
+`local-size` / `local-mtime` fingerprint the **backing** file, not the remote one,
+and they exist for providers that publish no content checksum — every filesystem
+backend in the M17–M21 group, where `hash` is always empty. They are what M7b's
+`matchesBaseline` uses to tell "unmodified since we last agreed with the remote"
+from "edited locally", which is the question deciding whether a remote deletion is
+applied here or the local file is kept and pushed back.
+
+Size and mtime are weaker than a digest and sufficient for this one job, because
+this is the *local* file: the kernel keeps its mtime to nanoseconds, so any write
+moves it. The remote's own coarse mtime never enters into it.
+
+**A zero `local-mtime` means "not recorded", never "matches".** That covers an
+echo written before the fields existed, a directory, and a stat that failed.
+Reading it as a match would delete a file somebody had edited. Before these fields
+existed a hashless provider answered "no baseline to compare against" for every
+file, so a deletion made on the remote was undone on the very next sweep — found
+against a live OpenSSH server, not in a test.
 
 The `echo` bucket is the one that grows: a baseline is dropped when the path is
 gone on **both** sides, and only a sweep can establish that. Deletes seen while

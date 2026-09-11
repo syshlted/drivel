@@ -151,6 +151,10 @@ func (d *Downloader) startFeed(ctx context.Context) (string, error) {
 		return "", err
 	}
 	switch {
+	case !ok && !d.hasFeed():
+		// Every start, by design: with no feed this sweep is the only thing that
+		// will ever notice what changed remotely while the mount was down.
+		d.logf("[sweep] no change feed: enumerating the remote tree")
 	case !ok:
 		d.logf("[sweep] no change cursor yet: enumerating the remote tree before tailing it")
 	case d.rec.Force:
@@ -228,10 +232,16 @@ func (d *Downloader) dueSweep(ctx context.Context) (string, bool) {
 // then starts listing. The token is what the pull loop resumes from once the
 // sweep finishes, so it has to predate everything the sweep observes.
 func (d *Downloader) beginSweep(ctx context.Context) (string, error) {
-	token, err := d.src.StartCursor(ctx)
-	if err != nil {
-		return "", err
+	var token string
+	if d.hasFeed() {
+		var err error
+		if token, err = d.src.StartCursor(ctx); err != nil {
+			return "", err
+		}
 	}
+	// With no feed there is no token to take and nothing to tail afterwards, so
+	// the sweep records an empty one. Everything downstream already treats "" as
+	// "no cursor"; what it must not do is *persist* it — see runSweep.
 	sw := state.Sweep{
 		Gen:     fmt.Sprintf("%d", time.Now().UnixNano()),
 		Token:   token,
@@ -312,8 +322,14 @@ func (d *Downloader) runSweep(ctx context.Context, sw state.Sweep) (string, erro
 		d.logf("[sweep] delete pass: %v", err)
 	}
 
-	if err := d.state.SetCursor(sw.Token); err != nil {
-		return "", err
+	// Only with a feed. A provider without one has no cursor, and persisting the
+	// empty token would make state.Cursor report ok=true on the next mount — which
+	// startFeed reads as "we are already tailing this remote" and would skip the
+	// startup sweep, i.e. skip the entire inbound path.
+	if d.hasFeed() {
+		if err := d.state.SetCursor(sw.Token); err != nil {
+			return "", err
+		}
 	}
 	if err := d.state.FinishSweep(time.Now()); err != nil {
 		// Only the schedule suffers: the next mount reads no completion stamp and
@@ -700,13 +716,46 @@ func (d *Downloader) matchesBaseline(rel, dst string, e state.Echo) (bool, strin
 		return true, ""
 	}
 	if e.Hash == "" {
-		return false, "the baseline has no checksum to compare against"
+		return matchesFingerprint(dst, e)
 	}
 	local, err := fileMD5(dst)
 	if err != nil {
 		return false, fmt.Sprintf("it could not be read (%v)", err)
 	}
 	if local != e.Hash {
+		return false, "it was modified locally since"
+	}
+	return true, ""
+}
+
+// matchesFingerprint is the baseline check for a provider that publishes no
+// content checksum — every filesystem backend in the M17–M21 group, where
+// RemoteFile.Hash is always empty.
+//
+// It compares the backing file against the size and mtime recorded when the
+// baseline was written (state.Echo). Without it a hashless provider answered "the
+// baseline has no checksum to compare against" for every file, forever, so a
+// deletion made on the remote was never applied locally — the file was kept and
+// pushed straight back up on the same sweep, permanently undoing the deletion.
+// Verified against a live OpenSSH server, where it is exactly what happened.
+//
+// Size and mtime are weaker than a digest and strong enough here, for a reason
+// that does not hold on the wire: this is the *local* file, whose mtime the
+// kernel keeps to nanoseconds, so any write moves it. The remote's own
+// second-resolution mtime never enters into it.
+//
+// No fingerprint recorded means no answer, not a match — an echo written before
+// the field existed, a directory, or a stat that failed. Guessing "unmodified"
+// there would delete a file somebody edited.
+func matchesFingerprint(dst string, e state.Echo) (bool, string) {
+	if e.LocalMTime.IsZero() {
+		return false, "the baseline has no checksum or fingerprint to compare against"
+	}
+	fi, err := os.Stat(dst)
+	if err != nil {
+		return false, fmt.Sprintf("it could not be read (%v)", err)
+	}
+	if fi.Size() != e.LocalSize || !fi.ModTime().Equal(e.LocalMTime) {
 		return false, "it was modified locally since"
 	}
 	return true, ""

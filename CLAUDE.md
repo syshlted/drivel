@@ -6,10 +6,11 @@ Guidance for Claude Code working in this repository.
 
 A Go FUSE filesystem that mounts a local directory as an **interceptor**: every
 operation is proxied to an underlying directory (the source of truth / local
-cache) and asynchronously, bidirectionally synced with a cloud provider. First
-(and currently only) provider: **Google Drive**, via the Drive API v3
-`changes.list` cursor feed — **not** the Workspace Events API and **not**
-webhooks.
+cache) and asynchronously, bidirectionally synced with a remote provider. Two
+providers ship: **Google Drive**, via the Drive API v3 `changes.list` cursor feed
+— **not** the Workspace Events API and **not** webhooks — and **SFTP** (M18), over
+an ordinary SSH account, which has no change feed at all and is therefore polled
+by the M7b sweep.
 
 Read [DESIGN.md](DESIGN.md) before making architectural changes. The
 echo/loop-suppression model (§4) is the load-bearing correctness concern for
@@ -48,6 +49,9 @@ bidirectional sync — don't regress it.
   adds the `Registry` (kind → `Factory`), an explicit value rather than an
   `init()`-filled package map.
 - `internal/provider/gdrive` — Google Drive impl of the interface.
+- `internal/provider/sftp` — SFTP impl (M18): the first path-addressed backend, so
+  it carries no path index and no `ChangeSource`, and it is the first `RangePutter`
+  in the tree. See "SFTP" below.
 - `internal/gauth` — Google OAuth: credentials.json/token.json I/O and the
   interactive login flow (loopback redirect + manual paste, rclone-style).
 - `internal/transport` — HTTP/3 (QUIC) client with HTTP/2 fallback, injected into the
@@ -84,14 +88,18 @@ bidirectional sync — don't regress it.
 
 Two published collections, split by audience, plus repo housekeeping:
 
-- `docs/user/` — quickstart, install, google-cloud-setup, configuration,
-  lazy-mode, data-safety, troubleshooting, platforms, and `drivel.1`. Written for
-  someone who wants to *use* drivel; it never cites DESIGN.md.
+- `docs/user/` — quickstart, install, google-cloud-setup, sftp, configuration,
+  lazy-mode, data-safety, troubleshooting, platforms, fstab, and `drivel.1`.
+  Written for someone who wants to *use* drivel; it never cites DESIGN.md.
+  Per-provider facts live on that provider's page: `sftp.md` owns the poll-interval
+  warning and the no-trash warning, and `configuration.md` links to it rather than
+  restating either.
 - `docs/dev/` — architecture (structure), workflows (sequence/decision diagrams),
   schema (the two bbolt DBs), dependencies (why each one), conventions (the
   load-bearing rules), building, testing, new-provider, glossary, and the
   multiclient test plan. These *do* cite `DESIGN.md §N`, for reasoning.
-- `docs/project/` — publishing to pkg.go.dev, marketing copy.
+- `docs/project/` — publishing to pkg.go.dev, marketing copy, the mascot's lore
+  and drawing brief.
 - Root: `README.md` is a slim landing page, `CHANGELOG.md` is the **externally
   facing** change record (abbreviated, in user terms — not a milestone log),
   `CONTRIBUTING.md`, `SECURITY.md`.
@@ -100,17 +108,35 @@ Two published collections, split by audience, plus repo housekeeping:
 not part of either collection. Don't link them from `docs/user/`, and don't slim
 DESIGN.md to match a docs page — it is the long-form record, and the docs cite it.
 
-Three rules. A user-visible behaviour change lands in `docs/user/`, the man page
+Four rules. A user-visible behaviour change lands in `docs/user/`, the man page
 **and** `CHANGELOG.md`. A fact lives in exactly one place and everything else
 links to it — platform support is `docs/user/platforms.md`, flags are
 `docs/user/configuration.md`, the invariants are `docs/dev/conventions.md`. And
 mermaid diagrams are validated by parsing them, not by eye.
 
+The fourth is newer and the easiest to lose: **copy that says what drivel *is*
+stays backend-neutral.** Drive is the backend that ships, not the product — the
+reference docs already had this right (`drivel.1` says "the first and currently
+only provider", the flags are namespaced `-drive-*`) while the README and
+marketing copy had collapsed the program into a Drive client. Naming the shipping
+backend is honest; implying it is the only conceivable one is not, and neither is
+implying the others exist yet. Anything true of one provider only — its
+credentials mechanism, what it does with the data it receives — is **disclosed on
+that provider's page** and nowhere else, because drivel cannot answer for
+software it did not write; `docs/user/google-cloud-setup.md` §"What Google sees"
+is the pattern. And drivel makes **no product-level claim about traffic or
+telemetry at all** — see `docs/project/marketing.md` for why the narrower
+versions fail too.
+
 ## CLI
 
 `drivel` has two subcommands (`mount` is the default, so `drivel -mount … -data …`
 still works): `drivel login` (interactive OAuth wizard → credentials.json +
-token.json) and `drivel mount`. From M8 both are account-aware: `drivel login
+token.json) and `drivel mount`. **Both entry points build their registry through
+`newRegistry()` in `cmd/drivel/mount.go`** — the flag/config path and the M16 mount
+helper — because a backend registered in one but not the other is a config file
+that works from the shell and fails at boot. `drivel login` is Drive-specific by
+nature; an SFTP account needs no login step and is written by hand. From M8 both are account-aware: `drivel login
 -account NAME` scopes credentials to `$XDG_CONFIG_HOME/drivel/NAME` and appends
 `[account.NAME]` to the config file, and `drivel mount` with no flags reads
 `$XDG_CONFIG_HOME/drivel/config.toml` and serves every `[[mount]]` in it.
@@ -237,6 +263,9 @@ sweep's cost proportional to what was mounted. See "Enumeration & reconcile" bel
 M8 multi-account & multi-provider **shipped**: N mounts per process from a TOML
 config, a provider registry, account-scoped login. See "Multi-account" below.
 
+M18 SFTP **shipped**: the second provider, path-addressed, no change feed, and the
+tree's first real `RangePutter`. See "SFTP" below.
+
 **v2, planned** (DESIGN.md §9 has the detail). **M9** plugin architecture
 (out-of-process or WASM; Go's `plugin` package is a poor fit). M8 discharged its
 precondition: the §2.5 seam holds under two independently-configured stores in one
@@ -296,7 +325,7 @@ the out-of-band one primary; that is the shape to copy when it lands.
 before that number went to special files; if you meet a stray M15 in an old
 branch or note meaning the mount helper, this is it.
 
-**v2, backends on the roadmap** (DESIGN.md §9 has the reasoning; all three are
+**v2, backends on the roadmap** (DESIGN.md §9 has the reasoning; these three are
 unscheduled, none is started, and each one's shape is *decided* — the entries say
 so, so don't re-litigate them). **M11** deduplicating local backend: a
 `provider.Store` over a content-addressed local directory, **private to one
@@ -317,6 +346,77 @@ recommendation is emphatically **not Cassandra for metadata** (no multi-partitio
 transactions, LWW by cell timestamp, tombstone pressure under a delete/overwrite
 workload) but FoundationDB or TiKV, with Redis/Memcached as cache and never as the
 lock of record.
+
+**v2, filesystem backends on the roadmap** (DESIGN.md §9, M17–M21 — written as
+*one* design with five faces, so read the group preamble before any single entry;
+all unscheduled, none started). **M17** `localfs`, a provider over a plain
+directory: no protocol code, and **today it is the honest answer for NFS and SMB**
+— mount the share with the kernel and point `localfs` at it. **M18** SFTP —
+**shipped 2026-09-10**, see "SFTP" below. **M19** SMB/CIFS. **M20** NFS,
+**declined with a stated expiry**. **M21** WebDAV, widest reach for the least code.
+
+Seven things are true of the whole group and are why it is one design. **A
+deletion is permanent on all of them and drivel does not emulate a trash**
+(decided 2026-09-11, and it covers M11 too): inside the mount root the sweep would
+enumerate the graveyard and pull every deleted file back, and outside it is a
+second store to garbage-collect, bolted under the one operation with no fallback
+above it. `-max-deletes` is therefore the *only* delete guard on these backends —
+a fact to disclose on each one's user page, not a gap for a later session to paper
+over because the docs read alarmingly. M18 shipping
+already discharged the group's central precondition — **a feedless provider now
+gets a `Downloader`** (sweep-only), where before `app.Mount` built one solely for a
+`ChangeSource` and a store that could only enumerate was silently upload-only.
+M19–M21 inherit that; none needs to rediscover it. They are
+path-addressed, so **a provider here that grows an M7-style path index has
+misunderstood something** — `internal/pathindex` stays Drive-private. None has a
+change feed except SMB, so **the M7b sweep *is* the inbound path**: `-sweep-interval`
+stops being a safety net and becomes the poll interval (its 24h default is wrong for
+every one of them), and the §4 echo store becomes the only memory of what was
+synced — which is also M7b's delete baseline, so pruning it harder is a data-loss
+bug, not a tuning choice. **The M6 gates come out the reverse of Drive's**: a write
+at an offset is native, so `RangePutter` is real and M6's range-write path finally
+runs against something that is not a fake, while no server computes a content digest
+by default, so gate 3 declines and content pushes are whole-file. `Move` is a real
+server-side rename. Case-insensitivity is **the MC-30 same-name-sibling problem by a
+third route** (unconditional on SMB, server-dependent elsewhere) — detect and report,
+don't mitigate. And the justification test the whole group is built on: what drivel
+adds over simply mounting the share is §2.1's "an FS op never blocks on the network",
+plus M5 lazy hydration and M4 conflict copies — **a proposed backend that cannot
+point at that triple is declined**, which is exactly why M20 is.
+
+One shared precondition, and it is a correctness item rather than a feature: **a
+provider configured with a *local* path is inside `app.Validate`'s blind spot.** M8
+rule 2 guards overlap between *mounts*; a `localfs` directory (or an M11 store, or a
+kernel-mounted share used as either) is a local path belonging to a **provider**, and
+nothing checks it. Pointed at a backing tree it syncs a tree into itself; pointed at a
+mountpoint it breaks §2.7's cardinal rule from below. Needs `provider.Params` to let a
+provider *declare* the local paths it will touch, before validation and before open.
+
+Per-backend, the things that are decided and easy to get wrong. SFTP is now
+shipped, so read the "SFTP" section below instead of this line — the one thing it
+corrects is gate 3, which turned out to be unreachable through `pkg/sftp` at all
+rather than capability-detected per connection. SMB: it has the group's only real `ChangeSource` (CHANGE_NOTIFY, whose
+overflow *is* `provider.ErrCursorExpired`), which makes it the only chance to test that
+contract against a second feed — but **settle the pure-Go client's maintenance and
+whether it exposes notify at all before writing code**, since cgo against libsmbclient
+would forfeit §2.9's cross-compile proof. WebDAV: `Depth: infinity` PROPFIND is off by
+default on the commonest server, so enumeration **must** be the M7c descent; the ETag is
+the echo identity and is *not* a hash (same opaque-version path Drive's Google-native
+files already use); Basic auth over plain `http://` is refused at open, and an empty
+PROPFIND on the root is an error, never an empty sweep (M7b row 4).
+
+**M22 Google Photos is recommended *against* as a `provider.Store`**, and the reason
+is the API rather than the effort: three of the six required methods have no
+implementation — the Library API cannot delete from a library, cannot replace an
+item's content, and has no stable path to move — so a local `rm` would silently not
+propagate and the sweep would put the file back. Scopes for reading a user's existing
+library were removed in March 2025 (an app now sees only what it uploaded, plus
+Picker selections, and `drivel login`'s loopback/paste flow has no browser surface to
+host a Picker — the `drive.file` blocker again). **Verify that scope situation before
+scheduling anything here**; the whole entry turns on it. What *is* buildable is a
+one-way backup target, which is not a `Store` and should not pretend to be one —
+inventing a read-only or append-only store concept to fit a backend that cannot
+delete would weaken a contract five other providers rely on.
 
 **Design notes, unscheduled.** DESIGN.md §10 (POSIX metadata over Drive) and §11
 (virtual xattrs: emulate xattrs from a file in the backing store, so they work on
@@ -656,6 +756,122 @@ refuses `S_IFREG` outright (on plain ZFS too, not just through a mount). Both ar
 below drivel, neither risks data — loud `EINVAL`, no file — and the tests **assert**
 them rather than skipping, so the platform is pinned. Don't "fix" this by rewriting
 rdev; it is go-fuse's loopback, and device nodes are not ours to invent.
+
+## SFTP (M18)
+
+The second provider, and the first that is **path-addressed**. Everything that
+makes it different from `gdrive` follows from that plus one absence, so most of
+`gdrive`'s machinery has no counterpart here on purpose.
+
+1. **No path index, and adding one would be a mistake.** `Put`/`Mkdir`/`Move`/
+   `Remove`/`Get`/`Stat` are each one protocol call over the path the seam already
+   speaks. `internal/pathindex` stays Drive-private; an index here would be a cache
+   keyed by its own value.
+2. **No `ChangeSource`, and the sweep *is* the inbound path.** SFTP has no
+   notification of any kind, so `-sweep-interval` is the **poll interval** and its
+   24h default is wrong for every SFTP mount — the user docs say so and so does the
+   man page. Do **not** synthesize a feed by polling-and-diffing: M7b already is
+   that, with the delete guards that make an inferred deletion safe.
+
+   This is what forced the seam change M19–M21 inherit: `Downloader.src` may be
+   nil, `Run` branches once into `runWithoutFeed`, and `app.Mount` wires a
+   downloader for `ChangeSource` **or** `Enumerator`. **The empty cursor must never
+   be persisted** — `state.Cursor` would report `ok=true`, `startFeed` would read
+   that as "already tailing this remote", and every mount after the first would
+   skip its startup sweep, i.e. skip inbound sync entirely. `runSweep` guards the
+   `SetCursor` with `hasFeed()` for exactly that reason.
+3. **`RangePutter` is real, and this is the milestone's point.** SSH_FXP_WRITE takes
+   an offset, so M6's gate 2 finally runs against a server rather than a fake. The
+   contract is re-checked in `PutRange` and not merely trusted: `O_WRONLY` with no
+   `O_TRUNC` and no `O_CREATE`, extents validated before the handle is opened, and
+   a remote size that disagrees is an error. Failing is cheap — the engine falls
+   back to a whole-file `Put`.
+4. **`ContentHasher` is absent, and the reason is the library.** Gate 3 needs a
+   server-computed digest; OpenSSH's server has no `check-file`, and `pkg/sftp`
+   exposes no way to send an arbitrary extended request, so it is unreachable even
+   where a server offers it. Costs nothing: `syncengine.contentMatches` returns
+   early on an empty `RemoteFile.Hash` before reading a local byte. If it ever
+   becomes reachable it is a **per-session** capability — a wrapper type chosen at
+   dial time, never a method on `Store`.
+5. **`Version` is `mtime:size` and carries the echo identity alone.** The rsync
+   heuristic with the rsync caveat: SFTP's mtime is whole seconds, so a remote edit
+   preserving the exact byte length *and* landing in the same second as our own
+   write reads as our echo and is not pulled until something else touches the file.
+   Documented, not mitigated — the alternatives are worse.
+6. **Host key verification fails closed and that IS the milestone.**
+   `ssh.InsecureIgnoreHostKey` is absent from the tree and
+   `TestInsecureIgnoreHostKeyIsAbsentFromTheTree` greps for it (it is a grep because
+   the failure it guards against is someone adding the hatch in a package that does
+   not exist yet). `Open` additionally proves *offline* that the host is listed, by
+   the documented `knownhosts.KeyError.Want`-is-empty idiom, so the commonest
+   misconfiguration is a startup error naming the file rather than a retry loop.
+   **There is no password and no passphrase option and there must not be one** — a
+   credential in cleartext beside the file it protects, for an account that usually
+   grants a shell. Encrypted key ⇒ agent.
+7. **`Put` is write-to-temp-then-rename.** The whole-file `Put` is the fallback
+   behind every M6 gate so it runs constantly, and an interrupted in-place write
+   would leave the remote truncated with no digest gate to ever notice. `Enumerate`
+   skips the `.drivel-upload.` prefix so a temporary stranded by a dropped
+   connection is neither materialised locally nor later inferred as a deletion.
+   `conn.rename` takes `posix-rename@openssh.com` when the session advertises it —
+   the fallback is not just slower, it has a window where the destination is absent.
+8. **`Remove` is permanent and there is nothing behind it** — the group-wide
+   decision above, arrived at here first. `-max-deletes` is the only guard, and
+   `docs/user/sftp.md` says so in those words. Don't re-open it per backend.
+9. **Enumeration is a breadth-first descent whose cursor is the frontier**, since
+   there is no recursive list. Parent-first by construction, so gdrive's parking
+   machinery has no counterpart. A directory that vanished mid-sweep is skipped;
+   **every other listing failure abandons the sweep**, because a sweep that quietly
+   omits a subtree still reports itself complete and the delete pass would then
+   propose deleting everything under it.
+10. **Containment is structural, not checked.** `path.Join(root, p)` resolves a
+    leading `..` by climbing *out* of root; `conn.abs` cleans against a virtual `/`
+    first so it collapses instead. A test asserts the property — it caught the bug.
+11. **Reconnection is discard-and-redial, not a healing wrapper.** A dead session is
+    dropped (`Store.drop`, which only clears the conn it was handed, so a slow
+    worker cannot tear down its replacement) and the error is returned **retryable**
+    so the engine's existing backoff re-drives the operation onto a fresh
+    connection. `io.EOF` counts as a dead transport here — safe only because `Get`
+    hands the caller the remote handle directly and `Put`/`PutRange` copy from local
+    readers, so no ordinary end-of-file reaches `classify`. Getting this wrong made
+    a dropped connection permanent and stalled the mount until restart.
+
+12. **A hashless provider could not apply a remote deletion at all, and this was
+    found by running it, not by a test.** `reconcile.matchesBaseline` compared a
+    local MD5 against `state.Echo.Hash` — the *remote's* digest, always empty here
+    — so every file read as "diverged", and a file deleted on the server was kept
+    locally and pushed straight back on the same sweep, forever. `state.Echo` now
+    carries **`LocalSize`/`LocalMTime`**, a fingerprint of the *backing* file taken
+    when the baseline was written, and `matchesBaseline` falls back to it when
+    `Hash == ""`. Three things are load-bearing: it fingerprints the **local** file
+    (nanosecond mtime, so any write moves it — not the coarse wire mtime `Version`
+    is stuck with); **a zero `LocalMTime` means "not recorded", never "matches"**
+    (old state DB, directory, failed stat — the wrong answer there deletes
+    somebody's edit); and the push side records it **after** the upload, because a
+    write that landed mid-upload has already queued another event that will
+    re-record it, while a pre-push fingerprint would describe bytes no longer on
+    disk. Drive takes the digest branch exactly as before.
+13. **Directories report a constant `Version` (`"dir"`).** Empty made
+    `Echo.Matches` false for every directory every pass, so the downloader
+    re-created and re-logged each one — invisible at Drive's 24h sweep, the entire
+    log at a 3s poll. Their mtime is no better: it moves when a child is added.
+
+**The tests run a real SSH server with a real SFTP subsystem in-process over
+loopback** (`server_test.go`), against a real temp directory. A hand-written fake
+would encode this package's beliefs about the protocol, which is precisely what a
+provider gets wrong. It is also what covers the dial, auth and host-key paths.
+
+**Verified against OpenSSH on 2026-09-10** through a real mount (`sshd` +
+`internal-sftp`): pre-existing tree materialised, local write pushed, remote edit
+pulled, rename and delete both ways, the diverged-copy guard held, and a 4 MiB
+edit to a 64 MiB file moved 4 MiB with the two left byte-identical. Two of the
+items above (12 and 13) were found by that run and by nothing else — **a green
+unit suite is not evidence this backend works**. Still unrun: a server *without*
+`posix-rename@openssh.com`, and anything that is not OpenSSH. Setting up a rig: an
+**external** `Subsystem sftp .../sftp-server` runs through the login shell, so any
+byte that shell prints corrupts the stream and reads as `packet too long` —
+OpenSSH's own client fails the same way, it is not a drivel bug. Use
+`internal-sftp`.
 
 ## Multi-account & multi-provider (M8)
 

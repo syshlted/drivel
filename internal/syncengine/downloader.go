@@ -31,6 +31,12 @@ var DefaultCadence = Cadence{Fast: 2 * time.Second, Slow: 30 * time.Second}
 // applies remote deltas to the backing directory, using the echo-suppression
 // store so it never re-applies the uploader's own writes (DESIGN.md §3–§4).
 //
+// A provider with no change feed is a supported shape, not a degraded one: the
+// M7b sweep then IS the inbound path rather than a safety net beneath one, and
+// -sweep-interval stops being a long-period backstop and becomes the poll
+// interval (DESIGN.md §9, the M17–M21 preamble). Run branches on that at the top
+// and everything below the branch is shared.
+//
 // It writes directly into the backing dir (never through the mountpoint), so its
 // writes don't re-enter the FUSE layer and never generate local events — which is
 // why §4.3 ("suppress downloader-originated local events") needs no extra
@@ -38,6 +44,9 @@ var DefaultCadence = Cadence{Fast: 2 * time.Second, Slow: 30 * time.Second}
 // applies the §6 conflict policy (last-writer-wins by mtime, loser kept as a
 // conflict copy); see resolveConflict.
 type Downloader struct {
+	// src is the incremental change feed, or nil for a provider that has none —
+	// every filesystem backend in the M17–M21 group. hasFeed is the only thing
+	// that may read it for presence; the rest of the file assumes it is there.
 	src     provider.ChangeSource
 	store   provider.Store
 	dataDir string
@@ -97,6 +106,11 @@ func (d *Downloader) logf(format string, args ...any) {
 
 // NewDownloader constructs the pull loop. cad zero-values fall back to
 // DefaultCadence.
+//
+// src may be nil, for a store that offers no incremental feed. Such a downloader
+// does no polling at all and exists solely to run the sweep, which is then the
+// only inbound path — so pairing a nil src with a store that cannot enumerate
+// builds a downloader with nothing to do, and Run returns immediately.
 func NewDownloader(src provider.ChangeSource, store provider.Store, dataDir string, st *state.Store, cad Cadence) *Downloader {
 	if cad.Fast <= 0 {
 		cad.Fast = DefaultCadence.Fast
@@ -111,6 +125,10 @@ func NewDownloader(src provider.ChangeSource, store provider.Store, dataDir stri
 // obtains a fresh start token on first run so it only ever sees changes from
 // "now" forward.
 func (d *Downloader) Run(ctx context.Context) {
+	if !d.hasFeed() {
+		d.runWithoutFeed(ctx)
+		return
+	}
 	cursor, ok := d.start(ctx)
 	if !ok {
 		return
@@ -192,6 +210,67 @@ func (d *Downloader) Run(ctx context.Context) {
 		} else if wait *= 2; wait > d.cad.Slow {
 			wait = d.cad.Slow
 		}
+	}
+}
+
+// hasFeed reports whether this provider offers an incremental change feed. It is
+// the single place that tests src for presence, so "no feed" is one concept
+// rather than a nil check repeated down the file.
+func (d *Downloader) hasFeed() bool { return d.src != nil }
+
+// runWithoutFeed is the inbound loop for a provider with no change feed: an
+// initial sweep, then one sweep per -sweep-interval, forever.
+//
+// Nothing here polls, because there is nothing to poll. That makes the interval
+// the whole of the inbound latency — a remote edit is invisible until the next
+// sweep — which is why every backend in this group has to document a sensible
+// value for it rather than inheriting DefaultSweepInterval's 24h, tuned as that
+// is for a backend whose feed already covers the live case.
+//
+// The three sweep triggers are unchanged and still live in startFeed, so a
+// resumed sweep, a first run and -resync behave here exactly as they do under a
+// feed. What differs is only what happens between sweeps.
+func (d *Downloader) runWithoutFeed(ctx context.Context) {
+	if !d.canSweep() {
+		// No feed and nothing to enumerate: this downloader has no way to observe
+		// the remote at all. Outbound sync still runs — that is the engine, not us.
+		d.logf("[pull] provider offers neither a change feed nor enumeration: inbound sync is off")
+		return
+	}
+
+	if _, err := d.startFeed(ctx); err != nil {
+		if ctx.Err() != nil {
+			return
+		}
+		// Same judgement as start's: a failed sweep must not take the loop down,
+		// because the periodic schedule below is the retry.
+		d.logf("[sweep] initial enumeration failed: %v", err)
+		d.nextSweep = time.Now().Add(d.cad.Slow)
+	} else {
+		d.nextSweep = d.sweepDeadline()
+	}
+
+	if d.nextSweep.IsZero() {
+		// -sweep-interval 0 disables the only inbound path there is. That is a
+		// legitimate thing to ask for (a push-only mirror), and it is also the
+		// shape someone lands in by copying a Drive config, so say it once.
+		d.logf("[sweep] no change feed and -sweep-interval is 0: nothing will be pulled until the next restart")
+		return
+	}
+
+	for {
+		wait := time.Until(d.nextSweep)
+		if wait < time.Second {
+			wait = time.Second
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(wait):
+		}
+		// dueSweep reschedules before it runs, so a failure backs off by a whole
+		// interval rather than spinning.
+		d.dueSweep(ctx)
 	}
 }
 
@@ -323,7 +402,7 @@ func (d *Downloader) applyTo(ctx context.Context, ch provider.RemoteChange, forg
 			return err
 		}
 		d.logf("[pull] mkdir   %s", ch.Path)
-		return d.rememberApplied(ch.Path, f)
+		return d.rememberApplied(ch.Path, dst, f)
 	}
 
 	// Lazy mode (M5): a local placeholder has no resident content, so it cannot
@@ -336,7 +415,7 @@ func (d *Downloader) applyTo(ctx context.Context, ch provider.RemoteChange, forg
 			return err
 		}
 		d.logf("[pull] restamp %s (placeholder, %d bytes pending)", ch.Path, f.Size)
-		return d.rememberApplied(ch.Path, f)
+		return d.rememberApplied(ch.Path, dst, f)
 	}
 
 	localHash, localExists, err := statMD5(dst)
@@ -348,7 +427,7 @@ func (d *Downloader) applyTo(ctx context.Context, ch provider.RemoteChange, forg
 	// exact bytes (common on first sync when the dir already mirrors Drive), skip
 	// the download entirely and just record the echo.
 	if f.Hash != "" && localExists && localHash == f.Hash {
-		return d.rememberApplied(ch.Path, f)
+		return d.rememberApplied(ch.Path, dst, f)
 	}
 
 	// Conflict (§6): we're past the echo check, so the remote content differs from
@@ -370,7 +449,7 @@ func (d *Downloader) applyTo(ctx context.Context, ch provider.RemoteChange, forg
 	if err := d.materialize(ctx, ch.Path, dst, f); err != nil {
 		return err
 	}
-	return d.rememberApplied(ch.Path, f)
+	return d.rememberApplied(ch.Path, dst, f)
 }
 
 // materialize brings rel's remote content into the backing store: a real download
@@ -419,7 +498,7 @@ func (d *Downloader) resolveConflict(ctx context.Context, rel, dst string, f *pr
 			return err
 		}
 		d.logf("[pull] conflict %s: remote newer, local kept as %s", rel, copyRel)
-		return d.rememberApplied(rel, f)
+		return d.rememberApplied(rel, dst, f)
 	}
 
 	// Local is newer (or same mtime): it keeps the real path; the remote version is
@@ -469,8 +548,22 @@ func (d *Downloader) download(ctx context.Context, path, dst string, modified ti
 
 // rememberApplied records what we just wrote so a subsequent change-feed report
 // of the same content is recognised as an echo and dropped.
-func (d *Downloader) rememberApplied(path string, f *provider.RemoteFile) error {
-	return d.state.SetEcho(path, state.Echo{Hash: f.Hash, Version: f.Version, At: time.Now()})
+//
+// dst is the backing file the record describes; its size and mtime become the
+// baseline's local fingerprint (see state.Echo), which is the only thing a
+// provider with no content checksum can later use to tell "unmodified since we
+// agreed with the remote" from "edited locally". A stat that fails records no
+// fingerprint, which reads as "not recorded" and is the safe direction.
+func (d *Downloader) rememberApplied(path, dst string, f *provider.RemoteFile) error {
+	fi, err := os.Stat(dst)
+	if err != nil {
+		fi = nil
+	}
+	size, mtime := state.FingerprintOf(fi)
+	return d.state.SetEcho(path, state.Echo{
+		Hash: f.Hash, Version: f.Version, At: time.Now(),
+		LocalSize: size, LocalMTime: mtime,
+	})
 }
 
 // statMD5 returns the hex md5 of the file at p, reporting exists=false (no error)

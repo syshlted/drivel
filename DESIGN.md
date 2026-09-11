@@ -852,6 +852,24 @@ are both lossy and racy.
   over a distributed database (M13). The first two are `provider.Store`
   implementations that need no new seam; the third is only partly one, and §9 says
   where it stops fitting.
+- **Backends that are network filesystems**: SFTP (shipped, M18), SMB/CIFS, NFS
+  and WebDAV, plus the plain-directory provider they are all measured against —
+  M17–M21 in §9, written as one design because they share almost everything. They are the mirror
+  image of Drive: path-addressed, so no M7 index; no change feed, so the M7b sweep
+  *is* the inbound path and `-sweep-interval` becomes a poll interval; and a native
+  write-at-offset, so M6's range-write path finally runs against something real
+  while the unchanged-content gate declines. What they add over simply mounting the
+  share is §2.1 — an FS operation that never blocks on the network — plus lazy
+  hydration and conflict copies, and §9 declines a backend that cannot point at
+  that. One shared precondition is a correctness item: a provider configured with a
+  *local* path is outside `app.Validate`'s overlap guards, which only know about
+  paths belonging to mounts.
+- **Google Photos is not a filesystem** and §9's M22 recommends against it as a
+  provider rather than sketching one: three of the six required `Store` methods
+  have no implementation (the API cannot delete from a library, cannot replace an
+  item's content, and has no stable path to move), and since 2025 an app can only
+  see media it uploaded itself. A one-way backup target is buildable and is a
+  different program.
 - **A control & status API** over a unix socket, so third-party tools can read
   per-path sync status and per-backend statistics, pause and resume a mount, see
   whether a backend is reachable, and stop the process — M14 in §9. The design work
@@ -2442,6 +2460,452 @@ are both lossy and racy.
     their own answers (a launchd agent, an rc.d script) and neither is reached by
     pretending to be a mount helper. The option parser is portable anyway, so its
     tests run everywhere.
+
+**M17–M21 are five faces of one design, and the shared half is written here.**
+Everything drivel knows about backends it learned from Drive: an ID-addressed
+object store, reached over HTTP, with a change feed and a trash. The next group is
+the opposite in every one of those respects — path-addressed byte stores with
+POSIX-ish semantics, no identity beyond the path, and (with one exception) no feed
+at all. Seven consequences fall out of that shape rather than out of any particular
+protocol, so they are stated once and the entries below carry only what differs.
+
+- **The seam fits without argument, and that is the point of §2.5.** These stores
+  are natively path-addressed, so `Put`/`Mkdir`/`Move`/`Remove`/`Get`/`Stat` are
+  each one protocol call and nothing below the seam has to invent an identity.
+  `internal/pathindex` and the whole three-source resolution of M7 stay
+  Drive-private, where they belong — an M7 index over a path-addressed store would
+  be a cache keyed by its own value. **A provider in this group that grows a path
+  index has misunderstood something**; the thing worth caching is metadata, and
+  that is `Stat`.
+- **No change feed means the sweep *is* the inbound path.** M7b and M7c are what
+  make this group possible at all: without `Enumerate` a pre-existing remote tree
+  is invisible, and without `ChangeSource` the sweep is the only thing that ever
+  looks. This took a seam change that M18 made and the rest of the group inherits:
+  before it, the `Downloader` was constructed only for a store implementing
+  `ChangeSource`, so a feedless provider was silently upload-only. `src` may now be
+  nil and `Run` branches into a sweep-only loop — see M18 for the two guards that
+  make it safe, the load-bearing one being that the empty cursor must never be
+  persisted. Two things follow that are easy to miss. `-sweep-interval` stops being a
+  long-period safety net and becomes the **poll interval**, so its 24 h default is
+  wrong for every backend here and each one must say so in its own docs rather
+  than quietly inheriting it. And every §4 echo record has to survive between
+  sweeps, because with no feed the echo store is the *only* memory of what was
+  synced — which is also M7b row 2's delete baseline, so an aggressive prune here
+  is a data-loss bug, not a tuning choice.
+- **The M6 gates come out the other way round from Drive, and this is the group's
+  most useful property.** Drive gets gate 3 (`md5Checksum` in `Stat`) and
+  deliberately declines gate 2. Every filesystem here is the reverse: a write at
+  an offset is the protocol's native operation, so `RangePutter` is real and M6's
+  range-write path finally runs against something other than a fake — while a
+  server-computed content digest is unavailable on all of them by default, so gate
+  3 declines and the unchanged-content check falls through to a whole-file `Put`.
+  That is safe by construction (the fallback is what M1–M5 always did) and it is a
+  *cost*, so it belongs in each entry's economics rather than being discovered
+  later.
+- **`Move` is a real rename.** Server-side, identity-preserving, and atomic-ish —
+  the good case §2.5 contrasts with S3's copy-plus-delete. Nothing in the engine
+  branches on it; it just stops being the expensive path.
+- **A deletion is permanent here, and drivel does not emulate a trash.** Decided
+  2026-09-11, and it applies to every backend in this group and to M11 — not to
+  SFTP alone, which is merely where the question first came up. Drive answers the
+  seam's "prefer the recoverable form" with a real trash it already had; a POSIX-ish
+  byte store has nothing of the kind, and manufacturing one is worse than the gap
+  it fills. Inside the mount root it is actively broken: the sweep would enumerate
+  the graveyard and pull every deleted file back down. Outside it, it is a second
+  store with its own lifetime, quota and garbage collection — a feature nobody
+  asked for, bolted under the one operation with no fallback above it, where a bug
+  destroys exactly the data it was added to protect.
+
+  So on every backend here `-max-deletes` is not the guard in front of a safety
+  net; it is the only guard. That is a fact to **disclose** — each backend's user
+  page says it in those words — rather than a gap to paper over. Revisitable if
+  someone actually wants it, and not by a future session deciding the docs look
+  alarming.
+
+- **Case-insensitivity is the MC-30 same-name-sibling problem arriving by a third
+  route.** §2.9's macOS note has the second. SMB is case-insensitive by protocol;
+  the others inherit whatever the server's filesystem does, which the client cannot
+  ask about. Unlike Drive there are no true same-name siblings to resolve — the
+  collision happens on the server, silently, and `Foo.txt` overwrites `foo.txt`.
+  No mitigation is proposed here for the same reason as MC-30: every candidate
+  loses something a user wrote. It is a thing to *detect and report*, which makes
+  it a good first customer for M14.
+- **And the reason to build any of this.** The kernel already mounts NFS and SMB,
+  sshfs and davfs2 already exist, and none of them does the one thing drivel does:
+  §2.1's rule that an FS operation never blocks on the network. A `write(2)` into
+  an NFS mount whose server has gone away hangs in `D` state; a `write(2)` into a
+  drivel mount lands in the backing dir and the engine retries behind it. Add M5
+  and the share is browsable at full apparent size while holding almost none of
+  it, and M4's conflict copies mean two laptops editing one file over the same
+  share produce a `.conflict` rather than a silent loss. **That triple — offline
+  tolerance, lazy hydration, conflict copies — is the entire justification for
+  this group.** A backend proposal that cannot point at it should be declined, and
+  M20 below is declined on exactly those grounds.
+
+One prerequisite is shared and is a correctness item rather than a feature.
+**A provider whose configuration names a local path is inside `app.Validate`'s
+blind spot.** M8's rule 2 guards overlap between *mounts* — backing trees,
+mountpoints, state DBs — because those are the local paths the config describes.
+A `localfs` directory (M17), an M11 store, and a kernel-mounted share used as
+either are local paths belonging to a **provider**, and nothing checks them today.
+Pointing one at a mount's backing tree builds an engine that syncs a tree into
+itself; pointing it at a mountpoint breaks §2.7's cardinal rule from below, where
+the in-place deadlock has no `/proc/self/fd` handle to save it. The guards
+generalise (they are already "does path A contain path B" over a set), but the set
+has to grow a provider-supplied member, which means `provider.Params` needs a way
+for a provider to *declare* the local paths it will touch, before validation and
+before anything opens. M11 noted this gap for one backend; M17 makes it the door
+this whole group walks through, so it is a precondition rather than a note.
+
+19. **M17 — `localfs`: a provider over a plain directory.** The degenerate
+    backend — a `provider.Store` that mirrors the tree 1:1 into another directory,
+    with no transform whatsoever. It is listed first because it is not really a
+    fifth network filesystem, it is the *substrate* the next four are measured
+    against, and because it is the only entry in this group that needs no protocol
+    code at all.
+
+    **It is also, today, the honest answer for NFS and SMB.** Mount the share with
+    the kernel — which has spent decades on those two protocols, handles Kerberos,
+    and is already installed — and point `localfs` at the mountpoint. What comes
+    back is the whole justification above: FUSE operations land in the local
+    backing dir and never touch the wire, the engine's retries and backoff absorb
+    a server that went away, `-lazy` makes the share browsable without holding it,
+    and conflict copies work. The cost is that everything below the seam blocks on
+    the kernel mount instead of on an HTTP call, which is exactly where blocking is
+    allowed. **Anyone proposing a userspace client for a protocol the kernel
+    already mounts has to beat this**, and M19 and M20 below are judged on it.
+
+    Three things it needs beyond the six required methods.
+
+    - *`Enumerate` is a walk, and it is scoped by construction.* There is no flat
+      mode and no account-wide listing to fall back to, so M7c's descent is the
+      only shape; the parking machinery M7b's flat path needs does not apply, the
+      same way it does not apply to the scoped Drive descent. Cheap enough that
+      `-sweep-interval` can sensibly be minutes rather than a day.
+    - *`ChangeSource` via inotify/kqueue is available and is a trap worth taking
+      slowly.* A recursive watch would make the inbound path immediate instead of
+      polled, and the overflow case maps onto the seam perfectly:
+      `IN_Q_OVERFLOW` means "the changes are gone, re-enumerate", which is
+      `provider.ErrCursorExpired` and already recovers through a sweep. What makes
+      it a trap is that inotify is per-directory (one watch per subdirectory, a
+      per-user limit, and a race between opening the watch and reading the
+      directory), that it does not work at all over an NFS or SMB mountpoint — the
+      kernel sees only *this* client's writes, which are precisely the echoes §4
+      exists to discard — and that a cursor for a watch is not persistable, so a
+      restart must sweep. **Recommendation:** ship polled first, with `ChangeSource`
+      omitted; add the watch as a latency accelerator for the genuinely-local case
+      only, and never let a mount that watched a network mountpoint believe it
+      saw everything.
+    - *`ContentHasher` is exact here and the algorithm is ours to pick*, which makes
+      `localfs` the one backend in the group that gets **both** M6 gates — and
+      therefore the reference implementation for the range-write path M11 and M18
+      also want. It is not *free*, though: the digest `Stat` reports has to come
+      from reading the remote file, so a sweep that hashed everything would be a
+      full pass over the store. Key a digest cache on (size, mtime) and treat a
+      miss as "no digest", which declines gate 3 rather than guessing — the same
+      fail-towards-the-slow-answer shape every optional interface in §2.5 has.
+
+    Its second use is as the seam's honest end-to-end test. The suite currently
+    proves the provider contract against a fake, which shares its author's
+    assumptions with the code under test; a real store that hits a real filesystem
+    is the cheapest way to find the places where those assumptions differ, and it
+    runs everywhere with no credentials and no network. That is a reason to build
+    it early even if nobody mounts a share with it.
+
+20. **M18 — SFTP.** ✅ **Shipped (2026-09-10.)** The strongest of the four, and the one to build first. One
+    dependency pair that is already in wide use (`github.com/pkg/sftp` over
+    `golang.org/x/crypto/ssh`, both pure Go, no cgo, so §2.9's cross-compile proof
+    survives), a protocol whose operations map onto `Store` almost one-to-one, and
+    an audience — anything with an SSH account — that needs no server-side software
+    at all.
+
+    - *`RangePutter` is native and this is the milestone's headline.* SSH_FXP_WRITE
+      takes an offset; the seam's contract ("replaces the named extents in place,
+      may neither create nor resize") is satisfied because the engine already
+      checks the object exists at exactly `size` first. M6 gate 2 has been written,
+      tested against a fake and never once exercised against a real server; this is
+      where that changes.
+    - *Gate 3 has no honest implementation and should not be faked.* A
+      server-computed digest needs the `check-file` extension from the filexfer
+      draft, which OpenSSH's server does not implement; a handful of others
+      (ProFTPD's `mod_sftp`, some commercial servers) do. So `Stat` carries a
+      digest only when the connection advertised the extension, and `ContentHasher`
+      is capability-detected per connection rather than per provider — the first
+      place in the tree where an optional interface's availability is a property of
+      the *session*. Absent it, gate 3 declines and every content push is a full
+      upload, which given gate 2 is usually the smaller cost.
+    - *`Move` is `posix-rename@openssh.com` where offered and SSH_FXP_RENAME
+      otherwise*, the difference being whether it clobbers an existing destination
+      atomically. Take the extension when advertised.
+    - *Host key verification fails closed or the milestone is worthless.*
+      `ssh.InsecureIgnoreHostKey` must not appear in the tree, not even behind a
+      flag with a scary name: a mount that comes up at boot from `/etc/fstab` (M16)
+      has nobody to answer a trust-on-first-use prompt, so the key must be in
+      `known_hosts` or the mount must refuse to open. Same class of decision as
+      `mount` being non-interactive, and the same answer. Agent, key file and
+      certificate auth are all reasonable; a password in a config file is not, and
+      the option should not exist.
+    - *Connection management is the unglamorous risk.* One TCP connection carries
+      one SSH transport carries N channels, `-upload-workers` fan-out shares it,
+      and a dropped connection has to be re-established underneath in-flight
+      operations without the engine seeing anything but a retryable error.
+      `pkg/sftp`'s per-file concurrent-request window is what turns a single
+      transfer from latency-bound into bandwidth-bound; the default is
+      conservative.
+
+    **What building it changed, and one thing it could not deliver.**
+
+    - *The group's central claim needed a seam change before any of it could be
+      true.* "No change feed means the sweep IS the inbound path" was written here
+      as though it followed from M7b, and it did not: `app.Mount` constructed the
+      `Downloader` only for a store implementing `provider.ChangeSource`, so a
+      store that could enumerate but not tail got no downloader at all — no sweep,
+      no reconcile, silently upload-only. The fix is small and belongs to the
+      group rather than to SFTP: `src` may now be nil, `Downloader.Run` branches
+      once at the top into a sweep-only loop, and `app` wires a downloader for
+      `ChangeSource` **or** `Enumerator`. Two guards make it safe. `beginSweep`
+      takes no start token when there is no feed, and `runSweep` must **not**
+      persist the empty one — `state.Cursor` would then report `ok=true`, which
+      `startFeed` reads as "we are already tailing this remote" and would skip the
+      startup sweep on every mount after the first, i.e. skip the whole inbound
+      path. Every backend M19–M21 inherits this; none of them needs to rediscover
+      it.
+    - *Gate 3 has no implementation, and the reason is the library rather than the
+      protocol.* The reasoning above stands — OpenSSH's server does not implement
+      `check-file` — but `github.com/pkg/sftp` also exposes no way to *send* an
+      arbitrary extended request, so the extension is unreachable even against a
+      server that offers it. `sftp` therefore does not implement
+      `provider.ContentHasher` at all, rather than implementing it conditionally.
+      That costs nothing: `syncengine.contentMatches` short-circuits on an empty
+      `RemoteFile.Hash` before it reads a local byte, so the absence is free and
+      not merely safe. The per-session shape described above is still the right
+      one if the capability ever becomes reachable — a wrapper type chosen at dial
+      time, never a method added to the store.
+    - *With no digest, `Version` carries the echo identity alone*, as mtime and
+      size — the rsync heuristic, with the rsync caveat. SFTP reports mtime in
+      whole seconds, so a remote edit that preserves a file's exact length and
+      lands in the same second as our own last write is indistinguishable from our
+      echo and is not pulled until something else touches the file. The
+      alternatives are worse (size alone misses far more; hashing means
+      downloading every file on every sweep), so it is documented in
+      `docs/user/sftp.md` rather than mitigated.
+    - *`Put` writes to a temporary name in the destination directory and renames
+      it into place.* Not in the plan, and it should have been: the whole-file
+      `Put` is the fallback behind every M6 gate, so it runs constantly, and an
+      interrupted one writing in place leaves the remote truncated — which, with
+      gate 3 declining, nothing downstream would ever notice. The rename uses
+      `posix-rename@openssh.com` where the session advertises it and
+      remove-then-rename otherwise; the sweep skips the `.drivel-upload.*` prefix
+      so a temporary stranded by a dropped connection is never materialised
+      locally and never inferred as a deletion.
+    - *`Remove` has no recoverable form.* This is where the question first came
+      up and it was settled for the whole group rather than for SFTP — see the
+      preamble's deletion bullet. `-max-deletes` is the only guard, and the user
+      page says so in those words.
+    - *Enumeration is a breadth-first descent with the frontier as its cursor*,
+      not a flat listing, because SFTP has no recursive list. That makes it
+      parent-first by construction, so the flat path's parking machinery (gdrive's
+      "park a child on an unseen parent") has no counterpart here — the same
+      conclusion M7c reached for scoped mode, arrived at from the protocol rather
+      than from cost. A directory that vanished mid-sweep is skipped; **every
+      other listing failure abandons the sweep**, because a sweep that quietly
+      omits a subtree still reports itself complete and M7b's delete pass would
+      then propose deleting everything under it.
+    - *Containment is structural.* `path.Join(root, p)` resolves a leading `..` by
+      climbing *out* of the root; cleaning against a virtual `/` first collapses
+      it instead. Nothing above the seam should produce such a path — this is
+      defence in depth, and it was a real bug caught by a test that asserted the
+      property rather than the implementation.
+    - *A hashless provider could not apply a remote deletion at all, and the live
+      run is what found it.* `reconcile.matchesBaseline` answered the question
+      "did the local copy diverge from what we last agreed with the remote?" by
+      comparing a local MD5 against `state.Echo.Hash` — which is the *remote's*
+      digest, and is empty for every backend in this group. So the answer was
+      "diverged" for every file forever, and a file deleted on the server was kept
+      locally and pushed straight back up on the same sweep: the deletion undone,
+      permanently, with the log cheerfully reporting `1 kept (locally modified
+      after a remote delete)`. `state.Echo` therefore carries `LocalSize` and
+      `LocalMTime`, a fingerprint of the **backing** file at the moment the
+      baseline was written, and `matchesBaseline` falls back to it when `Hash` is
+      empty. Three things about it are load-bearing. It fingerprints the *local*
+      file, whose mtime the kernel keeps to nanoseconds, so it is not the weak
+      second-resolution comparison the wire format forces on `Version`. A zero
+      `LocalMTime` means **not recorded** and never **matches** — an old state DB,
+      a directory, a failed stat — because the wrong answer in that direction
+      deletes a file somebody edited. And the push side records it *after* the
+      upload, not before: a write that landed mid-upload has already queued
+      another event, so the next push re-records the baseline against the newer
+      bytes, whereas a pre-push fingerprint would describe bytes that are no
+      longer on disk. Drive is unaffected — it has a digest, and takes the same
+      branch it always did.
+    - *Directories report a constant `Version` (`"dir"`).* Leaving it empty made
+      `state.Echo.Matches` answer false for every directory on every pass, so the
+      downloader re-created and re-logged each one — invisible at Drive's 24 h
+      sweep, and the entire log at a poll interval of seconds. Their mtime would
+      be no better, since it moves whenever a child is added.
+    - *Verified against OpenSSH.* Run on 2026-09-10 against `sshd` with
+      `internal-sftp`, through a real drivel mount: a pre-existing remote tree
+      materialised, a local write pushed, a remote edit pulled, rename and delete
+      propagated both ways, the diverged-copy guard held, and a 4 MiB edit to a
+      64 MiB file transferred 4 MiB and left the two byte-identical — M6 gate 2's
+      first run against a server. Still unrun: a server *without*
+      `posix-rename@openssh.com` (so `conn.rename`'s remove-then-rename fallback
+      is covered by unit tests only), and any non-OpenSSH server. Note for whoever
+      sets up a rig: an external `Subsystem sftp /usr/lib/openssh/sftp-server` is
+      run through the user's login shell, so anything that shell prints — a
+      window-title escape, in the container this was built in — corrupts the
+      stream and shows up as `packet too long`. OpenSSH's own client fails
+      identically; it is not a drivel bug. `internal-sftp` avoids the shell.
+
+21. **M19 — SMB/CIFS.** The interesting one, because it is the only backend in this
+    group with a **real change notification** — and, M11's own sequence number
+    aside, the only one anywhere on the roadmap whose feed is not a poll. That
+    makes it the chance to test the `ChangeSource` contract against a second,
+    structurally different feed.
+
+    SMB2 CHANGE_NOTIFY watches a directory handle, optionally with the
+    watch-the-whole-tree flag, and returns the changes since the last call. When
+    more happened than the response buffer can hold, the server says so instead of
+    truncating — which is `provider.ErrCursorExpired` under a different name, and
+    already recovers through the M7b sweep. Nothing about the seam has to change to
+    accommodate it, and confirming that is most of the milestone's value. Two
+    honest caveats: the cursor is a live handle rather than a persistable token, so
+    a restart sweeps; and coverage of what the *server* considers a change varies
+    between Samba, Windows and NAS firmware, so a feed here is an accelerator that
+    the sweep still backstops — which is the same posture as every other optional
+    interface in §2.5.
+
+    - *Case-insensitivity is not a server property here, it is the protocol's.*
+      Every SMB share collides `Foo.txt` with `foo.txt`, so the group preamble's
+      fifth point is unconditional for this backend and belongs in its user docs on
+      day one.
+    - *The dependency is the risk, and it should be settled before any code.* The
+      pure-Go SMB2/3 client everyone uses (`hirochachacha/go-smb2` and its forks)
+      is a small project with a thin maintenance record, it is unclear whether
+      CHANGE_NOTIFY is exposed at all, and the alternative — cgo against
+      libsmbclient — forfeits the cross-compile §2.9 treats as the proof the seams
+      hold.
+      **Check the fork situation and the notify support first**; if the answer is
+      "vendor and maintain an SMB client", this milestone is much larger than it
+      looks and `localfs` over a kernel `cifs` mount is the better trade.
+    - *Everything else is unremarkable and that is a compliment.* Write-at-offset
+      gives `RangePutter`, server-side rename gives a real `Move`, per-mount
+      credentials without root is the concrete thing a userspace client buys over
+      the kernel mount, and DFS referrals are the one place a path may not mean
+      what it says.
+
+22. **M20 — NFS. Recommended: don't, and the recommendation has a stated expiry.**
+    Of the four network filesystems this is the one where a userspace client buys
+    the least and costs the most, and the group preamble's justification argument
+    is what settles it: everything drivel adds over an NFS mount — offline
+    tolerance, lazy hydration, conflict copies — is delivered in full by `localfs`
+    (M17) over a kernel NFS mount, with no protocol code, no new dependency, and
+    Kerberos already working.
+
+    Against that, a pure-Go client has to answer three things.
+
+    - *There is no mature pure-Go NFS client.* The well-known Go projects in this
+      space are servers or partial NFSv3 clients extracted from other tools.
+      Writing NFSv3 (with MOUNT, portmap and the RPC layer under it) is a real
+      protocol implementation, and NFSv4 — the version worth targeting — is
+      substantially larger, with compound operations, state, leases and recovery.
+    - *AUTH_SYS is not authentication.* A userspace client asserts its own uid and
+      gid, which means the security of the arrangement is the server's IP
+      allow-list and `root_squash` and nothing else. The real answer is RPCSEC_GSS
+      with Kerberos, in pure Go, which is a project of its own. The kernel client
+      already has it.
+    - *And there is no feed to gain.* NFSv3 has no change notification at all;
+      NFSv4 delegations are a cache-coherence mechanism, not a change stream, and
+      directory delegations are rare in practice. So the inbound path is the sweep
+      either way — identical to what `localfs` over a kernel mount already gives.
+
+    **What would reopen it:** a maintained pure-Go NFSv4.1 client appearing, or a
+    concrete deployment where the kernel mount is unavailable (an unprivileged
+    container with no `CAP_SYS_ADMIN` and no way to get one) *and* SFTP or WebDAV
+    to the same storage is not an option. Until then the entry stays here, declined
+    with reasons, so it does not get re-proposed from scratch every year.
+
+23. **M21 — WebDAV.** The widest reach for the least code, and the natural second
+    backend after SFTP: it is what Nextcloud, ownCloud, Synology, Box, Fastmail and
+    a long tail of self-hosted storage all speak, and unlike the other three it
+    needs nothing but HTTP.
+
+    - *It composes with §2.6 for free.* The transport is already an injected
+      `*http.Client` that prefers HTTP/3 and falls back to HTTP/2; almost no WebDAV
+      server will speak h3, and the fallback is exactly the code path that
+      handles that. This is the first non-Drive user of `internal/transport`, so it
+      also proves the transport is not secretly Drive-shaped.
+    - *`Enumerate` is `PROPFIND`, and it must be the M7c descent.* `Depth: 1` is
+      universally available; `Depth: infinity` is disabled by default on the most
+      common server (Apache's `mod_dav`) and unreliable elsewhere, so a one-request
+      full listing is not a thing that exists. Per-directory descent with the M7c
+      fan-out and its throttle response is the shape, and the 97× measurement
+      behind that response is as relevant to a small Nextcloud instance as it was
+      to Drive.
+    - *This is the one backend in the group that declines `RangePutter`, like
+      Drive.* HTTP has ranged reads and no standard ranged write; the partial-`PUT`
+      mechanisms that exist (Sabre/DAV's `PATCH` extension, `X-Update-Range`) are
+      per-server and not worth branching on at first. So WebDAV gets M5 hydration
+      via `Range` requests and falls back to whole-file `Put` on every write —
+      which is what Drive does, so nothing is untrodden.
+    - *ETags are the echo identity, and there is already a precedent for using an
+      opaque one.* `getetag` is not a content hash and must not be presented as
+      one, so `ContentHasher` stays unimplemented; but `RemoteFile` carrying the
+      ETag lets §4's echo matching work exactly as it already does for Drive's
+      Google-native files, which fall back to the opaque `Version` for the same
+      reason. Servers offering a real checksum (`oc:checksums` on Nextcloud) can
+      light up gate 3 as a per-server capability, the same conditional shape M18
+      needs for `check-file`.
+    - *Two fail-closed rules.* Basic auth over plain `http://` is refused at open,
+      not warned about — the credential is the account. And a server that answers
+      `PROPFIND` on the mount root with an empty collection must be an **error**,
+      never an empty sweep, for the reason M7b row 4 already gives: an empty
+      enumeration makes every synced path look deleted.
+
+24. **M22 — Google Photos. Recommended: not as a `provider.Store`, and the reason
+    is the API rather than the effort.** This one is not a filesystem wearing a
+    protocol, it is a media database with a search endpoint, and three of the six
+    required methods have no implementation at all.
+
+    - *`Remove` does not exist.* The Library API can remove an item from an album
+      **the app itself created**; it cannot delete from the user's library. So the
+      provider would silently fail to propagate every local `rm`, which the M7b
+      sweep would then read as a remote file with no local copy and re-materialise.
+      A delete that comes back is worse than a delete that is refused.
+    - *`Put` cannot replace.* Every upload creates a *new* media item; there is no
+      update-content-in-place. `Put` is specified as create-or-replace, so a second
+      write to the same path produces a duplicate rather than a new version — and
+      the echo record then names an item the next write will not touch.
+    - *`Move` has nothing to move.* There is no path. Filenames are neither unique
+      nor stable, an item may belong to many albums or to none, and albums are not
+      a tree — so any path space drivel presents is *synthesized* (`2026/09/…`), by
+      us, from metadata that can change under us. A path-addressed seam over an
+      identity-addressed store with no stable name is the M7 index problem with no
+      source of truth to verify against.
+    - *And the bytes are not the bytes.* Downloads go through a `baseUrl` that
+      expires in about an hour and, without the explicit original-quality suffix,
+      hands back a re-render with EXIF and location stripped. There is no ranged
+      write of any kind, so M6 never fires; ranged reads are whatever the CDN
+      happens to honour on a URL that can expire mid-transfer, which is not a
+      capability to build `RangeGetter` on.
+
+    On top of all of that, **the scopes needed to see a user's existing library
+    were removed on 2025-03-31** — since then an app reads only the media it
+    itself created, plus whatever the user hands it through the Picker, which is a
+    browser component `drivel login`'s loopback-and-paste flow has no surface to
+    host. That is the same structural blocker as `drive.file` in M7c, and it means
+    the obvious product ("mount my photos") is not merely slow or lossy but
+    *impossible*. **Verify this before scheduling anything here** — it is the fact
+    the whole entry turns on and Google's terms move.
+
+    **What is actually buildable, if someone wants it:** a one-way *backup target*
+    — drivel uploads into an album it owns, never reads the library back, never
+    deletes, and the local tree stays the only source of truth. That is not a
+    `provider.Store` and should not pretend to be one; the seam has no read-only or
+    append-only store concept, and inventing one to accommodate a backend that
+    cannot delete would weaken a contract five other providers rely on. It is a
+    separate tool that happens to share this repo's OAuth code, and it should be
+    scoped that way or not at all.
 
 
 ### M0 — Test & CI (cross-cutting, always open)

@@ -12,7 +12,7 @@ With no flags at all, `drivel mount` reads
 ## The config file
 
 An **account** is a set of credentials: a provider kind plus that provider's
-settings. A **mount** references an account and says what to mount from it. Their
+settings. Two kinds ship: `gdrive` and [`sftp`](sftp.md). A **mount** references an account and says what to mount from it. Their
 provider settings merge, with the mount's winning, so one account can be mounted
 several times with different roots.
 
@@ -66,7 +66,7 @@ Every key mirrors a flag. Both are listed together below; `drivel mount -h` and
 | `-resync` | `resync` | off | Force a full enumeration and reconcile at startup. |
 | `-materialize` | `materialize` | off | In eager mode, download remote files that have no local copy. Implied by `-lazy`, where it costs only a placeholder. |
 | `-max-deletes N` | `max-deletes` | `100` | Cap on deletions one reconcile may infer, in either direction. `0` is unlimited. See [Data safety](data-safety.md#deletion). |
-| `-sweep-interval D` | `sweep-interval` | `24h` | How often to re-enumerate. `0` disables it. |
+| `-sweep-interval D` | `sweep-interval` | `24h` | How often to re-enumerate. `0` disables it. On a backend with no change feed — [SFTP](sftp.md#how-changes-reach-you) — this is the *poll interval*, and the default is far too slow. |
 | `-upload-workers N` | `upload-workers` | `4` | How many files this mount uploads at once. See [Transfer concurrency](#transfer-concurrency). |
 | `-hydrate-workers N` | `hydrate-workers` | `8` | How many placeholders this mount fetches at once under `-lazy`. See [Transfer concurrency](#transfer-concurrency). |
 | `-debug` | `debug` | off | FUSE-level tracing. Very verbose. |
@@ -171,6 +171,17 @@ The setting applies to every removal this mount makes — the ones you type and 
 ones a sweep infers alike. It does not affect deletions made *to* you: a file
 another client removes is deleted from your backing directory whichever mode you
 run.
+
+## SFTP options
+
+An account with `provider = "sftp"` takes a different set of keys — `host`,
+`user`, `key`, `root` and a few more. They are listed on the
+**[SFTP page](sftp.md#options)**, together with the two things that differ most
+from Drive and will bite otherwise: `sweep-interval` is the *poll interval* on a
+backend with no change feed, and a removal has no trash to be recovered from.
+
+There are no `-sftp-*` flags. The mount flags are Drive-shaped by history, so an
+SFTP mount is configured through the file.
 
 ## Login options
 

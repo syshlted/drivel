@@ -38,24 +38,28 @@ and captures the result — either automatically, via a loopback server on port
 credentials and a token under `~/.config/drivel/personal/`, and appends an
 `[account.personal]` block to `~/.config/drivel/config.toml`.
 
-It also prints a `[[mount]]` block to go with it. Add it to the config file:
+It also prints a `[[mount]]` block to go with it. Add that to the config file:
 
 ```toml
 [[mount]]
 account = "personal"
-path    = "~/drive"                       # where the folder appears
+path    = "~/drive-personal"              # where the folder appears
 data    = "~/.cache/drivel/personal"      # where the files really live
+
+[mount.provider]
+root = "root"                             # "root" is the whole of My Drive
 ```
 
-Then:
+`path` and `data` are yours to change — the printed block just names them after
+the account. Then:
 
 ```sh
-mkdir -p ~/drive ~/.cache/drivel/personal
+mkdir -p ~/drive-personal ~/.cache/drivel/personal
 drivel mount
 ```
 
-`~/drive` is now your Drive. Edit files with anything; changes upload in the
-background, and changes made elsewhere appear within seconds. Ctrl-C unmounts.
+`~/drive-personal` is now your Drive. Edit files with anything; changes upload in
+the background, and changes made elsewhere appear within seconds. Ctrl-C unmounts.
 
 ## Without a config file
 

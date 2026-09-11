@@ -286,8 +286,14 @@ func Open(ctx context.Context, spec MountSpec, reg *provider.Registry) (*Mount, 
 		Workers: spec.UploadWorkers,
 	})
 
-	// Inbound pull loop (M3), only if the store offers a change feed.
-	if src, isSrc := m.store.(provider.ChangeSource); isSrc {
+	// Inbound sync. A change feed (M3) is one way in and the M7b sweep is the
+	// other, and a store needs only one of them: Drive has both, while every
+	// filesystem backend in the M17–M21 group has only the sweep, which is then
+	// the whole inbound path rather than a backstop under a feed. src stays nil in
+	// that case and the downloader runs sweep-only.
+	src, _ := m.store.(provider.ChangeSource)
+	_, canEnum := m.store.(provider.Enumerator)
+	if src != nil || canEnum {
 		dl := syncengine.NewDownloader(src, m.store, backing.Path, m.state, syncengine.DefaultCadence)
 		if m.hyd != nil {
 			dl = dl.Lazy(m.hyd)
@@ -327,7 +333,18 @@ func (m *Mount) Run(ctx context.Context) error {
 	}()
 
 	if m.down != nil {
-		m.logf("inbound sync enabled (changes.list pull loop)")
+		// Which of the two inbound paths this mount actually has, in its own terms.
+		// "changes.list pull loop" was Drive's name for it and was printed for every
+		// provider, including one that has no feed at all — where the sweep interval
+		// IS the inbound latency and is the number the operator needs to see.
+		switch _, hasFeed := m.store.(provider.ChangeSource); {
+		case hasFeed:
+			m.logf("inbound sync enabled (change-feed poll loop)")
+		case m.spec.SweepInterval > 0:
+			m.logf("inbound sync enabled (no change feed on this provider: enumerating every %s)", m.spec.SweepInterval)
+		default:
+			m.logf("inbound sync: one enumeration at startup only (no change feed on this provider, and sweep-interval is 0)")
+		}
 		go m.down.Run(ctx)
 	}
 

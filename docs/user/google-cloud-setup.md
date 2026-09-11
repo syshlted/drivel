@@ -164,6 +164,17 @@ things](install.md#where-drivel-keeps-things) has the full list of paths.
 If a secret leaks, delete the OAuth client in the Cloud Console — that
 invalidates every token minted from it immediately — and create a new one.
 
-Drivel bundles no application secrets and collects no analytics or telemetry. All
-Drive traffic is directly between your machine and Google, under the app identity
-you just created.
+Drivel bundles no application secrets. The OAuth client you just created is the
+only one it has.
+
+## What Google sees
+
+Drivel syncs through the OAuth client you created, so your file contents and
+their metadata reach Google Drive the way any Drive client's would. What Google
+does with them — including anything it counts, logs or reports on — is governed
+by Google's terms and by the settings of the Cloud project you own, and is not
+something this project has any say in or can speak for.
+
+That is why it is written down here rather than in Drivel's general
+documentation: it is a property of the backend you chose, so it belongs on the
+backend's page. Each provider gets its own.

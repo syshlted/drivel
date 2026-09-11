@@ -7,15 +7,41 @@ briefly at the end.
 The whole point of the `internal/provider` seam is that the sync engine, FS layer,
 and CLI don't change when you add a provider — you write one package.
 
-A backend does not have to be a cloud. [DESIGN.md §9](../../DESIGN.md) sketches three
-that are not: a deduplicating local store (M11), an encrypting layer (M12) and a
-block-level filesystem over a distributed database (M13). Two notes for anyone
-starting one. A local store fits this interface as it stands — it is the optional
-interfaces below (an exact `ChangeSource`, a real `RangePutter`) that make it
-interesting. A *decorator* that wraps another provider does not: it would need to
-open its inner store through the registry, and `provider.Params` carries no way to
-do that yet. That hook is M12's one new piece of framework, so if you need it, it
-is a design discussion before it is a patch.
+A backend does not have to be a cloud. [DESIGN.md §9](../../DESIGN.md) sketches
+several that are not: a deduplicating local store (M11), an encrypting layer (M12),
+a block-level filesystem over a distributed database (M13), and a group of
+filesystem backends — a plain directory, SFTP, SMB/CIFS, NFS and WebDAV (M17–M21),
+written as one design because they share almost everything. Four notes for anyone
+starting one.
+
+A local store fits this interface as it stands — it is the optional interfaces
+below (an exact `ChangeSource`, a real `RangePutter`) that make it interesting.
+
+A *decorator* that wraps another provider does not: it would need to open its inner
+store through the registry, and `provider.Params` carries no way to do that yet.
+That hook is M12's one new piece of framework, so if you need it, it is a design
+discussion before it is a patch.
+
+If your backend is already path-addressed — which every filesystem is — you need
+none of the machinery `gdrive` carries for path↔ID translation.
+`internal/pathindex` and the three-source resolution it feeds exist because Drive
+is ID-addressed; a path index over a path-addressed store is a cache keyed by its
+own value. Cache metadata if you must cache something, and that is `Stat`.
+
+If your backend has no change feed, say so by omitting `ChangeSource` — do not
+synthesize one by diffing listings. The M7b enumeration sweep already is that,
+correctly, with the delete guards and the baseline rules that make an inferred
+deletion safe. What changes is the *cadence*: with no feed the sweep is the only
+inbound path, so `-sweep-interval` is a poll interval rather than a safety net and
+your documentation should say what a sensible value is for your backend. Its 24 h
+default is tuned for a backend that also has a feed.
+
+And if your provider's configuration names a **local** path (a directory to sync
+into, a mounted share), raise it before you write it: `app.Validate`'s overlap
+guards only know about paths belonging to *mounts*, so nothing today stops a
+provider directory from being pointed at a mount's backing tree or mountpoint.
+That is a seam change (`provider.Params` needs a way to declare the paths a
+provider will touch), not something to work around inside one provider.
 
 ## 1. Implement `provider.Store`
 
@@ -52,6 +78,14 @@ Rules the engine relies on:
   deletion the engine performs was typed by a user — `syncengine/reconcile.go`
   *infers* them from a baseline — and this is the one operation with no fallback
   above your package. `gdrive`'s `DeleteMode` is the worked example.
+
+  **Take the recoverable form your backend already has; do not build one.** If it
+  has none, delete outright and say so in your documentation — `-max-deletes` is
+  then the only guard, which users are entitled to know. A trash you emulate
+  inside the synced tree is broken by construction (the sweep enumerates it and
+  restores everything), and one outside it is a second store with its own quota
+  and garbage collection, added under the one call that has no fallback. `sftp` is
+  the worked example of the honest version.
 - **Concurrency-safe.** The uploader and downloader call your `Store` from
   different goroutines. Guard shared state.
 
@@ -88,11 +122,21 @@ type ChangeSource interface {
 }
 ```
 
-The CLI enables the pull loop only for stores that also satisfy this interface
-(`store.(provider.ChangeSource)`). Providers without a cursor feed (S3, WebDAV)
-simply omit it and run **outbound-only** — that's a supported configuration, not a
-degraded one. Do **not** fake a change feed by polling-and-diffing; leave it
-unimplemented and let the engine skip inbound.
+Providers without a cursor feed (S3, WebDAV, SFTP) simply omit it. That is a
+supported configuration, not a degraded one, and it does **not** mean
+outbound-only: a store that implements `Enumerator` but not `ChangeSource` gets a
+downloader all the same, running sweep-only, and the M7b sweep is then the whole
+inbound path. `-sweep-interval` stops being a long-period safety net and becomes
+the poll interval — say what a sensible value is for your backend, because the
+24 h default is tuned for one that also has a feed.
+
+Do **not** fake a change feed by polling-and-diffing. The sweep already is that,
+correctly: it infers a deletion only from a baseline that predates the sweep, it
+keeps and pushes back a local copy that diverged, and `-max-deletes` abandons a
+whole pass rather than trimming one it cannot justify. A hand-rolled differ
+reproduces those guards or, far more likely, quietly does not.
+
+A store with neither interface really is outbound-only, and gets no downloader.
 
 If you implement `ChangeSource` and expect anyone to run your provider with
 `-lazy`, note that lazy hydration turns each inbound change into a *placeholder*
@@ -202,7 +246,9 @@ coverage.
 - [ ] `Put`/`Mkdir` create ancestors; `Move` handles missing source via
       `ErrNotExist`.
 - [ ] Transient errors are wrapped `Retryable() bool`; context cancellation isn't.
-- [ ] `ChangeSource` implemented **iff** the provider has a native cursor feed.
+- [ ] `ChangeSource` implemented **iff** the provider has a native cursor feed;
+      `Enumerator` implemented if the tree can be listed, which is what gives a
+      feedless provider any inbound sync at all.
 - [ ] `RangeGetter` implemented **iff** the provider serves real byte ranges.
 - [ ] Store is safe for concurrent use.
 - [ ] A `Factory` registered in `cmd/drivel/mount.go`; nothing else changed.

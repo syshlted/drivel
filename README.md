@@ -1,18 +1,22 @@
 # Drivel
 
-**Your Drive, as a folder. Nothing phones home.**
+**Your remote storage, as an ordinary folder.**
 
-Drivel turns a Google Drive folder into an ordinary directory on your machine.
-Open, edit and save files with the tools you already use — Drivel proxies every
-operation to a real local directory and syncs it with Drive in the background, in
-both directions. Reads and lookups never touch the network, so your file manager
-never spins waiting on the cloud.
+Drivel turns a folder on a storage provider into an ordinary directory on
+your machine. Open, edit and save files with the tools you already use — Drivel
+proxies every operation to a real local directory and syncs it with the provider
+in the background, in both directions. Reads and lookups never touch the network,
+so your file manager never spins waiting on the cloud.
 
-It is a **client you run yourself**. There is no Drivel service, no shared
-application identity, and no analytics or telemetry — nothing phones home. You
-create your own Google Cloud OAuth credentials, so every byte of Drive traffic
-goes directly between your machine and Google under an app identity you own and
-can revoke.
+The provider sits behind a small path-addressed interface, and everything
+peculiar to one lives behind its own prefix or its own config table. **Two
+backends ship today**: **Google Drive**, and **[SFTP](docs/user/sftp.md)** — any
+machine you have an SSH account on, with nothing to install at the other end.
+
+It is a **client you run yourself**: there is no Drivel service, and it ships no
+credentials of its own. You supply the ones for whatever backend you point it at,
+so Drivel reaches your storage under an identity that is yours to inspect and
+revoke.
 
 Free software under the [GNU AGPLv3](#license).
 
@@ -34,21 +38,25 @@ drivel mount -mount ./mnt -data ./data \
 ```
 
 Omit `-credentials` and Drivel runs log-only: it mounts and prints what it *would*
-sync, without contacting Google.
+sync, without contacting the provider.
+
+Syncing to a server you can `ssh` to needs no login step and no credentials of its
+own — it is your existing SSH key. See **[SFTP](docs/user/sftp.md)**.
 
 On Linux a mount can also be an `/etc/fstab` line, brought up by `mount -a` or at
 boot with no terminal attached — see **[mounting from
 /etc/fstab](docs/user/fstab.md)**.
 
 Full walkthrough: **[docs/user/quickstart.md](docs/user/quickstart.md)**. You will
-need [your own Google API credentials](docs/user/google-cloud-setup.md) — free,
-about five minutes.
+need credentials for your provider — for Google Drive, [your own Google API
+credentials](docs/user/google-cloud-setup.md), free and about five minutes.
 
 ## Documentation
 
 **[Using Drivel](docs/user/)** — [quickstart](docs/user/quickstart.md) ·
 [installing](docs/user/install.md) ·
 [Google credentials](docs/user/google-cloud-setup.md) ·
+[SFTP](docs/user/sftp.md) ·
 [configuration](docs/user/configuration.md) ·
 [lazy mode](docs/user/lazy-mode.md) ·
 [data safety](docs/user/data-safety.md) ·
@@ -73,11 +81,12 @@ Release history is in [CHANGELOG.md](CHANGELOG.md). Contributions:
 
 ## What it does
 
-- **Bidirectional background sync** with Google Drive — edit locally or in the
-  cloud; both converge.
+- **Bidirectional background sync** — edit locally or in the cloud; both
+  converge.
 - **Instant filesystem operations** — nothing blocks on the network, ever.
-- **Lazy mode** ([`-lazy`](docs/user/lazy-mode.md)) — a whole Drive visible as
-  placeholders, content fetched on first read. A directory listing costs nothing.
+- **Lazy mode** ([`-lazy`](docs/user/lazy-mode.md)) — a whole remote tree visible
+  as placeholders, content fetched on first read. A directory listing costs
+  nothing.
 - **Smart uploads** — an unchanged rebuild or an editor rewriting an identical
   buffer sends nothing; large files upload in resumable chunks.
 - **Conflict-safe** — concurrent edits produce a
@@ -90,8 +99,10 @@ Release history is in [CHANGELOG.md](CHANGELOG.md). Contributions:
 - **Several accounts at once** — N mounts in one process, each with its own
   credentials and state, validated against each other before any of them opens.
 - **HTTP/3** (QUIC) transport with automatic HTTP/2 fallback.
-- **Bring your own credentials** — no shared app identity, no hosted service, no
-  telemetry.
+- **Pluggable backends** — the cloud side is a narrow path-addressed interface
+  rather than a Drive-shaped one. Google Drive is the provider that ships today.
+- **Bring your own credentials** — Drivel ships none of its own; you supply the
+  credentials for the backend you point it at.
 
 ## Platform support
 
@@ -134,6 +145,6 @@ redistribute it, but derivative works — **including software you offer to othe
 over a network** — must be made available under the same license. There is no CLA
 and no separate proprietary edition.
 
-Drivel bundles no application secrets and collects **no analytics or telemetry**.
-The Google API credentials you supply are yours; how you use Google Drive through
-them is governed by Google's own terms, not by this project.
+Drivel bundles no application secrets. The provider credentials you supply are
+yours; how you use a storage provider through them is governed by that provider's
+own terms, not by this project.
