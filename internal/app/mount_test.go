@@ -13,9 +13,9 @@ import (
 	"time"
 
 	"github.com/zishmusic/drivel/internal/hydrate"
-	"github.com/zishmusic/drivel/internal/provider"
 	"github.com/zishmusic/drivel/internal/syncengine"
 	"github.com/zishmusic/drivel/internal/testenv"
+	"github.com/zishmusic/drivel/provider"
 )
 
 // fakeStore is a provider.Store that keeps everything in memory and records what

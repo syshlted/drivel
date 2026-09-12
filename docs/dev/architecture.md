@@ -24,9 +24,10 @@ flowchart LR
         hydrate["Hydrator (M5, opt-in)<br/>internal/hydrate<br/>placeholders + fault-in"]
         transport["Transport<br/>internal/transport<br/>HTTP/3 → HTTP/2"]
         index[("Path index (M7)<br/>internal/pathindex (bbolt)<br/>path ↔ fileID — a cache")]
+        proxy["Plugin client (M9)<br/>plugin — gRPC over a unix socket"]
     end
 
-    subgraph cloud["Provider (one per mount)"]
+    subgraph cloud["Backend process (one per mount, M9)"]
         drive["internal/provider/gdrive<br/>Store + ChangeSource"]
         sftp["internal/provider/sftp<br/>Store + Enumerator<br/>no change feed"]
     end
@@ -37,18 +38,19 @@ flowchart LR
     fuse -->|"fsevent.Event per mutation<br/>(buffered channel)"| engine
     fuse -.->|"first read of a placeholder"| hydrate
 
-    engine -->|"Put / Mkdir / Move / Remove"| drive
+    engine -->|"Put / Mkdir / Move / Remove"| proxy
+    proxy -->|"gRPC"| drive
+    proxy -->|"gRPC"| sftp
     engine -->|"record echo"| state
     engine -.->|"is this a placeholder?<br/>(skip if yes)"| hydrate
 
-    downloader -->|"changes.list cursor poll<br/>+ files.list sweep (M7b)"| drive
-    downloader -->|"sweep only — no feed to poll<br/>(-sweep-interval is the poll interval)"| sftp
-    engine -->|"Put / PutRange / Move / Remove"| sftp
+    downloader -->|"changes.list cursor poll<br/>+ files.list sweep (M7b)"| proxy
+    engine -->|"Put / PutRange / Move / Remove"| proxy
     downloader -->|"apply remote edits"| backing
     downloader <-->|"cursor + echo check (§4)"| state
     downloader -.->|"write placeholder<br/>instead of content"| hydrate
 
-    hydrate -->|"fetch content on demand"| drive
+    hydrate -->|"fetch content on demand"| proxy
     hydrate -->|"fill in place · xattr mark"| backing
 
     drive <-->|QUIC / TCP| transport
@@ -59,6 +61,13 @@ flowchart LR
 ```
 
 Dotted edges are the M5 lazy-hydration path, active only under `-lazy`.
+
+The `cloud` box is a **separate process** since M9 (DESIGN.md §2.10). Everything to
+its left holds a `provider.Store` and does not know that; everything inside it is a
+plain Go implementation of that interface and does not know it is being called over
+a socket. Which of `drive` and `sftp` is behind the proxy — and which optional
+capabilities it offers, so whether the downloader polls a feed at all — is settled
+once, at launch.
 
 Key points, mapped to DESIGN.md:
 
@@ -112,7 +121,7 @@ flowchart TD
 
     subgraph seams["Seams (interfaces)"]
         mount["internal/mount<br/>Backend · ResolveBacking"]
-        provider["internal/provider<br/>Store · ChangeSource<br/>RangeGetter · RangePutter<br/>Registry · Factory"]
+        provider["provider (public)<br/>Store · ChangeSource<br/>RangeGetter · RangePutter<br/>Registry · Capabilities"]
         fsevent["internal/fsevent<br/>Event · Op"]
     end
 
@@ -120,9 +129,13 @@ flowchart TD
     syncengine["internal/syncengine<br/>Engine + Downloader"]
     state["internal/state<br/>bbolt cursor + echo store"]
     hydrate["internal/hydrate<br/>placeholders · fault-in"]
-    rangespkg["internal/ranges<br/>extent bitmap (present + dirty)"]
+    rangespkg["ranges (public)<br/>extent bitmap (present + dirty)"]
+    pluginpkg["plugin (public)<br/>Loader · proxy · Serve"]
     gdrive["internal/provider/gdrive<br/>Drive impl"]
+    gdconf["…/gdrive/gdconf<br/>Config + enums (leaf)"]
     sftppkg["internal/provider/sftp<br/>SFTP impl"]
+    gdrivecmd["cmd/drivel-provider-gdrive"]
+    sftpcmd["cmd/drivel-provider-sftp"]
     pathindex["internal/pathindex<br/>bbolt path↔ID cache"]
     gauth["internal/gauth<br/>OAuth login + token I/O"]
     transport["internal/transport<br/>HTTP/3 → HTTP/2"]
@@ -130,10 +143,19 @@ flowchart TD
     main --> app
     main --> config
     main --> provider
-    main --> gdrive
-    main --> sftppkg
+    main --> pluginpkg
+    main --> gdconf
     main --> syncengine
     main --> gauth
+
+    pluginpkg --> provider
+    pluginpkg --> rangespkg
+
+    gdrivecmd --> pluginpkg
+    gdrivecmd --> gdrive
+    sftpcmd --> pluginpkg
+    sftpcmd --> sftppkg
+    gdrive --> gdconf
 
     config --> app
     config --> syncengine
@@ -174,6 +196,8 @@ flowchart TD
 
     classDef seam fill:#fef7e0,stroke:#f9ab00;
     class mount,provider,fsevent seam;
+    classDef proc fill:#e8f0fe,stroke:#1a73e8;
+    class gdrivecmd,sftpcmd,gdrive,sftppkg,pathindex,transport,gauth proc;
 ```
 
 What the graph enforces:
@@ -183,6 +207,16 @@ What the graph enforces:
   `provider.Store`, not touching `syncengine`.
 - **`gdrive` is the only package that knows about Drive**, and it is the only one
   that imports `transport` and `gauth`.
+- **The blue boxes are not in the `drivel` binary.** Since M9 a backend is a
+  separate executable (`cmd/drivel-provider-*`), so the Drive SDK, the QUIC
+  transport, OAuth, the path index and the SSH stack are all linked into the
+  plugin that needs them and into nothing else. `cmd/drivel` imports `plugin`,
+  which knows how to launch one, and `gdconf`, which is the leaf holding the
+  Drive settings table the `-drive-*` flags build — vocabulary without the SDK.
+- **`provider`, `ranges` and `plugin` are public packages**, outside `internal/`,
+  because an out-of-tree backend has to import all three: the interfaces it
+  implements, the extent type `RangePutter` names, and the `Serve` its `main`
+  calls.
 - **`vfs` implements `mount.Backend`** and speaks `fsevent`, but knows nothing
   about providers or sync — a mutation just becomes an event.
 - **`internal/app` is the composition root**, and `cmd/drivel` is only the flag

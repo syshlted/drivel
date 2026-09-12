@@ -1,7 +1,6 @@
 package config
 
 import (
-	"bytes"
 	"fmt"
 	"path/filepath"
 	"sort"
@@ -13,6 +12,7 @@ import (
 	"github.com/zishmusic/drivel/internal/app"
 	"github.com/zishmusic/drivel/internal/hydrate"
 	"github.com/zishmusic/drivel/internal/syncengine"
+	"github.com/zishmusic/drivel/provider"
 )
 
 // Config is a parsed config file, not yet resolved into mounts.
@@ -301,7 +301,11 @@ func (c *Config) spec(m mountEntry) (app.MountSpec, error) {
 	if err := c.expandSettings(settings); err != nil {
 		return spec, err
 	}
-	spec.ProviderConfig = tomlDecoder(settings)
+	cfg, err := encodeSettings(settings)
+	if err != nil {
+		return spec, err
+	}
+	spec.ProviderConfig = cfg
 
 	state := m.state
 	if state == "" {
@@ -355,30 +359,19 @@ func (c *Config) expandSettings(settings map[string]any) error {
 	return nil
 }
 
-// tomlDecoder turns a settings table back into the provider.Factory decode
-// contract. Re-encoding and decoding is what lets a provider keep one plain
-// struct with toml tags — the alternative is a reflective map-to-struct walk
-// here, which would be this package's own half-implementation of the decoder it
-// already depends on.
-func tomlDecoder(settings map[string]any) func(any) error {
-	return func(dst any) error {
-		var buf bytes.Buffer
-		if err := toml.NewEncoder(&buf).Encode(settings); err != nil {
-			return fmt.Errorf("re-encoding provider settings: %w", err)
-		}
-		md, err := toml.Decode(buf.String(), dst)
-		if err != nil {
-			return fmt.Errorf("provider settings: %w", err)
-		}
-		if u := md.Undecoded(); len(u) > 0 {
-			keys := make([]string, 0, len(u))
-			for _, k := range u {
-				keys = append(keys, k.String())
-			}
-			sort.Strings(keys)
-			return fmt.Errorf("provider settings: unknown %s: %s",
-				plural(len(keys), "key", "keys"), strings.Join(keys, ", "))
-		}
-		return nil
+// encodeSettings renders a settings table as the TOML text that crosses the
+// provider seam.
+//
+// Re-encoding is what lets a provider keep one plain struct with toml tags — the
+// alternative is a reflective map-to-struct walk here, which would be this
+// package's own half-implementation of the decoder it already depends on. Since
+// M9 the decoding happens on the far side of the seam (possibly in another
+// process), so this stops at the text and the provider reports what it made of
+// it, including which keys it did not recognise.
+func encodeSettings(settings map[string]any) (provider.Config, error) {
+	cfg, err := provider.EncodeConfig(settings)
+	if err != nil {
+		return nil, fmt.Errorf("re-encoding provider settings: %w", err)
 	}
+	return cfg, nil
 }

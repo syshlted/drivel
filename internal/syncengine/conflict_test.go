@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/zishmusic/drivel/internal/provider"
 	"github.com/zishmusic/drivel/internal/state"
+	"github.com/zishmusic/drivel/provider"
 )
 
 // setMtime stamps rel in dir with mtime t.

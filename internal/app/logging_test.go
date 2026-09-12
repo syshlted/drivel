@@ -7,7 +7,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/zishmusic/drivel/internal/provider"
+	"github.com/zishmusic/drivel/provider"
 )
 
 // safeBuffer is a bytes.Buffer that survives -race: the log package writes from

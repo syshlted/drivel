@@ -10,7 +10,7 @@ import (
 	"google.golang.org/api/googleapi"
 
 	"github.com/zishmusic/drivel/internal/pathindex"
-	"github.com/zishmusic/drivel/internal/provider"
+	"github.com/zishmusic/drivel/provider"
 )
 
 // Path↔fileID translation (DESIGN.md §2.5, §9 M7).

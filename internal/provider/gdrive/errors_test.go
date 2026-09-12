@@ -7,7 +7,7 @@ import (
 
 	"google.golang.org/api/googleapi"
 
-	"github.com/zishmusic/drivel/internal/provider"
+	"github.com/zishmusic/drivel/provider"
 )
 
 func TestClassify(t *testing.T) {

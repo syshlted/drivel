@@ -4,8 +4,11 @@ A provider is a second `provider.Store` — the common case. Adding a new **moun
 frontend** (`mount.Backend`, e.g. a Windows cgofuse binding) is rarer and covered
 briefly at the end.
 
-The whole point of the `internal/provider` seam is that the sync engine, FS layer,
-and CLI don't change when you add a provider — you write one package.
+The whole point of the `provider` seam is that the sync engine, FS layer, and CLI
+don't change when you add a provider — you write one package and a three-line
+`main`. Since M9 a backend runs in **its own process**, so it does not have to live
+in this repository at all: `provider`, `ranges` and `plugin` are public packages,
+and an out-of-tree module that imports them builds a plugin drivel will load.
 
 A backend does not have to be a cloud. [DESIGN.md §9](../../DESIGN.md) sketches
 several that are not: a deduplicating local store (M11), an encrypting layer (M12),
@@ -20,7 +23,9 @@ below (an exact `ChangeSource`, a real `RangePutter`) that make it interesting.
 A *decorator* that wraps another provider does not: it would need to open its inner
 store through the registry, and `provider.Params` carries no way to do that yet.
 That hook is M12's one new piece of framework, so if you need it, it is a design
-discussion before it is a patch.
+discussion before it is a patch. (What a decorator *does* now have is a way to
+forward its inner store's capabilities in one value — see "Declaring capabilities"
+below — which before M9 would have meant one wrapper type per subset.)
 
 If your backend is already path-addressed — which every filesystem is — you need
 none of the machinery `gdrive` carries for path↔ID translation.
@@ -45,8 +50,9 @@ provider will touch), not something to work around inside one provider.
 
 ## 1. Implement `provider.Store`
 
-Create `internal/provider/<name>/` and implement the required interface from
-[internal/provider/provider.go](../../internal/provider/provider.go):
+Create a package — `internal/provider/<name>/` in this repository, or any package
+in your own module — and implement the required interface from
+[provider/provider.go](../../provider/provider.go):
 
 ```go
 type Store interface {
@@ -198,39 +204,94 @@ not really change. Getting the encoding subtly wrong is harmless in the dangerou
 direction — hashes simply never match and every push proceeds — but you lose the
 optimisation, so it is worth a test against a real round-trip.
 
-## 4. Register it
+## 4. Ship it as a plugin
 
-Since M8 backends are selected by name through a `provider.Registry`, so wiring one
-in is a `Factory` plus one line of registration.
+Since M9 a backend is a **separate executable** that drivel launches and talks to
+over gRPC on a unix socket. Nothing about the interface changed — what changed is
+where the implementation lives — and the whole of the wiring is a `main`:
 
 ```go
-// internal/provider/<name>/factory.go
+// cmd/drivel-provider-<name>/main.go   (or your own repo, if you are out of tree)
+package main
+
+import (
+    "github.com/zishmusic/drivel/plugin"
+    "example.com/drivel-provider-thing/thing"
+)
+
+func main() {
+    plugin.Serve(thing.Factory)
+}
+```
+
+```go
+// <name>/factory.go
 func Factory(ctx context.Context, p provider.Params) (provider.Store, error) {
-    var cfg Config                    // your own struct, with toml tags
-    if err := p.Decode(&cfg); err != nil {
+    var cfg Config                       // your own struct, with toml tags
+    if err := p.Config.Decode(&cfg); err != nil {
         return nil, err
     }
-    return Open(ctx, cfg, p.Log)      // return the untyped nil on error, not a
-}                                     // typed nil inside a non-nil interface
+    return Open(ctx, cfg, p.Log)         // return the untyped nil on error, not a
+}                                        // typed nil inside a non-nil interface
 ```
 
-```go
-// cmd/drivel/mount.go
-_ = reg.Register("<name>", yourpkg.Factory)
-```
+Build it as **`drivel-provider-<name>`** and put it somewhere drivel looks:
+alongside the `drivel` binary, in `$XDG_DATA_HOME/drivel/plugins`, in
+`/usr/local/lib/drivel/plugins` or `/usr/lib/drivel/plugins`. `DRIVEL_PLUGIN_PATH`
+replaces that list if you want it somewhere else.
+
+**The kind is the filename.** `drivel-provider-thing` provides `thing`, which is
+what a user writes as `provider = "thing"`. Your code never names it — a plugin
+that could name itself could contradict its filename, and then two files could
+claim one kind.
+
+Three consequences worth knowing before you debug something confusing:
+
+- **Standard output is the handshake.** go-plugin's greeting is written there, so a
+  stray `fmt.Println` in your backend breaks the launch rather than appearing
+  anywhere. Write to the `*log.Logger` in `provider.Params` (or to stderr); drivel
+  forwards it, line by line, to the log of the mount that launched you.
+- **Your environment is built, not inherited.** You get `PATH`, `HOME`, `TMPDIR`,
+  locale, TLS roots, proxy settings and `SSH_AUTH_SOCK` — and nothing else. In
+  particular, no ambient cloud credentials and no `XDG_*`. Everything your backend
+  needs must come through its configuration, and paths in it should be absolute.
+- **drivel refuses to launch a writable binary.** Group- or world-writable, or
+  sitting in a world-writable non-sticky directory, and it will not run — with the
+  reason reported when someone tries to use the backend, not silently.
 
 Your config struct is decoded straight from the account's table in the config file,
 so a user selects the backend with `provider = "<name>"` and configures it with
 whatever keys you defined. Nothing in `internal/config` or `internal/app` learns
-what those keys mean, and neither needs changing.
+what those keys mean. A key you did **not** define is an error, which is
+deliberate — a misspelt setting silently doing nothing is the failure that rule
+exists to prevent.
 
-Registration is deliberately by hand rather than by `init()`: an explicit registry
-keeps the tree free of process-global mutable state, and it is what lets a test
-register the same factory twice to check that two independently-configured stores
-really are independent.
+### Declaring capabilities
 
-Everything downstream — `syncengine.New`, the `ChangeSource` type assertion, the
-downloader — is already provider-agnostic.
+Normally you declare nothing: you implement the optional interfaces you can honour
+and drivel reads your method set. That is exact, and it is what the in-tree
+backends do.
+
+The exception is a type whose method set is *not* the truth about what it can do —
+a decorator wrapping another store, or a test double. Such a type implements
+`provider.Declarer`:
+
+```go
+func (s *myStore) Capabilities() provider.CapabilitySet { return s.caps }
+```
+
+and drivel takes the **intersection** of the declaration and the method set. A
+declaration can only ever narrow, so you cannot accidentally advertise something
+you have no method for.
+
+### Running in process instead
+
+There is no supported way to compile a backend into `drivel` — the registry it
+builds has nothing in it but discovered plugins. `provider.Registry` is still a
+plain value, though, so a test (or a program of your own built on these packages)
+can register a `Factory` directly and exercise a `Store` with no subprocess at all.
+That is how every backend's own tests run, and keeping those two ways of calling
+the same code identical is why the plugin server adds no behaviour of its own.
 
 ## 5. Test it offline
 
@@ -241,7 +302,7 @@ coverage.
 
 ## Checklist
 
-- [ ] `internal/provider/<name>/` implements every `Store` method.
+- [ ] Your package implements every `Store` method.
 - [ ] Paths are root-relative, slash-separated, no leading slash.
 - [ ] `Put`/`Mkdir` create ancestors; `Move` handles missing source via
       `ErrNotExist`.
@@ -251,9 +312,16 @@ coverage.
       feedless provider any inbound sync at all.
 - [ ] `RangeGetter` implemented **iff** the provider serves real byte ranges.
 - [ ] Store is safe for concurrent use.
-- [ ] A `Factory` registered in `cmd/drivel/mount.go`; nothing else changed.
+- [ ] A `main` calling `plugin.Serve(Factory)`, built as `drivel-provider-<name>`
+      and installed somewhere on the search path; nothing else changed.
+- [ ] Nothing written to standard output — that is the handshake.
+- [ ] Nothing read from the environment beyond what `plugin.EnvAllowed()` lists;
+      everything else comes through the config, as an absolute path.
+- [ ] `provider.Declarer` implemented **only** if the method set is not the truth
+      (a decorator, a test double). Ordinary backends declare nothing.
 - [ ] Config struct carries `toml` tags and errors on keys it does not define.
-- [ ] Offline unit tests for translation + error classification.
+- [ ] Offline unit tests for translation + error classification, run against the
+      `Store` directly — no subprocess needed.
 - [ ] `go build ./...`, `go vet ./...`, `go test ./...` clean.
 
 ## Adding a new mount frontend (rare)

@@ -56,13 +56,17 @@ for reasoning, not for interface documentation.
 | `internal/mount` | The mount-backend seam: `Backend`, `Options`, `ResolveBacking`. |
 | `internal/vfs` | The go-fuse mount backend — loopback proxy that emits one event per mutation. |
 | `internal/fsevent` | Backend-neutral change `Event` / `Op` types. |
-| `internal/provider` | The cloud-backend seam, plus the registry. |
+| `provider` | **Public.** The backend seam: `Store`, the optional capabilities, the registry, and capability negotiation. |
+| `ranges` | **Public.** Leaf value package: the block bitmap. No I/O. Public because `RangePutter` names it. |
+| `plugin` | **Public.** Loading a backend that runs in its own process: discovery, the host-side proxy, and `Serve`. |
+| `cmd/drivel-provider-*` | The backends, each a three-line `main` around `plugin.Serve`. Not commands a user runs. |
 | `internal/provider/gdrive` | Google Drive. The only package that knows what a file ID is. |
+| `internal/provider/gdrive/gdconf` | Drive's settings table and its two enumerated types — the vocabulary, without the SDK. |
+| `internal/provider/sftp` | SFTP. Host key verification fails closed. |
 | `internal/gauth` | Google OAuth: credential I/O and the interactive login flow. |
 | `internal/transport` | HTTP/3 (QUIC) client with HTTP/2 fallback. |
 | `internal/syncengine` | Outbound push (`Engine`), inbound pull (`Downloader`), and the enumeration sweep (`reconcile.go`). |
 | `internal/state` | Engine-level bbolt state: cursor, echo records, sweep marks. |
 | `internal/pathindex` | Provider-private bbolt path↔ID cache. |
 | `internal/hydrate` | Lazy hydration: placeholders, the xattr marker, fault-in on first I/O. |
-| `internal/ranges` | Leaf value package: the block bitmap. No I/O. |
 | `internal/testenv` | Test-only: turns a silently-skipped kernel facility into a failure in CI. |

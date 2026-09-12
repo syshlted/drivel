@@ -31,9 +31,9 @@ import (
 	"time"
 
 	"github.com/zishmusic/drivel/internal/fsevent"
-	"github.com/zishmusic/drivel/internal/provider"
-	"github.com/zishmusic/drivel/internal/ranges"
 	"github.com/zishmusic/drivel/internal/state"
+	"github.com/zishmusic/drivel/provider"
+	"github.com/zishmusic/drivel/ranges"
 )
 
 // Defaults for the outbound uploader. All are overridable via Config.
@@ -525,7 +525,7 @@ func (e *Engine) pushContent(ctx context.Context, p string, dirty *ranges.Set) e
 // changed, the range write rewrites identical bytes, which is wasteful but not
 // wrong.
 func (e *Engine) pushShortcut(ctx context.Context, p string, f *os.File, size int64, dirty *ranges.Set) (bool, error) {
-	rp, canPatch := e.store.(provider.RangePutter)
+	rp, canPatch := provider.AsRangePutter(e.store)
 	patchable := canPatch && rangeWorthIt(dirty, size)
 	hashable := size >= hashSkipMinSize
 	if !patchable && !hashable {
@@ -622,7 +622,7 @@ func (e *Engine) remoteIsOurs(p string, remote provider.RemoteFile) bool {
 // wrong "true" is a lost local change, so nothing but a positive hash match may
 // produce one.
 func (e *Engine) contentMatches(f *os.File, remote provider.RemoteFile) (bool, error) {
-	hasher, ok := e.store.(provider.ContentHasher)
+	hasher, ok := provider.AsContentHasher(e.store)
 	if !ok || remote.Hash == "" {
 		return false, nil
 	}

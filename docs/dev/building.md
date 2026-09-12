@@ -114,13 +114,41 @@ its value looks like (a file, a directory, one of a fixed set of words, or
 opaque). Forgetting is not possible in the quiet way it used to be: the generator
 fails on a flag with no hint *and* on a hint for a flag that no longer exists, and
 `make check` runs it. Enum values come from the program's own constants
-(`gdrive.SweepAuto`, `gdrive.DeleteTrash`, …), so a mode that is renamed cannot
-leave the completions offering a word the binary refuses.
+(`gdconf.SweepModes`, `gdconf.DeleteModes`), so a mode that is renamed — or added,
+or withdrawn — cannot leave the completions offering a word the backend refuses.
+That leaf package exists for this: since M9 the Drive backend is a separate
+executable, and `gdconf` is how the `drivel` binary keeps the vocabulary of the
+`-drive-*` flags without linking the Drive SDK.
 
 The generated files are committed because whoever installs from a tarball or a
 distro package has no Go toolchain to run the generator with; `make install`
 places them under `$PREFIX/share/bash-completion/completions` and
 `$PREFIX/share/zsh/site-functions`.
+
+## The plugin protocol is generated too
+
+Backends run in their own process (M9) and speak gRPC, so `plugin/internal/pb` is
+generated from [proto/drivel/plugin/v1/provider.proto](../../proto/drivel/plugin/v1/provider.proto):
+
+```sh
+make proto        # regenerate after editing the .proto
+make proto-check  # what `make check` runs: fails if the committed output is stale
+```
+
+The toolchain installs itself into `bin/` on first use and is pinned in the
+Makefile. It is **pure Go** — `buf` is the compiler as well as the driver — so
+there is no `protoc` and no C++ anywhere in the build, which is the same
+constraint that keeps cgo out. The generated files are committed, for the reason
+the completions are: a tarball build has no protobuf toolchain.
+
+Changing the protocol is a compatibility decision. Adding a field does not bump
+`plugin.ProtocolVersion`, because protobuf is already compatible in both
+directions and a capability name the host does not recognise is dropped with a log
+line rather than refused. Removing a field, or changing what one means, does — a
+host refuses to launch a plugin whose version does not match exactly, and the
+alternative (a compatible range) fails silently, with an almost-compatible plugin
+answering most calls correctly and losing a sentinel error somewhere in the
+middle.
 
 ## Upgrading the Go toolchain
 
@@ -224,6 +252,10 @@ code, so that job needs a heartbeat independent of commits.
 ## Running the binary
 
 ```sh
+# `make build` builds drivel AND every cmd/drivel-provider-*, into bin/ — which is
+# first on the plugin search path, so no configuration is needed to find them.
+# `go build ./cmd/drivel` alone leaves a binary with no backends at all.
+
 # Separate backing dir: operate on ./mnt; changes land in ./data and log as events.
 ./bin/drivel mount -mount ./mnt -data ./data
 

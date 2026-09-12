@@ -12,7 +12,7 @@ import (
 
 	"github.com/zishmusic/drivel/internal/fsevent"
 	"github.com/zishmusic/drivel/internal/mount"
-	"github.com/zishmusic/drivel/internal/ranges"
+	"github.com/zishmusic/drivel/ranges"
 )
 
 // fileHandle wraps a loopback file handle to capture content writes. All ops are

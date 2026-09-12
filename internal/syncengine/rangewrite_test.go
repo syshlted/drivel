@@ -15,9 +15,9 @@ import (
 	"time"
 
 	"github.com/zishmusic/drivel/internal/fsevent"
-	"github.com/zishmusic/drivel/internal/provider"
-	"github.com/zishmusic/drivel/internal/ranges"
 	"github.com/zishmusic/drivel/internal/state"
+	"github.com/zishmusic/drivel/provider"
+	"github.com/zishmusic/drivel/ranges"
 )
 
 // patchStore is a provider that CAN write byte ranges — the capability Drive

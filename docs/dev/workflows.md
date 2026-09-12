@@ -340,7 +340,63 @@ attributes rather than merely fragile.
 Conflict copies are always downloaded **in full**, because their paths exist only
 locally and could never be hydrated later.
 
-## 6. Mount lifecycle
+## 6. Launching a backend, and surviving one that dies
+
+A backend is a separate process (M9, DESIGN.md §2.10). This is what a mount does
+to get one, and what happens when it goes away underneath.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant App as internal/app.Open
+    participant Loader as plugin.Loader
+    participant Proc as plugin process supervisor
+    participant Plug as drivel-provider-KIND
+    participant Engine as syncengine.Engine
+
+    App->>Loader: Register(registry)
+    Loader->>Loader: scan the search path<br/>kind := filename suffix
+    Loader->>Loader: refuse group/world-writable binaries
+    App->>Proc: Factory(ctx, Params{Config, Log})
+    Proc->>Plug: fork/exec with a BUILT environment
+    Plug-->>Proc: handshake on stdout
+    Proc->>Plug: Open{config TOML, content broker id}
+    Plug->>Plug: factory(ctx, Params)<br/>provider.Capabilities(store)
+    Plug-->>Proc: {capabilities}
+    Proc-->>App: provider.Store (proxy, declaring those capabilities)
+    App->>App: AsChangeSource? → start the pull loop, or not
+
+    Note over Engine,Plug: normal operation
+    Engine->>Proc: Put(path, reader)
+    Proc->>Plug: stream: path, then 256 KiB chunks
+    Plug-->>Proc: RemoteFile
+
+    Note over Plug: the backend crashes
+    Engine->>Proc: Put(path, reader)
+    Proc-->>Engine: retryable: "restarting in 1s"
+    Engine->>Engine: back off (M4 retry, unchanged)
+    Engine->>Proc: Put(path, reader)
+    Proc->>Plug: fork/exec, handshake, Open
+    Proc->>Plug: stream the upload
+    Plug-->>Engine: RemoteFile
+```
+
+Three things this picture is making a point of:
+
+- **The capability answer is taken once**, at step 9, and held for the life of the
+  mount — including across a restart. The engine decides at step 11 whether this
+  mount has a pull loop at all, so an answer that changed underneath it would
+  leave a downloader polling a feed that is gone.
+- **A crash is a retryable error, not a failed push.** There is no supervisor
+  goroutine; the engine's existing backoff is what waits, and the next call is
+  what relaunches. The relaunch is rate-limited, and a process that lived at least
+  a minute does not inherit a crash loop's delay.
+- **The environment at step 5 is built, not inherited.** See `plugin/env.go` — the
+  point is that a backend authenticates with what its configuration names, so
+  which account a mount uses is a property of the config file rather than of the
+  shell that started it.
+
+## 7. Mount lifecycle
 
 ```mermaid
 stateDiagram-v2

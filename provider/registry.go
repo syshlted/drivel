@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"log"
-	"reflect"
 	"sort"
 	"strings"
 	"sync"
@@ -21,21 +20,24 @@ var ErrUnknownKind = errors.New("provider: unknown kind")
 // that giving providers something new — a metrics sink, a rate limiter — does not
 // churn every Factory signature in the tree.
 type Params struct {
-	// Decode fills a provider-defined struct with this provider's configuration —
-	// gdrive's Config, an S3 bucket/region, a WebDAV URL — so the registry never
-	// learns what a Drive folder ID is, and adding a provider touches neither this
-	// package nor internal/config. The generic layer holds the shape, the provider
-	// holds the meaning.
+	// Config is this provider's own configuration, undecoded: gdrive's Config, an
+	// S3 bucket and region, a WebDAV URL. The registry never learns what a Drive
+	// folder ID is, and adding a provider touches neither this package nor
+	// internal/config.
 	//
-	// Never nil. A mount that supplies no settings for its kind gets a Decode that
-	// succeeds and leaves the destination at its zero value, so a Factory need not
-	// nil-check before calling it — it validates the decoded struct instead, which
-	// is where the useful error message lives anyway.
-	Decode func(any) error
+	// The zero value is valid and decodes to the destination's zero value, so a
+	// Factory need not check before calling Config.Decode — it validates the
+	// decoded struct instead, which is where the useful error message lives
+	// anyway.
+	Config Config
 
 	// Log is where this provider writes. Never nil, and with several mounts in one
 	// process it is what says which mount a line came from — the reason it is
 	// passed rather than taken from the log package's default.
+	//
+	// Out of process it is still this mount's logger: the plugin's own writes are
+	// carried back over the seam and printed here, so a plugin's diagnostics
+	// interleave with the mount's rather than landing on some other stream.
 	Log *log.Logger
 }
 
@@ -63,11 +65,31 @@ type Factory func(ctx context.Context, p Params) (Store, error)
 type Registry struct {
 	mu    sync.RWMutex
 	kinds map[string]Factory
+	hint  func(kind string) string
 }
 
 // NewRegistry returns an empty Registry.
 func NewRegistry() *Registry {
 	return &Registry{kinds: make(map[string]Factory)}
+}
+
+// Hint installs a function that describes why a kind might be missing, for the
+// error an unregistered kind produces. Its return value is appended to that
+// error; an empty string adds nothing.
+//
+// It exists because "unknown kind" stopped being the whole story when a backend
+// became something installed rather than compiled in (M9). The registry itself
+// must not learn what a plugin is — it holds factories and nothing else — so the
+// layer that does know, the plugin loader, contributes the sentence that names
+// the file it looked for and the directories it looked in. Without it the error
+// is accurate and unactionable: a user who has not installed a backend is told
+// only that the name is unknown.
+//
+// Set once, during startup, before any Open.
+func (r *Registry) Hint(fn func(kind string) string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.hint = fn
 }
 
 // Register adds a kind. It errors on a duplicate name rather than overwriting:
@@ -96,16 +118,20 @@ func (r *Registry) Register(kind string, f Factory) error {
 func (r *Registry) Open(ctx context.Context, kind string, p Params) (Store, error) {
 	r.mu.RLock()
 	f, ok := r.kinds[kind]
+	hint := r.hint
 	r.mu.RUnlock()
 	if !ok {
+		var because string
+		if hint != nil {
+			if h := hint(kind); h != "" {
+				because = "; " + h
+			}
+		}
 		known := r.Kinds()
 		if len(known) == 0 {
-			return nil, fmt.Errorf("%w: %q (no providers registered)", ErrUnknownKind, kind)
+			return nil, fmt.Errorf("%w: %q (no providers available)%s", ErrUnknownKind, kind, because)
 		}
-		return nil, fmt.Errorf("%w: %q (known: %s)", ErrUnknownKind, kind, strings.Join(known, ", "))
-	}
-	if p.Decode == nil {
-		p.Decode = func(any) error { return nil }
+		return nil, fmt.Errorf("%w: %q (available: %s)%s", ErrUnknownKind, kind, strings.Join(known, ", "), because)
 	}
 	if p.Log == nil {
 		p.Log = log.Default()
@@ -133,26 +159,4 @@ func (r *Registry) Kinds() []string {
 	}
 	sort.Strings(out)
 	return out
-}
-
-// StaticDecoder adapts an already-built provider config to the Factory decode
-// contract, for callers that construct one directly instead of reading it out of
-// a file — the flag path, which knows it is configuring Drive, and tests.
-//
-// It reports a mismatch as an error rather than panicking, because the pairing it
-// checks (this kind's config type vs the value handed in) is a wiring mistake
-// that should name both types rather than a stack trace.
-func StaticDecoder(v any) func(any) error {
-	return func(dst any) error {
-		rv := reflect.ValueOf(dst)
-		if rv.Kind() != reflect.Pointer || rv.IsNil() {
-			return fmt.Errorf("provider: decode wants a non-nil pointer, got %T", dst)
-		}
-		sv := reflect.ValueOf(v)
-		if !sv.IsValid() || !sv.Type().AssignableTo(rv.Elem().Type()) {
-			return fmt.Errorf("provider: config is %T, but this provider decodes into %s", v, rv.Elem().Type())
-		}
-		rv.Elem().Set(sv)
-		return nil
-	}
 }

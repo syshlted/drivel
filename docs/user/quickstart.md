@@ -13,10 +13,14 @@ sudo apt install fuse3        # Debian/Ubuntu
 sudo dnf install fuse3        # Fedora
 
 go install github.com/zishmusic/drivel/cmd/drivel@latest
+go install github.com/zishmusic/drivel/cmd/drivel-provider-gdrive@latest
 ```
 
-That puts `drivel` in `$(go env GOPATH)/bin`. See [Installing](install.md) for
-building from a checkout, macOS and FreeBSD, and shell completions.
+That puts both in `$(go env GOPATH)/bin`. The second one is the Google Drive
+backend: Drivel runs its backends as separate programs and starts them for you, so
+you install the ones you use and a crash in one cannot take your filesystem down.
+See [Installing](install.md) for building from a checkout, macOS and FreeBSD, and
+shell completions.
 
 ## 2. Get Google credentials
 

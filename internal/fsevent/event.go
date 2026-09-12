@@ -4,7 +4,7 @@
 // sync core stay portable and lets multiple mount backends share one event type.
 package fsevent
 
-import "github.com/zishmusic/drivel/internal/ranges"
+import "github.com/zishmusic/drivel/ranges"
 
 // Op identifies the kind of filesystem mutation an Event describes.
 type Op string

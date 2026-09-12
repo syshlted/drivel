@@ -59,17 +59,31 @@ provider. First (and currently only) provider: **Google Drive**.
           │  │   └───────────────┬───────────────────┘  │           │
           │  └───────────────────┼──────────────────────┘           │
           └──────────────────────┼──────────────────────────────────┘
+                                 │ provider.Store (§2.5)
                                  │
-                          ┌──────▼───────┐
-                          │  Provider    │  Google Drive API v3
-                          │  (Drive)     │  - files.* (CRUD)
-                          └──────┬───────┘  - changes.list (pull cursor)
-                                 │ injected *http.Client
-                          ┌──────▼───────────────────┐
-                          │  Transport (§2.6)         │  HTTP/3 (QUIC) preferred,
-                          │  HTTP/3 → HTTP/2 fallback  │  HTTP/2 fallback if UDP
-                          └───────────────────────────┘  blocked; OAuth wraps it
+                          ┌──────▼────────────────────┐
+                          │  Plugin client (§2.10)     │  gRPC over a unix socket
+                          └──────┬────────────────────┘  (hashicorp/go-plugin)
+          ═══════════════════════╪═══════════════════════ process boundary (M9)
+          ┌────────────────────  │  ─────────────────────────────────────────┐
+          │  Backend process     ▼        one per mount                       │
+          │               ┌──────────────┐                                    │
+          │               │  Provider    │  Google Drive API v3               │
+          │               │  (Drive)     │  - files.* (CRUD)                  │
+          │               └──────┬───────┘  - changes.list (pull cursor)      │
+          │                      │ injected *http.Client                      │
+          │               ┌──────▼───────────────────┐                        │
+          │               │  Transport (§2.6)         │  HTTP/3 preferred,    │
+          │               │  HTTP/3 → HTTP/2 fallback  │  HTTP/2 if UDP is    │
+          │               └───────────────────────────┘  blocked; OAuth wraps │
+          └──────────────────────────────────────────────────────────────────┘
 ```
+
+Since M9 the provider is the one component that is not in the process. The seam it
+sits behind is unchanged — everything above it holds a `provider.Store` and does not
+know whether the implementation is a Go value or another program — but the backend
+itself, and every dependency it drags in (the Drive SDK, OAuth, QUIC, the SSH stack),
+lives in an executable drivel launches. §2.10 has the mechanism and what it costs.
 
 ### 2.1 FUSE layer
 - Built on [`hanwen/go-fuse`](https://github.com/hanwen/go-fuse), embedding its
@@ -239,6 +253,30 @@ fails, and the engine is written so that "unsure" always selects that answer.
 `Enumerator` is the one whose absence costs a *feature* rather than speed — without
 it a pre-existing remote tree stays invisible (§9, M7b) — but its absence is still
 safe, because nothing infers anything from a sweep that never ran.
+
+**Which of them a store offers is asked, not assumed** (M9). Until the backend could
+live in another process the question was a Go type assertion, which is exact for a
+value whose method set you can see. A plugin's host-side proxy is one type serving
+every backend, so it has all five methods regardless — and type assertion would have
+answered "yes" five times for every plugin. So the question moved into the seam:
+
+```go
+// A store may declare what it offers, instead of leaving the answer to its methods.
+type Declarer interface{ Capabilities() CapabilitySet }
+
+// Capabilities returns the INTERSECTION of the method set and the declaration.
+func Capabilities(s Store) CapabilitySet
+
+// Callers ask through these rather than asserting.
+func AsChangeSource(s Store) (ChangeSource, bool)   // …and four siblings
+```
+
+The invariant is one line and it is what makes the mechanism safe: **a declaration
+narrows and can never widen.** A store cannot talk its way into a capability it has
+no method for, so the worst a wrong declaration can do is cost a feature — never
+produce a call into a method that is not there. An ordinary in-process backend
+implements exactly what it can honour, which is already an exact answer, and does
+not implement `Declarer`; `gdrive` and `sftp` do not, and should not start.
 
 Two sentinel errors cross the seam, both because they need a *different response*
 rather than a retry: `ErrNotExist` from `Move` (upload the destination as fresh
@@ -424,12 +462,16 @@ allow the thing M8 exists to prove: a test registering `gdrive` under two names 
 running both, so the seam is exercised by two independently-configured Drive stores
 without a pseudo-provider ever reaching a user's binary.
 
-A provider's own configuration crosses the registry **undecoded**, as a
-`Params.Decode` callback filling a provider-defined struct. `internal/config` never
-learns what a Drive folder ID is, and adding a provider touches neither package.
-`Params` is a struct rather than bare arguments so that giving providers something
-new — the per-mount logger it already carries, a metrics sink later — does not churn
-every `Factory` signature.
+A provider's own configuration crosses the registry **undecoded**. It was a
+`Params.Decode` callback filling a provider-defined struct; since M9 it is
+`provider.Config` — the TOML text the user wrote — and the provider decodes it on
+its own side, because a closure cannot cross a process boundary. The rule is
+unchanged either way: `internal/config` never learns what a Drive folder ID is, and
+adding a provider touches neither package. TOML rather than a second encoding
+because it is what the user typed, so the error for a misspelt key names the key as
+it appears in their file. `Params` is a struct rather than bare arguments so that
+giving providers something new — the per-mount logger it already carries, a metrics
+sink later — does not churn every `Factory` signature.
 
 **The config file is TOML, and the format choice is about comments.** Everything
 drivel does that is worth configuring has a reason that belongs next to it, and
@@ -720,6 +762,109 @@ platform one, and the more dangerous of the two because the kernel is Linux and
 everything looks supported. Keep the backing directory on the ext4 filesystem inside
 the WSL2 VHD.
 
+### 2.10 Plugin loading — backends in their own process (M9)
+
+A backend is a separate executable. `drivel` finds it, launches it, talks to it over
+gRPC on a unix socket, and restarts it if it dies. The seam it implements is §2.5
+unchanged; what follows is only how the implementation gets there.
+
+```
+  drivel                                     drivel-provider-gdrive
+  ──────                                     ──────────────────────
+  Loader.Discover()   scan the search path
+  Registry.Register() one Factory per kind
+       │
+  Factory(ctx, Params)
+       │  fork/exec, handshake on the child's stdout
+       ├──────────────────────────────────────────►  plugin.Serve(gdrive.Factory)
+       │  Open{config TOML, content broker id}
+       ├──────────────────────────────────────────►  factory(ctx, Params{Config, Log})
+       │                         {capabilities}   ◄──  provider.Capabilities(store)
+       │
+       │  Put / Get / Stat / Changes / Enumerate …
+       ├──────────────────────────────────────────►  the real backend
+       │                                          ◄──  errors + their classification
+       │
+       │  PutRange{extents, source handle}
+       ├──────────────────────────────────────────►
+       │            ReadAt{handle, off, len}      ◄──  io.ReaderAt over the local file
+       │
+  Close() then Kill()
+```
+
+**Where the backend is found.** `drivel-provider-<kind>`, on a search path that is
+the running binary's own directory, then `$XDG_DATA_HOME/drivel/plugins`, then
+`/usr/local/lib/drivel/plugins`, then `/usr/lib/drivel/plugins`;
+`DRIVEL_PLUGIN_PATH` replaces that list entirely rather than extending it, so "which
+plugin am I running?" has one visible answer. The binary's own directory comes first
+so that a build from a checkout finds the plugins built beside it with no
+configuration at all. The **kind is the filename** and nothing the plugin says about
+itself — §9/M9 has the reasoning, and the short version is that a self-naming plugin
+can contradict its filename and two files can then claim one kind.
+
+**What a missing backend says.** `provider.Registry` holds factories and must not
+learn what a plugin is, so the loader installs a hint (`Registry.Hint`) and an
+uninstalled kind reports both halves: `unknown kind: "gdrive" (available: sftp);
+no drivel-provider-gdrive in …`. On its own the first half is accurate and
+unactionable — since M9 the commonest cause of it is not a typo.
+
+**What is checked before launching.** That the file is a regular executable, that it
+is not group- or world-writable, and that its directory is not world-writable unless
+sticky. This is not a sandbox and is not described as one: a plugin runs as the same
+user with that user's whole filesystem, and drivel launching it is drivel trusting
+it. The check is the narrower claim that the thing being trusted is the thing the
+administrator installed — a binary anybody can replace between install and launch is
+a stranger's code holding the user's credentials, and an M16 boot mount is where that
+happens unobserved.
+
+**What it is given.** Its own configuration, as the TOML text the user wrote
+(`provider.Config`), and an environment that is **built rather than inherited**:
+`PATH`, `HOME`, `TMPDIR`, locale, TLS roots and proxy settings, plus `SSH_AUTH_SOCK`
+because the SFTP backend documents the agent as an auth method. Everything else is
+dropped — every ambient-credential convention, all of `XDG_*` (M16's lesson about a
+privilege drop and root's config directory), and all of `DRIVEL_*` so that a plugin
+cannot load plugins.
+
+**What happens when it dies.** The next call notices, relaunches it behind an
+exponential backoff, and returns a *retryable* error meanwhile — so the engine's
+existing M4 retry loop is what waits, and a crash costs a deferred push rather than
+a failed one. The capability set is captured at the first open and held across
+restarts, because the engine wires itself to that answer once.
+
+**What it costs.** One process per mount, and a local RPC hop on every byte of every
+transfer. Against a network backend the hop is noise; against the local backend M11
+proposes it is a real cost and that milestone should measure it. See §9/M9.
+
+**What does not cross, and why it took work.** `provider.ContentHasher` is the one
+call whose naive proxying is absurd: it streams a whole file across the socket to
+get thirty-two bytes back. It is also the one that runs most — M6's gate 3 precedes
+most content pushes, and Drive declines `RangePutter` deliberately, so gate 2 always
+falls through and gate 3 runs on every content push at or above one block. A changed
+1 GB file therefore crossed the socket *twice*: once to be hashed, then again in
+`Put`.
+
+The host now computes the digest itself, and the interesting part is how it is
+allowed to. It may not assume an algorithm — the seam's whole reason for asking the
+provider is that the provider owns that choice — and a declared name would be a
+claim, checkable only by trusting it. So it is **identified by observation**: on the
+first hash of a mount, the host asks the backend to digest two fixed vectors it can
+check for itself, and adopts a local implementation only if one reproduces both
+exactly. Nothing matching is an ordinary outcome, not a failure, and the content
+streams as before — a backend using a digest this build cannot compute, or the same
+one in a different encoding, simply keeps the old path.
+
+Two properties make this safe rather than clever. `HashContent` takes an
+`io.Reader` and nothing else, so a backend's digest is structurally a function of
+the bytes alone — there is no path, size or salt it could vary by that the probe
+would miss. And a mis-identification fails *benign*: a wrong algorithm or encoding
+produces digests that never equal what `Stat` reports, so gate 3 declines and the
+file is pushed. The failure mode is a gate that stops helping, never one that skips
+a push it should have made. Two vectors rather than one because a single input two
+functions happened to agree on would be adopted for every file after it.
+
+A backend loaded in process is untouched by all of this: it never reaches the proxy,
+and its `HashContent` is the local call it always was.
+
 ---
 
 
@@ -833,6 +978,21 @@ are both lossy and racy.
 ---
 
 ## 8. Open questions / future
+- **A security review has not happened**, and the gap is recorded in `SECURITY.md`
+  rather than only here because the file that invites reports should not imply its
+  own list is complete. Nothing in this document has been checked adversarially end
+  to end; the invariants exist because a *correctness* argument demanded them, and
+  the two are not the same audit. Three notes for whoever does it. The plugin seam
+  looks like the obvious target and is mostly not one — a backend running as the
+  user with the user's credentials is a deliberate trust delegation (§2.10), so the
+  defect-shaped part of it is narrow: **discovery**, meaning how a file on disk
+  becomes the backend, where the mode checks narrow a check-then-exec window that
+  M23 is what would close. The surface with the least adversarial attention is the
+  opposite one — **remote-controlled data driving local filesystem operations**,
+  since a provider supplies the paths and names that decide what gets written where
+  in the backing tree, and §4's echo records and §7b's baseline are keyed by those
+  same strings. And the review should treat the §9/M0 rule as applying to itself: a
+  guard nobody has seen fail is a guard of unknown strength.
 - **Deduplication**: no longer shelved as an idea, but as a *provider* rather than
   as a layer inside the mount — see M11 in §9. GPU-accelerated hashing stays
   shelved (the repo name is historical); it is an optimisation of a component that
@@ -1020,7 +1180,7 @@ are both lossy and racy.
    Above the seam, the dirty-range map rides on `fsevent.Event.Dirty` rather than
    living in a store of its own. Extents describe one pending push and nothing
    more; if the process dies before the push, the event that would have carried
-   them is gone too, so there is nothing left to go stale. `internal/ranges` holds
+   them is gone too, so there is nothing left to go stale. `ranges` holds
    the structure, moved out of `internal/hydrate` so the eager path does not
    import the lazy one — the present-ranges bitmap and the dirty-ranges map really
    are the same data structure read two ways, and the whole difference is the
@@ -1576,16 +1736,207 @@ are both lossy and racy.
    account asked for full access. And `-sweep-interval` existed as a flag with a
    documented default that nothing was reading into `ReconcileOptions`; the mount
    spec now carries it.
-11. **M9 — Plugin architecture.** Let third parties add providers (and eventually
-   mount backends) without forking. The seam already exists — `provider.Store` +
-   optional `ChangeSource`/`RangeGetter` — so M9 is about the *loading* mechanism
-   and its blast radius, not the interface. Go's `plugin` package is a poor fit
-   (Linux-only, exact-toolchain-match, no unload); the realistic options are an
-   out-of-process plugin protocol (gRPC over a unix socket, hashicorp/go-plugin
-   shape) or a WASM host. Either way, M9 must settle: capability scoping (a plugin
-   should not inherit the mount's ambient credentials), failure isolation (a
-   crashing plugin must not take down the mount), and versioning of the seam
-   itself. Depends on M8 having proven the seam with a second registered provider.
+11. **M9 — Plugin architecture.** ✅ Shipped. Every storage backend now runs in its
+   own process, launched by drivel over hashicorp/go-plugin: gRPC on a unix socket,
+   one plugin process per mount. `drivel` itself links no backend at all.
+
+   The milestone was scoped as "let third parties add providers without forking",
+   and the seam it would need already existed — `provider.Store` plus the optional
+   interfaces beside it, designed in M2 and proven against two independently
+   configured stores in M8. So M9 was expected to be about the *loading* mechanism
+   and nothing else. Two of those three expectations held. The interface did not
+   change and the shipped backends did not change. **Capability detection did, and
+   it had to.**
+
+   **The one thing the seam could not do across a process boundary was answer
+   "what can this backend do?"** Above the seam that question had always been a Go
+   type assertion:
+
+   ```go
+   if cs, ok := store.(provider.ChangeSource); ok { … }
+   ```
+
+   which is exact as long as a store is a value whose method set is visible. The
+   host side of a plugin is not: it is one generated proxy type serving every
+   backend, so it implements `ChangeSource`, `Enumerator`, `RangeGetter`,
+   `RangePutter` and `ContentHasher` whether the backend behind it has any of them
+   or not. Type assertion would have answered yes to all five for every plugin —
+   a mount over SFTP polling a change feed that does not exist, the engine
+   splicing extents into a store that cannot patch, M6's gate 3 hashing gigabytes
+   to compare against a digest nobody computes.
+
+   So capability detection moved into the seam. `provider.Capability` is a bit per
+   optional interface, a store may implement `provider.Declarer` to say which it
+   offers, and callers ask through `provider.AsChangeSource` and its four
+   siblings. There are six call sites in the tree and they all changed. The rule
+   that makes it safe is a one-line invariant:
+
+   > **A declaration narrows and can never widen.** `provider.Capabilities`
+   > returns the intersection of what the value's method set can do and what it
+   > declares, so a store cannot talk its way into a capability it has no method
+   > for. The worst a wrong declaration can do is cost a feature; it can never
+   > produce a call into a method that is not there.
+
+   In-process backends are unaffected: `gdrive` and `sftp` implement exactly what
+   they can honour, which is already an exact answer, and neither implements
+   `Declarer`. The one place it is needed is the proxy — and, usefully, the one
+   other place a method set stops being the truth is a test double, which is how
+   the fake backend under `plugin/testdata` offers a different capability set on
+   each test without thirty-two variants of itself.
+
+   It also settles something M12 would have hit: a `crypt` decorator over another
+   provider has the same problem, since a wrapper either forwards a capability or
+   it does not, and with type assertions it would need one wrapper type per subset
+   of the inner store's capabilities. With a declaration it forwards one value.
+
+   **Decided: gRPC over go-plugin, not WASM, and not `net/rpc`.** WASM would have
+   given a real sandbox, which go-plugin does not, but it would also have given a
+   backend no sockets, no filesystem and no OAuth — i.e. nothing a storage backend
+   is made of — so the sandbox would have had to be opened up for precisely the
+   things that make it worth having. go-plugin's older `net/rpc` mode needs no
+   code generation, but it is gob, which locks every plugin to Go, and streaming a
+   file's content over it means hand-rolling what a gRPC stream already is.
+
+   The codegen that gRPC costs is paid the way the shell completions are paid:
+   `make proto` regenerates, `make proto-check` fails if the committed output has
+   drifted, and the generated files are committed because whoever builds from a
+   tarball has no protobuf toolchain. The toolchain itself is pure Go — `buf` is
+   the compiler as well as the driver — so there is no protoc and no C++ anywhere
+   in the build.
+
+   **Decided: the shipped backends are plugins only.** `cmd/drivel` no longer
+   imports `gdrive` or `sftp`, and the registry it builds is a scan of the plugin
+   search path with nothing compiled into it. That is not a side effect of the
+   milestone, it is the point of it: the Drive SDK, OAuth, the QUIC transport and
+   the SSH stack are now in the process that needs them, so a failure in any of
+   them is a failure of one process that the mount survives.
+
+   Keeping an in-process path "for convenience" was considered and rejected for
+   the reason M8 rejected an `init()`-filled registry: it would be a second way to
+   reach the same backend, with a precedence rule between them that nobody would
+   remember, and the path that is not the default is the path that rots.
+
+   What that cost is one genuine complication. The `-drive-*` flags are Drive-shaped
+   by history and the host still owns them, so it still has to build a Drive
+   settings table and still has to generate shell completions for
+   `-drive-sweep-mode` and `-drive-delete` — and completions rule 3 says those
+   words must be the program's own constants, not copies. The answer is
+   `internal/provider/gdrive/gdconf`, a leaf holding `Config` and the two
+   enumerated types, which `gdrive` re-exports as aliases so that nothing below
+   the seam changed. The host links the vocabulary; the plugin links the
+   implementation.
+
+   **Decided: one plugin process per mount.** Two mounts are two sets of
+   credentials, which is already why they get separate engines, state stores,
+   index files and worker pools (§2.8). Sharing one backend process between them
+   would put both accounts' traffic in one address space and let either starve the
+   other — the cross-mount coupling `app.Validate` exists to prevent, reintroduced
+   one layer down.
+
+   **Decided: the kind comes from the filename.** `drivel-provider-gdrive` provides
+   `gdrive`, and a plugin does not get to announce what it is. A plugin that named
+   itself could contradict its filename, and two files could then claim one kind —
+   resolved either by directory order (so the answer depends on a listing) or by
+   last-wins (so installing anything can silently replace a backend). Two files
+   that *do* claim one kind by filename are resolved first-on-the-path-wins and
+   the loser is named in the log, because an operator who installed something they
+   are not running should be told.
+
+   **Failure isolation is the engine's existing retry loop, not a new supervisor.**
+   A dead process surfaces as a retryable error; the next call relaunches it
+   subject to an exponential backoff, and the engine — which has backed off and
+   retried transient provider failures since M4 — is what waits. A crash therefore
+   costs a deferred push rather than a failed one. Two details keep it honest: a
+   process that lived at least a minute has its failure counter reset, so a backend
+   that dies hourly does not inherit a crash loop's delay; and the capability set
+   is captured at the *first* open and held across restarts, because the engine
+   wires itself to that answer once — whether this mount has a pull loop at all is
+   decided at mount time — so a set that changed underneath it would leave a
+   downloader polling a feed that is no longer there.
+
+   **Capability scoping is an environment allowlist, and the limit is stated rather
+   than glossed.** A plugin's environment is built, not inherited:
+   `GOOGLE_APPLICATION_CREDENTIALS`, `AWS_*` and every other ambient-credential
+   convention are dropped, as is `XDG_*` — which M16 already learned the hard way,
+   where an inherited `XDG_CONFIG_HOME` surviving a privilege drop left a mount
+   running as the user while reading root's account — and as is `DRIVEL_*`, so that
+   a plugin cannot load plugins. What survives is what a program needs to run
+   correctly on the machine it is on: `PATH`, `HOME`, `TMPDIR`, locale, TLS roots,
+   proxy settings. `SSH_AUTH_SOCK` survives too, and it is the one entry that is a
+   credential: the SFTP backend documents the agent as an authentication method and
+   has a setting for declining it, so scrubbing the socket would leave that setting
+   silently doing nothing (M8 rule 6's failure again) and break the commonest
+   working SFTP configuration there is.
+
+   **This is not a sandbox and the documentation says so in those words.** A plugin
+   runs as the same user, with that user's whole filesystem; scrubbing the
+   environment stops a credential being handed over by accident, it does not stop a
+   plugin that wants one from reading it. What the host does enforce is narrower and
+   worth having anyway: it refuses to launch an executable that is group- or
+   world-writable, or one whose directory is (unless sticky), because a binary
+   anybody can replace between installation and launch is a stranger's code holding
+   the user's credentials — and an M16 boot mount is where that happens with nobody
+   watching.
+
+   **Versioning is a single number, not a range.** `plugin.ProtocolVersion` is part
+   of go-plugin's handshake and a mismatch refuses the launch, naming both numbers.
+   Adding a field to the protocol does not bump it, because protobuf already makes
+   that compatible both ways and that is the mechanism to use for anything additive
+   — a capability the host does not recognise is dropped with a log line rather than
+   refused, so a newer plugin loses a feature against an older drivel instead of
+   losing the connection. Removing a field or changing what one means does bump it.
+   The alternative, a compatible range, fails silently: an almost-compatible plugin
+   answers most calls correctly and loses a sentinel error or an mtime somewhere in
+   the middle, which surfaces as data not syncing rather than as an error.
+
+   **The three sentinels had to be rebuilt on the far side, and each one lost is a
+   silent behaviour change.** A plugin classifies its own error — it is the only
+   side that can, since the backend's error types are its own — and the
+   classification travels as a gRPC status detail. `ErrNotExist` lost means a
+   rename stops syncing (the engine would no longer answer it by pushing the
+   destination as fresh content). `ErrCursorExpired` lost means inbound sync stops
+   forever, which is the exact bug that made the sentinel exist. `IsRetryable` lost
+   means the first rate limit is permanent. What is deliberately *not* preserved is
+   the error's concrete type: a host cannot type-assert into a plugin's package,
+   and pretending otherwise would be the coupling the seam exists to prevent.
+
+   **`PutRange` is the one call that runs backwards, and it is why there is a
+   second service.** `provider.RangePutter` takes an `io.ReaderAt` rather than a
+   Reader, deliberately, so an implementation may seek to its extents in whatever
+   order its wire protocol prefers. Streaming the local file into the call would
+   replace random access with a single forward pass — changing the contract for a
+   backend loaded as a plugin while leaving it intact for the same backend
+   constructed directly, which is the worst possible split, because in-process
+   construction is what that backend's own tests use. So the host serves the file.
+   The surface is narrowed twice: the channel is opened once per connection rather
+   than once per call (go-plugin's `AcceptAndServe` returns only when the whole
+   broker shuts down, so a per-call listener would accumulate one per range write
+   for the life of the mount), and the plugin cannot name a path — only a handle
+   the host registered immediately before the call and dropped immediately after.
+
+   **What it costs, honestly.** Every byte of every transfer crosses a unix socket
+   now. Against a network backend that is noise — the socket moves data two to
+   three orders of magnitude faster than Drive or an SFTP server will — but against
+   the local backend M11 proposes it is a real cost, and that milestone should
+   measure it rather than assume it. There is also one process per mount to
+   supervise, and a mount can now fail for a reason that has nothing to do with its
+   backend: the plugin is missing, or its permissions are wrong. Both are reported
+   by name, and a kind whose binary was refused is still *discovered* — it
+   registers a factory that fails with the reason — because "unknown kind gdrive
+   (known: sftp)" would send someone hunting for a missing install when the file is
+   right there and its mode is 0777.
+
+   **Not done, and deliberately.** Mount backends are still compiled in; the
+   `mount.Backend` seam is clean enough that the same treatment would work, but
+   nothing is asking for it and a FUSE connection is not a thing to hand across a
+   process boundary casually. There is no checksum pinning for a plugin binary
+   (go-plugin offers `SecureConfig`); the mode and directory checks are what ships.
+   A pinned digest per kind in the config file was recorded here as the obvious
+   next step; **M23 supersedes that** — a host that carries its own backends has
+   nothing left to pin, and the mode checks it retires are the ones whose
+   check-then-exec window cannot be closed while a plugin is named by a path. And
+   the protocol is not merged with M14's control socket — see that entry, where
+   the reason is that the trust directions are opposite.
 12. **M10 — Platform parity (macOS, then FreeBSD).** Independent of M9; nothing
    waits on either. The tree already cross-compiles for both (§2.9), so this is not
    a port — it is closing the two gaps that make a build that *runs* differ from a
@@ -1857,9 +2208,13 @@ are both lossy and racy.
    a way back into the `Registry` (an `Open(kind string, p Params) (Store, error)`
    hook), and a provider's config table must be allowed to name another kind and
    nest its settings. `internal/config` still learns nothing — the nested table is
-   opaque to it exactly as a Drive folder ID is (§2.8, rule 4). This is also the
-   cleanest possible prompt for M9's plugin seam: a decorator is where a plugin API
-   either composes or does not.
+   opaque to it exactly as a Drive folder ID is (§2.8, rule 4). M9 has landed, so
+   this is a question with a concrete answer rather than a prompt: a decorator is
+   where a plugin API either composes or does not, and the piece that decides it is
+   capability forwarding. `provider.Declarer` is what makes that tractable — a
+   wrapper forwards the inner store's declared set as one value, where type
+   assertions would have needed one wrapper type per subset of the five optional
+   interfaces.
 
    **Where the seam fights back, all of which is findable before writing code.**
 
@@ -2039,9 +2394,10 @@ are both lossy and racy.
    dependency and no codegen, `curl --unix-socket` is a working client, and the one
    thing gRPC would buy (a typed schema, streaming) is covered by a documented
    schema and one streaming endpoint. **Do not merge this with M9's plugin
-   protocol** if M9 lands on gRPC. The trust directions are opposite — a plugin is
-   code we load into our address space, a control client is a user we serve — and
-   one transport serving both is how a plugin ends up able to shut down the daemon.
+   protocol**, which did land on gRPC (§2.10). The trust directions are opposite —
+   a plugin is code drivel launches and trusts, a control client is a user drivel
+   serves — and one transport serving both is how a plugin ends up able to shut
+   down the daemon.
    Paths are versioned (`/v1/…`), additive within a version.
 
    **Decided: the API is a view, never an authority.** Same rule that keeps
@@ -2906,6 +3262,219 @@ this whole group walks through, so it is a precondition rather than a note.
     cannot delete would weaken a contract five other providers rely on. It is a
     separate tool that happens to share this repo's OAuth code, and it should be
     scoped that way or not at all.
+
+25. **M23 — Embedded plugins & in-memory launch.** The host binary carries its
+    backends inside itself and executes them without ever writing them to a
+    filesystem. It is a **supply-chain milestone, not an isolation one**, and the
+    entry leads with that because the obvious reading is the wrong one: moving the
+    bytes inside the binary does not change what the plugin process may do once it
+    is running. See "What this does not buy" below before scheduling it as a
+    hardening item.
+
+    **What it removes, which is the whole case for it.** Each of these is a live
+    surface in M9's design, not a hypothetical:
+
+    - *The search path.* `DRIVEL_PLUGIN_PATH`, the five-directory default, and the
+      per-user `~/.local/share/drivel/plugins` entry that is searched **before**
+      the system one. Anyone who can write a directory on that path can name a
+      file `drivel-provider-gdrive` and be handed the user's OAuth token — which
+      is the same trust the mode checks exist to protect, arriving by a route they
+      do not cover.
+    - *`safeToRun`'s race.* The mode and directory checks run against a **path**
+      and the `execve` resolves that path again afterwards. No amount of checking
+      closes the window; it can only be narrowed. Launching from a sealed memory
+      image closes it by construction, because there is no name left to re-resolve
+      — the bytes that were verified are the bytes that run.
+    - *Shadowed kinds.* Two files claiming one kind resolve first-on-the-path-wins
+      with a log line nobody reads. A zip has one entry per name.
+    - *The checksum-pinning item* left open in §2.10 ("not implemented"). It
+      becomes **moot rather than pending**: pinning a digest of content you are
+      already carrying is a digest of yourself.
+
+    **Both halves are prototyped, on 2026-09-11, against Linux 6.19.14.** Neither
+    is assumed.
+
+    *Execution from memory.* `memfd_create(MFD_CLOEXEC|MFD_ALLOW_SEALING)`, write
+    the image, add all four seals (`F_SEAL_SEAL|SHRINK|GROW|WRITE`, read back as
+    `017`), hand the fd to the child through `cmd.ExtraFiles` and exec
+    `/proc/self/fd/3`. `ExtraFiles` is load-bearing and not a convenience: Go sets
+    `CLOEXEC` on every descriptor *except* stdio and that slice, so it is the only
+    way the fd survives into the child's `execve` to be resolved there. No
+    filesystem artifact exists at any point. The change is contained — `clientConfig`
+    (`plugin/host.go`) is the tree's only `exec` site, and it changes from a path
+    to a path plus an `ExtraFiles` entry.
+
+    *The appended zip.* `archive/zip` reads an archive with an arbitrary prefix
+    natively — the end-of-central-directory scan computes the base offset — so
+    `cat drivel plugins.zip > drivel-fat` needs no framing of our own, no trailer
+    and no magic number. The empty case degrades correctly: a host with no payload
+    appended reports `zip: not a valid zip file` and falls through to the M9
+    search path rather than crashing, which is what makes the fallback below
+    implementable at all.
+
+    **The platform split is what decides the design**, and it is the reason this is
+    a seam rather than a function. `memfd_create` is Linux-only. FreeBSD's
+    equivalent is `shm_open(SHM_ANON)` + `fexecve` — believed present since 13,
+    **not yet verified, and it must be run on the VM before this entry is trusted**
+    (the FreeBSD run in M10 is the precedent: it found nothing wrong with the
+    milestone and one real bug underneath it). macOS has **no** anonymous-image
+    exec at all, so there the honest implementation is extract to a `0700`
+    directory, `0500` the file, launch, and unlink — which is a *weaker* claim, not
+    the same one by another route. So "plugins never touch disk" is a Linux and
+    (pending) FreeBSD guarantee and a best-effort elsewhere, and every document
+    that describes the feature has to say which it is. The shape to copy is
+    `hydrate/xattr_*.go`: one interface, a shared body where two platforms agree,
+    a separate file where the API differs.
+
+    One kernel detail belongs here because it is invisible until it fails:
+    `vm.memfd_noexec` (Linux ≥ 6.3) can refuse to execute a memfd that was not
+    created with `MFD_EXEC`. It reads `0` on the development container; a host set
+    to `2` would refuse every launch. Pass `MFD_EXEC` where the kernel knows it and
+    fall back cleanly where it does not — and treat a refusal as a startup error
+    naming the sysctl, never as a mysterious `EACCES` from `exec`.
+
+    **What it costs, measured rather than estimated.** Host 24.2 MB, gdrive
+    28.0 MB, sftp 20.8 MB; the two backends deflate to 24.8 MB, so a fat binary is
+    roughly **49 MB per GOOS/GOARCH**. Two consequences follow. The build graph
+    inverts — plugins are built first and the host embeds them, so `make build`
+    becomes two-stage and the `bin/`-first search path that makes a checkout work
+    with no configuration has to keep working alongside it. And the payload is
+    **architecture-specific**: a zip holding the wrong arch must be refused by
+    name at discovery, because the alternative is an `exec` failure that looks
+    exactly like a corrupt plugin. This does not weaken §2.9's cross-compile proof
+    — the host still links no backend — but it does mean a release matrix row is
+    now a *pair* of builds rather than one.
+
+    **The one real decision, and it is a product decision rather than a technical
+    one: do embedded plugins replace the search path, or precede it?** `provider`
+    is a public package specifically so that a backend can be built out of tree,
+    and embedded-only ends that. The recommendation is **embedded wins and external
+    is opt-in behind an explicit flag** — which is `PathEnv`'s own reasoning
+    reused, that a path which merely goes first makes "which plugin am I running?"
+    depend on something invisible, and that replacing is the decision an operator
+    can see the whole of. A flag that re-enables the M9 path keeps out-of-tree
+    backends alive while making their use a thing someone typed.
+
+    **`embed.FS` would be simpler and should be rejected deliberately, not by
+    default.** It is a single directive, no archive parsing, and the payload is
+    covered by whatever signs the binary. The appended zip earns the extra
+    machinery only if the host is to be built once and have its plugin set varied
+    afterwards — a distributor shipping one host with different backend bundles, or
+    a user dropping a backend into an existing install. If that use case is not
+    wanted, `embed.FS` is the better answer and this entry should say so instead.
+
+    **Self-verification is worth one paragraph of honesty.** Recording a digest per
+    zip entry at build time and checking it before exec defends against *corruption*
+    and essentially nothing else: anyone who can rewrite the appended payload can
+    rewrite the host's own code, so the check is not an obstacle to an attacker who
+    has already won. Integrity of the plugin becomes integrity of the host binary,
+    which is a genuine simplification — one artifact to sign, one thing for a
+    package manager or dm-verity to protect — and it should be described that way
+    rather than as a new guarantee.
+
+    **What this does not buy.** A plugin still runs as the same user with that
+    user's entire filesystem; §2.10 already says this and M23 does not change one
+    word of it. `plugin/env.go`'s built-not-inherited environment is untouched and
+    remains the actual restraint on what a backend is handed. If the goal is a
+    privilege boundary rather than a supply-chain one, the lever is **Landlock or
+    seccomp on the plugin process** — orthogonal to this milestone, considerably
+    larger, and it composes with it rather than competing. Do not let M23 be
+    recorded as having delivered it.
+
+    **Unsettled, in the order that matters.** The FreeBSD `fexecve` verification,
+    because it decides whether the seam has two implementations or three. Then the
+    embed-versus-zip question above, because it decides whether there is an archive
+    at all. Then whether `Loader`'s `refused`/`shadowed` machinery survives as the
+    fallback path or is deleted with the search path it serves — and note that
+    `plugin/testdata/drivel-provider-fake` is built as a real executable on disk,
+    so the test suite must keep exercising **both** launch paths whatever is
+    decided, or the fallback rots unobserved.
+
+26. **M24 — A plugin registry.** A named, versioned, verifiable way to find and
+    install a `drivel-provider-*` executable, modelled on `registry.terraform.io`.
+    Unscheduled, not started. The entry leads with what it is *not*, because the
+    word invites three wrong readings: it is **not a package manager** (there is no
+    dependency resolution to do — see below), **not a CDN** (it serves metadata and
+    URLs, never bytes, exactly as Terraform's does), and **not by itself a
+    code-signing authority**.
+
+    **Build the protocol and the client before the service, and the reason is
+    Terraform's own best decision.** Their registry protocol is implementable by a
+    static file tree behind any HTTPS server — a discovery document, a versions
+    list per plugin, and a per-version document naming the artifact URL, its digest
+    and its signature — which is why private and air-gapped registries work at all
+    and why the CLI needed no special case for them. Copy that shape exactly and
+    `drivel plugin install acme/s3` is testable against a directory under
+    `testdata` on day one. Whether anyone ever *operates* a public instance is a
+    separate and much larger question — abuse policy, takedowns, and being a
+    supply-chain target with a maintainer's weekend behind it — and it must not be
+    a precondition for the client being useful.
+
+    **The central design tension is that M9 made the filename the kind.** §2.10's
+    rule 4 is deliberate: the kind is the `drivel-provider-<kind>` filename and
+    nothing the plugin says about itself. A registry needs a globally unique name,
+    which a bare word cannot be — `acme/s3` and `globex/s3` are two plugins and one
+    filename. Three things have to be decided together and none is obvious: what
+    the installed file is called, how the config file names a provider (today
+    `kind = "gdrive"`), and what happens when both are installed. The
+    recommendation is that **the registry name is the source's and the kind stays
+    local**: installation writes `drivel-provider-s3`, records `acme/s3 v1.2.0` in
+    an install manifest beside it, and a second namespace claiming that kind is
+    **refused at install time naming both** — never resolved by a rule.
+    First-on-the-path-wins is tolerable for a kind today only because nobody can
+    install two by accident; a registry is precisely the machine for doing that.
+
+    **No version solver, and this is a real difference from Terraform rather than a
+    simplification of it.** Terraform needs one because one configuration draws on
+    many providers and modules with shared constraints. drivel has one provider per
+    mount, no dependencies between plugins, and no graph to satisfy — so an install
+    takes an exact version or the newest and records what it got. Constraint syntax
+    (`~> 1.2`) buys a solver, a lockfile format and a class of "no solution" errors
+    in exchange for nothing this program has.
+
+    **Verification stops being optional here, which changes a standing note.**
+    §2.10 records checksum pinning as "not implemented" and M23 argues it becomes
+    moot for an *embedded* plugin, because a digest of a payload you already carry
+    is a digest of yourself. A registry reverses that: the binary now arrives over
+    a network from a third party, so a digest recorded at install and re-checked
+    before exec is the floor — and it is exactly what go-plugin's `SecureConfig`
+    already offers, so the code is small and the decision is the whole cost. The
+    signature question is harder, and Terraform's answer is the one part **not** to
+    copy: their registry distributes the artifact's signature *and* holds the
+    publisher's public key, so compromising the registry compromises the trust root
+    it exists to provide. Wherever drivel anchors that key, it must not be the
+    registry.
+
+    **It depends on M23's one real decision in a way that could kill it.** M23
+    recommends that embedded plugins *replace* the search path, with external ones
+    behind an explicit flag. An installed plugin is an external plugin: it lands in
+    the very path M23 proposes to retire, so M24 is a consumer of that flag and
+    nothing else. If embedded-only ever wins, this milestone has **no install
+    target** and should be withdrawn rather than reconciled — a host that must be
+    rebuilt to gain a backend is a defensible product, just not one with a
+    registry. Sequence M23's embed-versus-zip question first for that reason: a
+    host whose plugin set can be varied after it is built is the same property a
+    registry needs.
+
+    **One licence question has to be answered before a third-party binary is
+    hosted, not after.** A plugin that imports `github.com/zishmusic/drivel/provider`
+    links AGPLv3 Go code into its own binary. A plugin that speaks the protobuf
+    protocol directly links none of drivel's code, and its relationship to the host
+    is the same arms-length one §2.9.2 argues for go-fuse and macFUSE — separate
+    programs communicating over a socket. Those two cases plausibly have different
+    answers; `provider` is public *specifically* to enable the first; and a registry
+    turns the question from academic into operational the moment it hosts something
+    somebody else wrote. Record a declared licence per plugin, and get the answer in
+    writing before the first upload rather than after a dispute.
+
+    **Unsettled, in the order that matters.** The M23 dependency, because it decides
+    whether there is anything to install at all. Then the naming decision above,
+    because it decides the config file's syntax and so becomes a breaking change if
+    deferred. Then the trust anchor. Then whether this protocol should also carry
+    the CLI/completion manifest a host needs to describe a plugin's settings — and
+    the answer is no: that manifest describes the plugin **you have installed**, has
+    to work with no network, and is derived from the executable itself, so it
+    belongs to plugin loading and not to distribution.
 
 
 ### M0 — Test & CI (cross-cutting, always open)

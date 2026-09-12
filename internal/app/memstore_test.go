@@ -12,7 +12,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/zishmusic/drivel/internal/provider"
+	"github.com/zishmusic/drivel/provider"
 )
 
 // memStore is a complete provider in memory: mutations, a cursor change feed and

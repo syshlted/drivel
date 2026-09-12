@@ -11,8 +11,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/zishmusic/drivel/internal/provider"
 	"github.com/zishmusic/drivel/internal/testenv"
+	"github.com/zishmusic/drivel/provider"
 )
 
 // gateStore holds every Get open until it is released, and records the highest

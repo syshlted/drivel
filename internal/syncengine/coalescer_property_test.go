@@ -5,7 +5,7 @@ import (
 	"testing"
 
 	"github.com/zishmusic/drivel/internal/fsevent"
-	"github.com/zishmusic/drivel/internal/ranges"
+	"github.com/zishmusic/drivel/ranges"
 )
 
 // Property tests for the coalescer's merge rule (DESIGN.md §9, M0 item 3).

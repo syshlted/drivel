@@ -56,20 +56,30 @@ highest semver tag.
 
 ## What will (and won't) be documented
 
-- **`cmd/drivel`** is `package main` — a command, not an importable library.
-  pkg.go.dev lists it and renders the command's doc comment (the one at the top
-  of `cmd/drivel/main.go`), but there is no importable API surface.
-- **Everything under `internal/`** is intentionally hidden. Go tooling and
-  pkg.go.dev never expose `internal/` packages to external importers, so the
-  provider seam, sync engine, transport, etc. will *not* get public doc pages.
-  That is by design — the packages are implementation detail, not a supported
-  API. If you ever want a package to be publicly documented and importable, move
-  it out of `internal/`.
+- **`cmd/drivel`** and the `cmd/drivel-provider-*` commands are `package main` —
+  commands, not importable libraries. pkg.go.dev lists them and renders each
+  command's doc comment, but there is no importable API surface.
+- **Three packages are public and are meant to be**: `provider` (the backend seam),
+  `ranges` (the extent types its `RangePutter` names) and `plugin` (the loader and
+  the `Serve` a backend's `main` calls). They are outside `internal/` because M9's
+  whole point is that a backend can be written out of tree, and an out-of-tree
+  backend imports all three. Their doc pages are therefore the API documentation
+  for writing a provider, and they carry a compatibility obligation the rest of
+  the tree does not: renaming an exported identifier there breaks somebody else's
+  build.
+- **Everything else under `internal/`** is intentionally hidden. Go tooling and
+  pkg.go.dev never expose `internal/` packages to external importers, so the sync
+  engine, the mount backend, the transport and the two shipped provider
+  implementations will *not* get public doc pages. That is by design — they are
+  implementation detail, not a supported API. If you ever want another package
+  publicly documented and importable, move it out of `internal/` deliberately, and
+  accept the same obligation.
 - The repo `README.md` is rendered on the module landing page, and the
   `LICENSE` is linked.
 
-Because the public surface is essentially just the command, most of the value on
-pkg.go.dev here is the landing page (README + install line), not API docs.
+The pages worth reading, then, are the landing page (README + install line) and
+the three public packages. `plugin`'s package doc is the entry point for anyone
+writing a backend, and is written as one.
 
 ## Quality checklist (makes the page good, not just present)
 
@@ -88,10 +98,13 @@ Once a tag exists, users install the command with:
 
 ```sh
 go install github.com/zishmusic/drivel/cmd/drivel@latest
+go install github.com/zishmusic/drivel/cmd/drivel-provider-gdrive@latest
 ```
 
-(That places a `drivel` binary in `$(go env GOBIN)` or `$GOPATH/bin`. Note it
-still needs the system `fuse3` helper at runtime — see the README.)
+(That places both binaries in `$(go env GOBIN)` or `$GOPATH/bin`. The second one
+is the Google Drive backend: since M9 the command carries no backend of its own,
+so a `drivel` installed alone mounts but cannot sync. It also still needs the
+system `fuse3` helper at runtime — see the README.)
 
 ## Removing a bad version
 

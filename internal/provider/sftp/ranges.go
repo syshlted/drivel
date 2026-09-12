@@ -6,8 +6,8 @@ import (
 	"io"
 	"os"
 
-	"github.com/zishmusic/drivel/internal/provider"
-	"github.com/zishmusic/drivel/internal/ranges"
+	"github.com/zishmusic/drivel/provider"
+	"github.com/zishmusic/drivel/ranges"
 )
 
 // GetRange reads a byte range of p (provider.RangeGetter, M5).

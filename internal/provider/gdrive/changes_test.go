@@ -3,7 +3,7 @@ package gdrive
 import (
 	"testing"
 
-	"github.com/zishmusic/drivel/internal/provider"
+	"github.com/zishmusic/drivel/provider"
 )
 
 // The change feed's shape, above the seam.

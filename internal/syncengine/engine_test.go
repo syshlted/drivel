@@ -11,7 +11,7 @@ import (
 	"testing"
 
 	"github.com/zishmusic/drivel/internal/fsevent"
-	"github.com/zishmusic/drivel/internal/provider"
+	"github.com/zishmusic/drivel/provider"
 )
 
 // fakeStore records path-addressed calls. It tracks which paths it has "seen" so

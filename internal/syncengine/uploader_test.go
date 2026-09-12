@@ -8,8 +8,8 @@ import (
 	"time"
 
 	"github.com/zishmusic/drivel/internal/fsevent"
-	"github.com/zishmusic/drivel/internal/provider"
-	"github.com/zishmusic/drivel/internal/ranges"
+	"github.com/zishmusic/drivel/provider"
+	"github.com/zishmusic/drivel/ranges"
 )
 
 // --- coalescer (pure debounce logic, no timers) -----------------------------

@@ -36,7 +36,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/zishmusic/drivel/internal/provider"
+	"github.com/zishmusic/drivel/provider"
 )
 
 // defaultPort is SSH's, and the only sensible default.

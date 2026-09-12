@@ -23,7 +23,7 @@ import (
 	"strings"
 
 	"github.com/zishmusic/drivel/internal/completion"
-	"github.com/zishmusic/drivel/internal/provider/gdrive"
+	"github.com/zishmusic/drivel/internal/provider/gdrive/gdconf"
 )
 
 // hint is the half of a flag's completion that its definition cannot supply: the
@@ -90,9 +90,20 @@ var completionHints = map[string]hint{
 // so a mode that is added, renamed or withdrawn cannot leave the completions
 // offering a value the program refuses at startup.
 var (
-	sweepModes  = []string{string(gdrive.SweepAuto), string(gdrive.SweepFlat), string(gdrive.SweepScoped)}
-	deleteModes = []string{string(gdrive.DeleteTrash), string(gdrive.DeletePermanent)}
+	sweepModes  = modeStrings(gdconf.SweepModes)
+	deleteModes = modeStrings(gdconf.DeleteModes)
 )
+
+// modeStrings renders a provider's list of accepted values for a menu. Taking
+// the list rather than naming each constant is what makes "added, renamed or
+// withdrawn" reach the completions on its own.
+func modeStrings[M ~string](modes []M) []string {
+	out := make([]string, len(modes))
+	for i, m := range modes {
+		out[i] = string(m)
+	}
+	return out
+}
 
 // completionApp describes drivel to the renderers, taking the flags from the
 // real flag sets. Nothing here lists a flag by name.

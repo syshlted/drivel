@@ -3,6 +3,14 @@
 Words this codebase reuses with a specific meaning. Where a term has an obvious
 everyday reading that is *wrong* here, that is called out.
 
+### backend / provider plugin
+
+The executable that talks to one storage service — `drivel-provider-gdrive`,
+`drivel-provider-sftp`. Since M9 a backend is a separate process that `drivel`
+launches and speaks gRPC to over a unix socket; the `drivel` binary links none of
+them. The **kind** it provides is the suffix of its filename, which is what a
+config file names with `provider = "…"`. See DESIGN.md §2.10.
+
 ### backing store / backing directory
 
 The real directory behind a mount — the source of truth and the local cache, both.
@@ -18,6 +26,16 @@ The record that Drivel has previously synced particular content at a particular
 path — physically, an [echo](#echo) record. It is what makes a deletion
 inferrable: absence with a baseline means "it went away", absence without one
 means "it is new". No baseline ⇒ no deletion, ever.
+
+### capability
+
+One of the five optional interfaces beside `provider.Store` — `ChangeSource`,
+`Enumerator`, `RangeGetter`, `RangePutter`, `ContentHasher`. Which of them a store
+offers is asked through `provider.Capabilities` and the `As*` accessors, never by
+type assertion: a backend in another process is reached through one proxy type
+that has every optional method regardless of what is behind it. A store may
+**declare** a set (`provider.Declarer`), and a declaration can only narrow what
+its method set already allows.
 
 ### conflict copy
 

@@ -25,6 +25,19 @@ placeholder is never uploaded, a deletion is inferred only from a sync baseline,
 partial write is never spliced into a remote file that has diverged. A way to
 violate one of those is a security issue even if no attacker is involved.
 
+**Storage backends are separate programs.** Drivel finds an executable named
+`drivel-provider-<name>` on a search path, launches it, and hands it the
+credentials for that mount. A backend is **not sandboxed, and is not meant to
+be**: it runs as you, with your files, exactly as it would have if it were
+compiled in. Installing one is trusting it, and that is not a vulnerability.
+
+What *is* a vulnerability is anything that lets a file Drivel did not mean to run
+become that backend. Drivel refuses a backend that is group- or world-writable or
+that sits in a world-writable directory, builds the child's environment instead of
+passing on its own, and speaks to it only over a private socket on your machine.
+Those checks run against a path that is resolved again when the process is
+launched, so they narrow that window rather than closing it.
+
 **The placeholder marker.** In lazy mode, an extended attribute on the backing
 file is the only record that a file's content has not been downloaded yet.
 Anything that lets an unprivileged local process forge or strip that marker can
@@ -44,6 +57,25 @@ production.
 **The mountpoint itself.** A FUSE mount is a filesystem; what other users on the
 machine can do with it is governed by the usual permissions and by FUSE's
 `allow_other` (which Drivel does not enable).
+
+## What has not been looked at
+
+Drivel has had **no systematic security review**. There has been no audit, no
+threat model written down end to end, and no fuzzing. The surfaces listed above
+are the ones its authors designed for, which is not the same list as the ones that
+exist — several of them were found while building something unrelated, and the
+honest expectation is that others have not been found yet.
+
+Two areas have had the least adversarial attention, and are where someone looking
+should probably start. Data arriving from a remote store — names, paths, sizes,
+timestamps — decides what Drivel writes and where it writes it in your backing
+directory, which is the classic shape for a traversal or overwrite bug. And the
+places where the sync engine's concurrency meets the filesystem's, where a finding
+is more likely to read as "this corrupts a file" than as "this grants access".
+
+This is recorded as a fact rather than as a disclaimer. A report against a surface
+nobody has reviewed is more useful than one against a surface that has been, not
+less.
 
 ## Not in scope
 

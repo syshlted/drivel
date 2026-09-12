@@ -513,7 +513,7 @@ func TestPropCloneIsIndependent(t *testing.T) {
 
 // FuzzSetInvariants is the same three properties with the case chosen by the
 // fuzzer instead of by a seed loop. `go test -race ./...` runs the corpus below;
-// `go test -run=- -fuzz=FuzzSetInvariants ./internal/ranges` goes looking.
+// `go test -run=- -fuzz=FuzzSetInvariants ./ranges` goes looking.
 func FuzzSetInvariants(f *testing.F) {
 	f.Add(uint64(1), int64(4096), int64(64), 16)
 	f.Add(uint64(7), int64(1), int64(1), 4)

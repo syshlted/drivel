@@ -6,9 +6,16 @@ obvious change is wrong and the tests will not tell you.
 ## Structural
 
 - **Keep the core provider- and FUSE-agnostic.** The sync engine depends only on
-  the `internal/provider` and `internal/mount` seams and on `internal/fsevent` —
-  never on a concrete Drive or go-fuse type. New backends implement an interface;
-  they do not get special-cased upstream.
+  the `provider` and `internal/mount` seams and on `internal/fsevent` — never on a
+  concrete Drive or go-fuse type. New backends implement an interface; they do not
+  get special-cased upstream. Since M9 the `drivel` binary does not even link one.
+- **Ask a store what it can do; never assert it.** `provider.AsChangeSource` and
+  its four siblings, not `store.(provider.ChangeSource)`. A backend in another
+  process is reached through one proxy type that has every optional method
+  regardless of what is behind it, so the assertion answers "yes" for all five and
+  the mount polls a change feed that does not exist. The rule that makes the
+  alternative safe: a declaration **narrows and can never widen**, so a store can
+  never talk its way into a method it does not have.
 - **Never block the FUSE path on the network.** Filesystem operations proxy to the
   backing store and, for mutations, emit an `fsevent.Event` on a buffered channel.
   All network work happens off that path.
@@ -25,9 +32,15 @@ obvious change is wrong and the tests will not tell you.
 - **The registry is a value, not a package-global.** No `init()` registration, no
   import for side effect. It would be the only process-global mutable state in the
   tree, in the subsystem whose whole premise is that there isn't any.
-- **Provider config crosses the seam undecoded.** `internal/config` must never
-  learn what a Drive folder ID is. Adding a provider touches neither `config` nor
-  `app`.
+- **Provider config crosses the seam undecoded**, as the TOML text the user wrote
+  (`provider.Config`). `internal/config` must never learn what a Drive folder ID
+  is. Adding a provider touches neither `config` nor `app`. It is bytes rather
+  than a closure because a closure cannot cross a process boundary.
+- **A plugin's environment is built, not inherited.** `plugin/env.go` holds the
+  allowlist and the reasoning. Adding to it is a security decision, not a
+  convenience one: the point is that a backend authenticates with what its
+  configuration names, not with whatever was exported in the shell that started
+  the mount.
 
 ## In-place mode's cardinal rule
 
@@ -78,7 +91,7 @@ wrapped handle closes the fd) and grows the set to the real size. Skip that and
 the engine's size cross-check rejects every set — range writes silently never
 fire.
 
-In `internal/ranges`, present-ranges round **inward** (`Mark`) and dirty-ranges
+In `ranges`, present-ranges round **inward** (`Mark`) and dirty-ranges
 round **outward** (`MarkCovering`). Same bitmap, opposite rounding, and the
 asymmetry is the point.
 

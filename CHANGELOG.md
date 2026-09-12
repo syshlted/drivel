@@ -3,11 +3,65 @@
 What has changed in Drivel, in plain terms. The long-form reasoning behind each
 decision lives in the repo's design notes; this file is the summary.
 
-There are **no tagged releases yet**. Everything below is on the main branch;
-install with `go install github.com/zishmusic/drivel/cmd/drivel@latest` or build
-from source.
+There are **no tagged releases yet**. Everything below is on the main branch.
+Install with `go install github.com/zishmusic/drivel/cmd/drivel@latest`
+**plus at least one backend** (`…/cmd/drivel-provider-gdrive@latest`), or build
+from source with `make build`.
 
 ## Unreleased
+
+### Storage backends are now separate programs — 2026-09-11
+
+**Drivel no longer contains its storage backends; it starts them.** Google Drive
+lives in `drivel-provider-gdrive`, SFTP in `drivel-provider-sftp`, and `drivel`
+launches whichever a mount needs, talking to it over a private socket.
+
+**This changes how you install it.** Install at least one backend alongside the
+command — a `drivel` with none can still mount a directory, but has nothing to
+sync with:
+
+```sh
+go install github.com/zishmusic/drivel/cmd/drivel@latest
+go install github.com/zishmusic/drivel/cmd/drivel-provider-gdrive@latest
+```
+
+From a checkout, `make build` builds all of them and `sudo make install` places
+them in `/usr/local/lib/drivel/plugins`. Nothing else changes: your config file,
+your flags, your credentials and your backing directories are all as they were.
+
+**What you get for it.** A backend that crashes no longer takes your filesystem
+with it — the mount stays up, Drivel restarts the backend behind it, and anything
+that was waiting to upload is retried. And you carry only the backends you use:
+the Drive client, its OAuth stack and its HTTP/3 transport are no longer in the
+binary of someone who only syncs to SFTP.
+
+**It also means Drivel can be extended without being forked.** A backend is an
+ordinary Go program in its own repository: implement the storage interface, call
+`plugin.Serve`, build it as `drivel-provider-<name>`, and a config file can name
+it. See [writing a provider](docs/dev/new-provider.md).
+
+Four things worth knowing:
+
+- **Drivel refuses to start a backend that is group- or world-writable**, or one
+  sitting in a world-writable directory. A backend runs with your credentials, so
+  a file anyone could swap out is a file anyone could swap out *with*. The
+  refusal names the file and the problem.
+- **Drivel talks to a backend over a private socket on your own machine, and
+  nothing else.** A backend that asks to be reached over the network — even on
+  this machine's own loopback address — is refused before anything connects to
+  it. A loopback port is reachable by every user on the machine; the socket
+  Drivel uses is readable only by you.
+- **A backend gets a deliberately small environment** — `PATH`, `HOME`, `TMPDIR`,
+  locale, TLS roots, proxy settings and `SSH_AUTH_SOCK`, and nothing else.
+  Ambient cloud credentials such as `GOOGLE_APPLICATION_CREDENTIALS` are not
+  passed on, so which account a mount uses is a fact about your config file
+  rather than about the shell you started it from.
+- **This is not a sandbox**, and it is not described as one. A backend runs as
+  you, with your files. Installing one is trusting it, exactly as much as if it
+  had been compiled in.
+
+New troubleshooting for all of this is on the [troubleshooting
+page](docs/user/troubleshooting.md#backends).
 
 ### Drivel now syncs to SFTP servers — 2026-09-10
 

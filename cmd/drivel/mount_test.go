@@ -93,7 +93,7 @@ func TestFlagsReachTheSpec(t *testing.T) {
 
 	// The Drive-shaped flags have to arrive as Drive's own config.
 	var got gdrive.Config
-	if err := s.ProviderConfig(&got); err != nil {
+	if err := s.ProviderConfig.Decode(&got); err != nil {
 		t.Fatalf("decoding provider config: %v", err)
 	}
 	want := gdrive.Config{

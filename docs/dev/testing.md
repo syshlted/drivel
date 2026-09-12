@@ -34,6 +34,38 @@ and install the `fuse3` package; without that the job tests less than it looks
 like it does. On a machine that genuinely cannot mount, leave the variable unset
 and expect the skips.
 
+## Tests that launch a real plugin process
+
+The `plugin` package and two tests in `internal/app` build a backend and run it as
+a subprocess. Everything cheaper was considered and rejected: a gRPC round trip
+over an in-memory connection exercises the protocol but not the thing M9 actually
+adds — that a backend in another process can be started, talked to, crash, and be
+started again — and that is where the bugs that matter are.
+
+The backend they build is
+[plugin/testdata/drivel-provider-fake](../../plugin/testdata/drivel-provider-fake),
+and it is under `testdata` deliberately: the go tool never matches that directory
+with `./...`, so a test-only backend can be a `main` package in the tree without
+being part of the build or of anything shipped. The same decision M8 made about its
+pseudo-provider.
+
+**Everything it does is driven by the TOML settings the host sends it** — which
+capabilities to offer, which call to fail and with which classification, which call
+to exit on, where to journal what it received. That is what lets one binary cover
+capability narrowing, error mapping, crash recovery and a full end-to-end mount
+without thirty-two variants of itself. It offers a configurable capability set by
+implementing `provider.Declarer`, which is the second legitimate use of that
+interface: a test double is the other kind of value whose method set is not the
+truth.
+
+It also reads its `PutRange` extents **in descending order**, on purpose. The seam
+promises an `io.ReaderAt` so an implementation may seek where it likes; a host that
+had quietly turned that into a single forward pass would pass every other test and
+fail that one.
+
+Building it costs one `go build` per test binary (`sync.OnceValues`), so the whole
+plugin suite runs in a couple of seconds.
+
 ## Property tests
 
 `ranges/property_test.go` and `syncengine/coalescer_property_test.go` are

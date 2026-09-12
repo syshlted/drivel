@@ -9,7 +9,7 @@ import (
 	"google.golang.org/api/drive/v3"
 	"google.golang.org/api/googleapi"
 
-	"github.com/zishmusic/drivel/internal/provider"
+	"github.com/zishmusic/drivel/provider"
 )
 
 // Scoped enumeration (DESIGN.md §9, M7c).
@@ -43,27 +43,6 @@ import (
 // than the account holds thousands of objects is cheaper to sweep flat. That is
 // why the mode is selectable, why auto keeps flat for whole-drive mounts, and
 // why a descent that is spending far more requests than objects says so.
-
-// SweepMode selects how Enumerate walks the tree.
-type SweepMode string
-
-const (
-	// SweepAuto descends when RootID names a concrete folder and lists the account
-	// when it names the whole Drive. It is the zero value's meaning too.
-	SweepAuto SweepMode = "auto"
-	// SweepFlat always lists the account (M7b behaviour).
-	SweepFlat SweepMode = "flat"
-	// SweepScoped always descends from the mount root.
-	SweepScoped SweepMode = "scoped"
-)
-
-func (m SweepMode) valid() bool {
-	switch m {
-	case "", SweepAuto, SweepFlat, SweepScoped:
-		return true
-	}
-	return false
-}
 
 // enumFanout is how many folder listings one Enumerate call issues at once. The
 // requests are independent, which is exactly what the flat sweep's page tokens

@@ -26,10 +26,10 @@ import (
 	"github.com/zishmusic/drivel/internal/fsevent"
 	"github.com/zishmusic/drivel/internal/hydrate"
 	"github.com/zishmusic/drivel/internal/mount"
-	"github.com/zishmusic/drivel/internal/provider"
 	"github.com/zishmusic/drivel/internal/state"
 	"github.com/zishmusic/drivel/internal/syncengine"
 	"github.com/zishmusic/drivel/internal/vfs"
+	"github.com/zishmusic/drivel/provider"
 )
 
 // eventBuffer is how many mount events may be in flight before the FUSE handler
@@ -53,9 +53,11 @@ type MountSpec struct {
 	// Provider names a kind registered in the provider.Registry. Empty runs the
 	// mount log-only (M1 behaviour): no network, no auth, no state store.
 	Provider string
-	// ProviderConfig carries that provider's own configuration, undecoded. See
-	// provider.Factory; provider.StaticDecoder builds one from a value in hand.
-	ProviderConfig func(any) error
+	// ProviderConfig carries that provider's own configuration, undecoded, as the
+	// TOML table the user wrote. See provider.Config; provider.EncodeConfig builds
+	// one from a settings struct in hand, which is what the flag and fstab paths
+	// do.
+	ProviderConfig provider.Config
 
 	Lazy  bool // M5 lazy hydration
 	Debug bool // FUSE-level tracing
@@ -228,7 +230,7 @@ func Open(ctx context.Context, spec MountSpec, reg *provider.Registry) (*Mount, 
 	// which needs no network or auth.
 	if spec.Provider != "" {
 		store, err := reg.Open(ctx, spec.Provider, provider.Params{
-			Decode: spec.ProviderConfig,
+			Config: spec.ProviderConfig,
 			Log:    m.logger(),
 		})
 		if err != nil {
@@ -291,8 +293,8 @@ func Open(ctx context.Context, spec MountSpec, reg *provider.Registry) (*Mount, 
 	// filesystem backend in the M17–M21 group has only the sweep, which is then
 	// the whole inbound path rather than a backstop under a feed. src stays nil in
 	// that case and the downloader runs sweep-only.
-	src, _ := m.store.(provider.ChangeSource)
-	_, canEnum := m.store.(provider.Enumerator)
+	src, _ := provider.AsChangeSource(m.store)
+	_, canEnum := provider.AsEnumerator(m.store)
 	if src != nil || canEnum {
 		dl := syncengine.NewDownloader(src, m.store, backing.Path, m.state, syncengine.DefaultCadence)
 		if m.hyd != nil {
@@ -337,7 +339,7 @@ func (m *Mount) Run(ctx context.Context) error {
 		// "changes.list pull loop" was Drive's name for it and was printed for every
 		// provider, including one that has no feed at all — where the sweep interval
 		// IS the inbound latency and is the number the operator needs to see.
-		switch _, hasFeed := m.store.(provider.ChangeSource); {
+		switch _, hasFeed := provider.AsChangeSource(m.store); {
 		case hasFeed:
 			m.logf("inbound sync enabled (change-feed poll loop)")
 		case m.spec.SweepInterval > 0:

@@ -14,9 +14,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/zishmusic/drivel/internal/provider"
 	"github.com/zishmusic/drivel/internal/state"
 	"github.com/zishmusic/drivel/internal/testenv"
+	"github.com/zishmusic/drivel/provider"
 )
 
 // Several drivel instances against one remote — the shape docs/dev/multiclient-test-plan.md

@@ -31,9 +31,9 @@ import (
 	"github.com/zishmusic/drivel/internal/app"
 	"github.com/zishmusic/drivel/internal/config"
 	"github.com/zishmusic/drivel/internal/hydrate"
-	"github.com/zishmusic/drivel/internal/provider"
-	"github.com/zishmusic/drivel/internal/provider/gdrive"
+	"github.com/zishmusic/drivel/internal/provider/gdrive/gdconf"
 	"github.com/zishmusic/drivel/internal/syncengine"
+	"github.com/zishmusic/drivel/provider"
 )
 
 // helperArgs is a parsed mount(8) helper command line.
@@ -680,12 +680,12 @@ func helperOptionSpec(h *helperArgs, c *helperOptions) (app.MountSpec, error) {
 	}
 
 	spec.Provider = driveKind
-	spec.ProviderConfig = provider.StaticDecoder(gdrive.Config{
+	spec.ProviderConfig = provider.MustEncodeConfig(gdconf.Config{
 		Credentials: credentials,
 		Token:       token,
 		RootID:      c.driveRoot,
-		Delete:      gdrive.DeleteMode(c.driveDelete),
-		SweepMode:   gdrive.SweepMode(c.driveSweep),
+		Delete:      gdconf.DeleteMode(c.driveDelete),
+		SweepMode:   gdconf.SweepMode(c.driveSweep),
 		IndexPath:   index,
 	})
 	return spec, nil

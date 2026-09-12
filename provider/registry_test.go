@@ -28,35 +28,33 @@ func (nopStore) Stat(context.Context, string) (RemoteFile, bool, error) {
 	return RemoteFile{}, false, nil
 }
 
-// factoryFor returns a Factory that decodes into a *string and tags the store
-// with the result, so a test can prove which config reached which factory.
+// tagged is what factoryFor decodes into: one key, so a test can prove which
+// config reached which factory.
+type tagged struct {
+	Tag string `toml:"tag"`
+}
+
+// factoryFor returns a Factory that decodes its settings and tags the store with
+// the result.
 func factoryFor(tag string) Factory {
 	return func(_ context.Context, p Params) (Store, error) {
-		var into string
-		if err := p.Decode(&into); err != nil {
+		var into tagged
+		if err := p.Config.Decode(&into); err != nil {
 			return nil, err
 		}
-		return nopStore{tag: tag + ":" + into}, nil
+		return nopStore{tag: tag + ":" + into.Tag}, nil
 	}
 }
 
-func decodeString(v string) func(any) error {
-	return func(dst any) error {
-		p, ok := dst.(*string)
-		if !ok {
-			return fmt.Errorf("want *string, got %T", dst)
-		}
-		*p = v
-		return nil
-	}
-}
+// configWith builds the settings a factoryFor store expects.
+func configWith(tag string) Config { return MustEncodeConfig(tagged{Tag: tag}) }
 
 func TestRegistryOpenPassesConfigThrough(t *testing.T) {
 	r := NewRegistry()
 	if err := r.Register("alpha", factoryFor("alpha")); err != nil {
 		t.Fatalf("Register: %v", err)
 	}
-	s, err := r.Open(context.Background(), "alpha", Params{Decode: decodeString("cfg")})
+	s, err := r.Open(context.Background(), "alpha", Params{Config: configWith("cfg")})
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
@@ -78,11 +76,11 @@ func TestRegistrySameFactoryUnderTwoNames(t *testing.T) {
 	if err := r.Register("drive-b", f); err != nil {
 		t.Fatalf("Register b: %v", err)
 	}
-	a, err := r.Open(context.Background(), "drive-a", Params{Decode: decodeString("account-a")})
+	a, err := r.Open(context.Background(), "drive-a", Params{Config: configWith("account-a")})
 	if err != nil {
 		t.Fatalf("Open a: %v", err)
 	}
-	b, err := r.Open(context.Background(), "drive-b", Params{Decode: decodeString("account-b")})
+	b, err := r.Open(context.Background(), "drive-b", Params{Config: configWith("account-b")})
 	if err != nil {
 		t.Fatalf("Open b: %v", err)
 	}
@@ -102,7 +100,7 @@ func TestRegistryRejectsDuplicate(t *testing.T) {
 	}
 	// The first registration must survive: a rejected duplicate that still
 	// overwrote would be worse than allowing it.
-	s, err := r.Open(context.Background(), "dup", Params{Decode: decodeString("x")})
+	s, err := r.Open(context.Background(), "dup", Params{Config: configWith("x")})
 	if err != nil {
 		t.Fatalf("Open after rejected duplicate: %v", err)
 	}
@@ -127,7 +125,7 @@ func TestRegistryUnknownKind(t *testing.T) {
 	if !errors.Is(err, ErrUnknownKind) {
 		t.Fatalf("err = %v; want it to wrap ErrUnknownKind", err)
 	}
-	if !strings.Contains(err.Error(), "no providers registered") {
+	if !strings.Contains(err.Error(), "no providers available") {
 		t.Errorf("empty-registry error should say so: %v", err)
 	}
 
@@ -140,7 +138,32 @@ func TestRegistryUnknownKind(t *testing.T) {
 	// A typo in a hand-written config is the overwhelmingly likely cause, so the
 	// error has to name what was available.
 	if !strings.Contains(err.Error(), "alpha, gdrive") {
-		t.Errorf("error should list known kinds sorted: %v", err)
+		t.Errorf("error should list available kinds sorted: %v", err)
+	}
+}
+
+// Since a backend became something installed rather than compiled in, "unknown
+// kind" is accurate and unactionable on its own: the user has to be told where
+// to put one. The registry must not learn what a plugin is, so the layer that
+// does contributes the sentence.
+func TestRegistryUnknownKindCarriesTheHint(t *testing.T) {
+	r := NewRegistry()
+	r.Hint(func(kind string) string { return "no drivel-provider-" + kind + " in /somewhere" })
+	_ = r.Register("alpha", factoryFor("alpha"))
+
+	_, err := r.Open(context.Background(), "beta", Params{})
+	if !errors.Is(err, ErrUnknownKind) {
+		t.Fatalf("err = %v; want ErrUnknownKind", err)
+	}
+	if !strings.Contains(err.Error(), "no drivel-provider-beta in /somewhere") {
+		t.Errorf("the hint did not reach the error: %v", err)
+	}
+
+	// An empty hint must add nothing rather than a dangling separator.
+	r.Hint(func(string) string { return "" })
+	_, err = r.Open(context.Background(), "beta", Params{})
+	if strings.HasSuffix(err.Error(), ";") || strings.Contains(err.Error(), "; ") {
+		t.Errorf("an empty hint left a separator behind: %v", err)
 	}
 }
 
@@ -151,12 +174,12 @@ func TestRegistryZeroParamsIsSafe(t *testing.T) {
 	called := false
 	_ = r.Register("k", func(_ context.Context, p Params) (Store, error) {
 		called = true
-		var s string
-		if err := p.Decode(&s); err != nil {
+		var into tagged
+		if err := p.Config.Decode(&into); err != nil {
 			return nil, err
 		}
-		if s != "" {
-			return nil, fmt.Errorf("no-op decode wrote %q", s)
+		if into.Tag != "" {
+			return nil, fmt.Errorf("decoding an empty config wrote %q", into.Tag)
 		}
 		if p.Log == nil {
 			return nil, errors.New("Log is nil; every provider logs unconditionally")
@@ -231,32 +254,84 @@ func TestRegistryConcurrent(t *testing.T) {
 	}
 }
 
-func TestStaticDecoder(t *testing.T) {
-	type driveish struct{ Root string }
+func TestEncodeConfigRoundTrips(t *testing.T) {
+	type driveish struct {
+		Root string `toml:"root"`
+	}
 
 	var got driveish
-	if err := StaticDecoder(driveish{Root: "abc"})(&got); err != nil {
-		t.Fatalf("StaticDecoder: %v", err)
+	if err := MustEncodeConfig(driveish{Root: "abc"}).Decode(&got); err != nil {
+		t.Fatalf("Decode: %v", err)
 	}
 	if got.Root != "abc" {
 		t.Errorf("Root = %q; want abc", got.Root)
 	}
+}
 
-	// A provider decoding into a type nobody configured is a wiring mistake, and
-	// the error has to name both sides or it is unactionable.
-	err := StaticDecoder(driveish{})(new(string))
+// The flag path and the config-file path build the same settings two different
+// ways, and the tags are what makes them agree. A struct encoded here has to
+// decode the same as the equivalent hand-written table.
+func TestEncodeConfigMatchesHandWrittenTOML(t *testing.T) {
+	type driveish struct {
+		Root  string `toml:"root"`
+		Sweep string `toml:"sweep-mode"`
+	}
+
+	var fromStruct, fromText driveish
+	if err := MustEncodeConfig(driveish{Root: "abc", Sweep: "scoped"}).Decode(&fromStruct); err != nil {
+		t.Fatalf("Decode(struct): %v", err)
+	}
+	if err := Config("root = \"abc\"\nsweep-mode = \"scoped\"\n").Decode(&fromText); err != nil {
+		t.Fatalf("Decode(text): %v", err)
+	}
+	if fromStruct != fromText {
+		t.Errorf("struct path gave %+v, config-file path gave %+v", fromStruct, fromText)
+	}
+}
+
+// M8 rule 6: a key the provider does not define is an error, not a shrug. The
+// message has to name every offender, since someone fixing a config file would
+// rather see all of them than find them one run at a time.
+func TestConfigDecodeRejectsUnknownKeys(t *testing.T) {
+	type driveish struct {
+		Root string `toml:"root"`
+	}
+	var got driveish
+	err := Config("root = \"abc\"\nlazzy = true\nnonsense = 1\n").Decode(&got)
 	if err == nil {
-		t.Fatal("mismatched destination accepted")
+		t.Fatal("unknown keys accepted")
 	}
-	if !strings.Contains(err.Error(), "driveish") || !strings.Contains(err.Error(), "string") {
-		t.Errorf("error should name both types: %v", err)
+	for _, want := range []string{"lazzy", "nonsense"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error should name %q: %v", want, err)
+		}
 	}
+}
 
-	if err := StaticDecoder(driveish{})(driveish{}); err == nil {
-		t.Error("non-pointer destination accepted")
+// The zero Config is what a mount with no settings for its kind produces, and a
+// Factory must be able to call Decode on it without checking first.
+func TestZeroConfigDecodesToZeroValue(t *testing.T) {
+	type driveish struct {
+		Root string `toml:"root"`
 	}
-	var nilp *driveish
-	if err := StaticDecoder(driveish{})(nilp); err == nil {
-		t.Error("nil pointer destination accepted")
+	var got driveish
+	if err := (Config(nil)).Decode(&got); err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	if got.Root != "" {
+		t.Errorf("Root = %q; want empty", got.Root)
+	}
+}
+
+// Config is a []byte, so an ordinary %v would print a provider's whole
+// configuration into a log file. It must print the shape and not the values.
+func TestConfigStringHidesValues(t *testing.T) {
+	c := Config("token = \"s3cret\"\nroot = \"abc\"\n")
+	got := fmt.Sprintf("%v", c)
+	if strings.Contains(got, "s3cret") {
+		t.Errorf("String leaked a value: %s", got)
+	}
+	if !strings.Contains(got, "token") || !strings.Contains(got, "root") {
+		t.Errorf("String should name the keys: %s", got)
 	}
 }

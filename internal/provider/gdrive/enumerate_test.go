@@ -5,7 +5,7 @@ import (
 
 	drive "google.golang.org/api/drive/v3"
 
-	"github.com/zishmusic/drivel/internal/provider"
+	"github.com/zishmusic/drivel/provider"
 )
 
 // sweep drives a full enumeration and returns every object it emitted, keyed by

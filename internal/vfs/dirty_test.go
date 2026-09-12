@@ -8,7 +8,7 @@ import (
 	"time"
 
 	"github.com/zishmusic/drivel/internal/fsevent"
-	"github.com/zishmusic/drivel/internal/ranges"
+	"github.com/zishmusic/drivel/ranges"
 )
 
 // --- dirtyTracker (pure, no mount) ------------------------------------------

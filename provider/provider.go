@@ -16,7 +16,7 @@ import (
 	"io"
 	"time"
 
-	"github.com/zishmusic/drivel/internal/ranges"
+	"github.com/zishmusic/drivel/ranges"
 )
 
 // ErrNotExist is returned by Move when the source path is not known to the store.

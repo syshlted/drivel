@@ -13,8 +13,8 @@ import (
 	"time"
 
 	"github.com/zishmusic/drivel/internal/fsevent"
-	"github.com/zishmusic/drivel/internal/provider"
 	"github.com/zishmusic/drivel/internal/state"
+	"github.com/zishmusic/drivel/provider"
 )
 
 // Initial enumeration & reconcile (DESIGN.md §9, M7b).
@@ -116,7 +116,7 @@ const DefaultSweepInterval = 24 * time.Hour
 // Reconcile enables the M7b sweep on this downloader and returns it for chaining.
 // It is a no-op unless the store also implements provider.Enumerator.
 func (d *Downloader) Reconcile(opts ReconcileOptions) *Downloader {
-	if e, ok := d.store.(provider.Enumerator); ok {
+	if e, ok := provider.AsEnumerator(d.store); ok {
 		d.enum = e
 	}
 	d.rec = opts

@@ -4,7 +4,7 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/zishmusic/drivel/internal/ranges"
+	"github.com/zishmusic/drivel/ranges"
 )
 
 // The package is types, so these are the three things about the types that can

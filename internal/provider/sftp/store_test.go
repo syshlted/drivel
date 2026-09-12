@@ -10,8 +10,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/zishmusic/drivel/internal/provider"
-	"github.com/zishmusic/drivel/internal/ranges"
+	"github.com/zishmusic/drivel/provider"
+	"github.com/zishmusic/drivel/ranges"
 )
 
 func TestPutGetStat(t *testing.T) {

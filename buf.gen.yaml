@@ -1,0 +1,14 @@
+# Codegen for the M9 plugin protocol. Run it with `make proto`; the output is
+# committed, and `make proto-check` fails if the two have drifted — the same
+# arrangement the generated shell completions use, and for the same reason: a
+# distro package has no protobuf toolchain.
+version: v2
+inputs:
+  - directory: proto
+plugins:
+  - local: bin/protoc-gen-go
+    out: .
+    opt: module=github.com/zishmusic/drivel
+  - local: bin/protoc-gen-go-grpc
+    out: .
+    opt: module=github.com/zishmusic/drivel

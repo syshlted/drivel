@@ -5,7 +5,7 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/zishmusic/drivel/internal/provider"
+	"github.com/zishmusic/drivel/provider"
 )
 
 // Factory opens a Drive store from an undecoded config (M8). Register it under
@@ -21,7 +21,7 @@ import (
 // assumption that leaked above the seam.
 func Factory(ctx context.Context, p provider.Params) (provider.Store, error) {
 	var cfg Config
-	if err := p.Decode(&cfg); err != nil {
+	if err := p.Config.Decode(&cfg); err != nil {
 		return nil, fmt.Errorf("drive provider config: %w", err)
 	}
 	if cfg.Credentials == "" {

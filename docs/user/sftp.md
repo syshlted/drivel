@@ -13,7 +13,16 @@ the same file, you get a conflict copy rather than a silent loss.
 
 ## Setting it up
 
-SFTP is configured through [the config file](configuration.md#the-config-file).
+First, install the backend. Drivel runs its storage backends as separate programs,
+so the SFTP one has to be there for a mount to use it:
+
+```sh
+go install github.com/zishmusic/drivel/cmd/drivel-provider-sftp@latest
+```
+
+(or `make build` / `sudo make install` from a checkout, which build every backend).
+
+SFTP is then configured through [the config file](configuration.md#the-config-file).
 There are no `-sftp-*` flags; the mount flags are Drive-shaped by history.
 
 ```toml

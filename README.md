@@ -25,6 +25,7 @@ Free software under the [GNU AGPLv3](#license).
 ```sh
 sudo apt install fuse3                                    # or: dnf install fuse3
 go install github.com/zishmusic/drivel/cmd/drivel@latest
+go install github.com/zishmusic/drivel/cmd/drivel-provider-gdrive@latest  # the backend
 
 drivel login -account personal                            # one-time OAuth wizard
 drivel mount                                              # serves your config file
@@ -123,7 +124,8 @@ Bidirectional sync, lazy hydration, smart uploads, restart-safe path resolution,
 initial enumeration and multi-account mounts are all shipped. See
 [CHANGELOG.md](CHANGELOG.md) for what landed when, and what is planned next.
 
-There are no tagged releases yet; build from source or `go install …@latest`.
+There are no tagged releases yet; build from source with `make build`, or
+`go install …@latest` — the command and at least one `drivel-provider-*` backend.
 
 ## Building
 

@@ -10,8 +10,8 @@ import (
 	"time"
 
 	"github.com/zishmusic/drivel/internal/fsevent"
-	"github.com/zishmusic/drivel/internal/provider"
 	"github.com/zishmusic/drivel/internal/state"
+	"github.com/zishmusic/drivel/provider"
 )
 
 // fakeHydrator stands in for *hydrate.Hydrator on both seams: Placeholders (the

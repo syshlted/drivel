@@ -14,33 +14,39 @@ import (
 	"github.com/zishmusic/drivel/internal/app"
 	"github.com/zishmusic/drivel/internal/config"
 	"github.com/zishmusic/drivel/internal/hydrate"
-	"github.com/zishmusic/drivel/internal/provider"
-	"github.com/zishmusic/drivel/internal/provider/gdrive"
-	"github.com/zishmusic/drivel/internal/provider/sftp"
+	"github.com/zishmusic/drivel/internal/provider/gdrive/gdconf"
 	"github.com/zishmusic/drivel/internal/syncengine"
+	"github.com/zishmusic/drivel/plugin"
+	"github.com/zishmusic/drivel/provider"
 )
 
-// driveKind is the name the Drive backend is registered under. The mount flags
-// are Drive-shaped by history (-drive-root, -credentials), so the flag path
-// always selects this one; a config file may name any registered kind.
+// driveKind is the name the Drive backend is provided under — the suffix of the
+// `drivel-provider-gdrive` executable the loader looks for. The mount flags are
+// Drive-shaped by history (-drive-root, -credentials), so the flag path always
+// selects this one; a config file may name any kind that is installed.
 const driveKind = "gdrive"
 
 // newRegistry builds the provider registry every entry point mounts through.
 //
-// It exists so the set of backends is written once. Both the flag/config path and
-// the M16 mount helper need it, and a backend registered in one of them but not
-// the other would be a config file that works from the command line and fails at
-// boot — the same drift the fstab option table already suffered once, with four
-// flags missing from it.
+// Since M9 there is nothing compiled in for it to hold: a backend is a separate
+// executable that drivel launches, so this is a scan of the plugin search path
+// and a Factory per kind found there. Two things follow from that and are worth
+// stating where the wiring is.
+//
+// The drivel binary no longer links any backend. That is the point of the
+// milestone and not a side effect — the Drive SDK, OAuth, the QUIC transport and
+// the SSH stack are all in the plugin that needs them, so a failure in any of
+// them is a failure of one process that the mount survives and the host
+// relaunches.
+//
+// And it is still written once. Both the flag/config path and the M16 mount
+// helper call this, because a backend available from the command line and
+// missing at boot would be the same drift the fstab option table already
+// suffered once.
 func newRegistry() (*provider.Registry, error) {
 	reg := provider.NewRegistry()
-	for kind, f := range map[string]provider.Factory{
-		driveKind: gdrive.Factory,
-		sftp.Kind: sftp.Factory,
-	} {
-		if err := reg.Register(kind, f); err != nil {
-			return nil, err
-		}
+	if err := plugin.NewLoader(nil, nil).Register(reg); err != nil {
+		return nil, err
 	}
 	return reg, nil
 }
@@ -250,12 +256,12 @@ func mountSpecs(fset *flag.FlagSet, given map[string]bool, f specFlags) ([]app.M
 	// log-only (M1 behaviour) and never reaches a provider.
 	if f.credentials != "" {
 		spec.Provider = driveKind
-		spec.ProviderConfig = provider.StaticDecoder(gdrive.Config{
+		spec.ProviderConfig = provider.MustEncodeConfig(gdconf.Config{
 			Credentials: f.credentials,
 			Token:       f.token,
 			RootID:      f.driveRoot,
-			SweepMode:   gdrive.SweepMode(f.driveSweepMode),
-			Delete:      gdrive.DeleteMode(f.driveDelete),
+			SweepMode:   gdconf.SweepMode(f.driveSweepMode),
+			Delete:      gdconf.DeleteMode(f.driveDelete),
 			IndexPath:   f.indexDB,
 		})
 	}

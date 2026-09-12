@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/zishmusic/drivel/internal/provider"
+	"github.com/zishmusic/drivel/provider"
 )
 
 // Kind is the name this backend is registered and configured under.
@@ -21,7 +21,7 @@ const Kind = "sftp"
 // where it is wired rather than hidden in an import for side effect.
 func Factory(ctx context.Context, p provider.Params) (provider.Store, error) {
 	var cfg Config
-	if err := p.Decode(&cfg); err != nil {
+	if err := p.Config.Decode(&cfg); err != nil {
 		return nil, fmt.Errorf("sftp provider config: %w", err)
 	}
 	s, err := Open(ctx, cfg, p.Log)

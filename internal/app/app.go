@@ -7,7 +7,7 @@ import (
 	"log"
 	"sync"
 
-	"github.com/zishmusic/drivel/internal/provider"
+	"github.com/zishmusic/drivel/provider"
 )
 
 // App is a set of mounts sharing one process.

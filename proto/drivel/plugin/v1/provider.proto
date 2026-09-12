@@ -1,0 +1,267 @@
+// The drivel provider plugin protocol (M9).
+//
+// This file is the compatibility surface between a drivel host and a backend
+// running in its own process. Everything in it mirrors a Go declaration in
+// github.com/zishmusic/drivel/provider, and the mapping is deliberately dull:
+// the seam was designed in M2 and proven in M8, and M9 is about the loading
+// mechanism, not about redesigning the interface.
+//
+// Two rules govern changes here.
+//
+//   - Fields are added, never renumbered or reused. A host and a plugin are
+//     separately built binaries that a user may upgrade independently, which is
+//     the whole reason the protocol exists.
+//   - A capability is named by a string, not by a field number. Which optional
+//     interfaces a backend offers is answered once, at Open, because a gRPC stub
+//     implements every method whether or not the backend behind it can honour
+//     them — see provider.Capability for what goes wrong otherwise.
+syntax = "proto3";
+
+package drivel.plugin.v1;
+
+import "google/protobuf/timestamp.proto";
+
+option go_package = "github.com/zishmusic/drivel/plugin/internal/pb;pb";
+
+// Provider is one backend, serving exactly one mount. A host launches one plugin
+// process per mount rather than sharing one across a process's mounts: two
+// mounts are two sets of credentials, and keeping them in separate processes is
+// the same per-mount isolation rule that keeps their state DBs, engines and
+// worker pools apart.
+service Provider {
+  // Open hands the backend its configuration and asks what it can do. It is
+  // called exactly once per process, before anything else.
+  rpc Open(OpenRequest) returns (OpenResponse);
+  // Close releases the backend. The host calls it before killing the process, so
+  // a backend holding a local database (Drive's path index) can commit and
+  // unlock rather than being terminated mid-write.
+  rpc Close(CloseRequest) returns (CloseResponse);
+
+  // provider.Store — the required surface.
+  //
+  // Put streams: the first message carries the path, every later message carries
+  // content. Splitting it that way keeps the request under any message-size
+  // limit for a file of any size, which a single bytes field would not.
+  rpc Put(stream PutRequest) returns (FileResponse);
+  rpc Mkdir(MkdirRequest) returns (FileResponse);
+  rpc Move(MoveRequest) returns (FileResponse);
+  rpc Remove(RemoveRequest) returns (RemoveResponse);
+  rpc Get(GetRequest) returns (stream Chunk);
+  rpc Stat(StatRequest) returns (StatResponse);
+
+  // provider.ChangeSource — optional.
+  rpc StartCursor(StartCursorRequest) returns (StartCursorResponse);
+  rpc Changes(ChangesRequest) returns (ChangesResponse);
+
+  // provider.Enumerator — optional.
+  rpc Enumerate(EnumerateRequest) returns (EnumerateResponse);
+
+  // provider.RangeGetter — optional.
+  rpc GetRange(GetRangeRequest) returns (stream Chunk);
+
+  // provider.RangePutter — optional. The local file is NOT streamed into this
+  // call: provider.RangePutter takes an io.ReaderAt precisely so that an
+  // implementation may seek to its extents in whatever order its wire protocol
+  // prefers, and a stream would take that back. The request names a handle
+  // instead, which the plugin reads through the Content service the host
+  // advertised at Open.
+  rpc PutRange(PutRangeRequest) returns (FileResponse);
+
+  // provider.ContentHasher — optional. Streamed for the same reason Put is.
+  rpc HashContent(stream Chunk) returns (HashContentResponse);
+}
+
+// Content is served by the HOST and called by the plugin: random access to a
+// local file the plugin has been asked to patch. It is the only call that runs
+// in that direction, and it is deliberately the narrowest thing that satisfies
+// io.ReaderAt — a plugin cannot ask for a path, only for bytes of the file the
+// host already decided to send it.
+service Content {
+  rpc ReadAt(ReadAtRequest) returns (ReadAtResponse);
+}
+
+message OpenRequest {
+  // config is the provider's own settings as TOML text — the same bytes
+  // provider.Config carries in process. The host does not parse them.
+  bytes config = 1;
+  // content_broker_id names the Content service the host serves for the life of
+  // this connection. The plugin dials it the first time it needs to read a local
+  // file back, and keeps the connection; a backend that never patches extents
+  // never dials at all.
+  //
+  // It is established once here rather than per call because go-plugin's
+  // AcceptAndServe runs until the whole broker shuts down, so a listener per
+  // PutRange would be a listener per PutRange for the life of the mount.
+  uint32 content_broker_id = 2;
+}
+
+message OpenResponse {
+  // capabilities names the optional interfaces this backend offers, using the
+  // wire names in provider.Capability. A name the host does not recognise is
+  // ignored, so a newer plugin talking to an older host loses that capability
+  // rather than the connection.
+  repeated string capabilities = 1;
+}
+
+message CloseRequest {}
+message CloseResponse {}
+
+// File is provider.RemoteFile.
+message File {
+  string path = 1;
+  bool is_dir = 2;
+  int64 size = 3;
+  string hash = 4;
+  string version = 5;
+  // modified is unset for the zero time, which is what a backend that does not
+  // report modification times leaves it as. A Unix epoch field could not tell
+  // "1970" from "not reported", and the sweep's mtime comparisons read the
+  // difference.
+  google.protobuf.Timestamp modified = 6;
+  bool export_only = 7;
+}
+
+// Change is provider.RemoteChange.
+message Change {
+  string path = 1;
+  File file = 2; // unset when removed is true
+  bool removed = 3;
+}
+
+// Chunk is a run of bytes in a stream.
+message Chunk {
+  bytes data = 1;
+}
+
+message PutRequest {
+  oneof msg {
+    string path = 1; // exactly once, first
+    bytes data = 2;  // zero or more, after
+  }
+}
+
+message FileResponse {
+  File file = 1;
+}
+
+message MkdirRequest {
+  string path = 1;
+}
+
+message MoveRequest {
+  string old_path = 1;
+  string new_path = 2;
+}
+
+message RemoveRequest {
+  string path = 1;
+}
+
+message RemoveResponse {}
+
+message GetRequest {
+  string path = 1;
+}
+
+message StatRequest {
+  string path = 1;
+}
+
+message StatResponse {
+  File file = 1;
+  // ok distinguishes "no such object" from an error. Stat is the one call in the
+  // seam where absence is an ordinary answer, so it must not arrive as a status
+  // code that a retry loop might read as a failure.
+  bool ok = 2;
+}
+
+message StartCursorRequest {}
+
+message StartCursorResponse {
+  string cursor = 1;
+}
+
+message ChangesRequest {
+  string cursor = 1;
+}
+
+message ChangesResponse {
+  repeated Change changes = 1;
+  string next = 2;
+}
+
+message EnumerateRequest {
+  string cursor = 1;
+}
+
+message EnumerateResponse {
+  repeated File files = 1;
+  // next is "" when the sweep is complete. An empty files list with next == ""
+  // is a complete sweep of an empty tree, which is the shape M7b treats as
+  // dangerous — the host, not the protocol, decides what to do about that.
+  string next = 2;
+}
+
+message GetRangeRequest {
+  string path = 1;
+  int64 off = 2;
+  int64 length = 3; // <= 0 means "to end of object"
+}
+
+// Extent is ranges.Range.
+message Extent {
+  int64 off = 1;
+  int64 len = 2;
+}
+
+message PutRangeRequest {
+  string path = 1;
+  int64 size = 2;
+  repeated Extent extents = 3;
+  // source_handle names the local file the host has made readable for this one
+  // call. It is registered immediately before the call and dropped immediately
+  // after, so a handle is never valid outside the call that carries it — which
+  // is what keeps "the plugin can read a file the host chose" from becoming "the
+  // plugin can read files".
+  uint64 source_handle = 4;
+}
+
+message HashContentResponse {
+  string hash = 1;
+}
+
+message ReadAtRequest {
+  int64 off = 1;
+  int32 len = 2;
+  // handle is the source_handle of the PutRange call being served.
+  uint64 handle = 3;
+}
+
+message ReadAtResponse {
+  bytes data = 1;
+  // eof reports that the read stopped at the end of the file, which io.ReaderAt
+  // requires be reported alongside a short read rather than as a failure.
+  bool eof = 2;
+}
+
+// Error is attached as a gRPC status detail so the sentinels the engine
+// switches on survive the process boundary.
+//
+// Without it every failure would arrive as an opaque string: provider.ErrNotExist
+// would stop meaning "upload the destination as fresh content", ErrCursorExpired
+// would stop triggering a re-enumeration and inbound sync would silently stop,
+// and provider.IsRetryable would report false for every rate limit, turning the
+// engine's backoff into a permanent failure on the first 429.
+message Error {
+  enum Kind {
+    KIND_UNSPECIFIED = 0;
+    KIND_NOT_EXIST = 1;      // provider.ErrNotExist
+    KIND_CURSOR_EXPIRED = 2; // provider.ErrCursorExpired
+  }
+  Kind kind = 1;
+  // retryable is provider.IsRetryable's answer, computed on the plugin side
+  // where the backend's own error types are visible.
+  bool retryable = 2;
+  // message is the error's text, for a human reading a log.
+  string message = 3;
+}

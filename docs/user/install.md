@@ -35,24 +35,51 @@ sysctl vfs.usermount=1
 
 Add `fusefs_load="YES"` to `/boot/loader.conf` to make it persist.
 
-## Install the command
+## Install the command — and at least one backend
+
+Drivel is two kinds of program. `drivel` is the command: it mounts the
+filesystem, watches for changes, and keeps the local state. A **backend** is a
+separate executable that talks to one storage service — `drivel-provider-gdrive`
+for Google Drive, `drivel-provider-sftp` for an SFTP server — which `drivel`
+starts for you when a mount needs it.
+
+They are separate on purpose. Nothing that goes wrong inside a backend can take
+your filesystem down: if it crashes, the mount stays up and Drivel starts it
+again. It also means you only install the backends you actually use.
+
+**You need at least one.** A `drivel` with no backend installed can still mount a
+directory, but it has nothing to sync with.
 
 ```sh
 go install github.com/zishmusic/drivel/cmd/drivel@latest
+go install github.com/zishmusic/drivel/cmd/drivel-provider-gdrive@latest
 ```
 
-The binary lands in `$(go env GOBIN)`, or `$(go env GOPATH)/bin` if `GOBIN` is
-unset. Make sure that is on your `PATH`.
+Everything lands in `$(go env GOBIN)`, or `$(go env GOPATH)/bin` if `GOBIN` is
+unset. Make sure that is on your `PATH`. Drivel looks for backends next to itself
+first, so installing them the same way is all it takes.
+
+If you want SFTP as well:
+
+```sh
+go install github.com/zishmusic/drivel/cmd/drivel-provider-sftp@latest
+```
+
+To see what Drivel can find:
+
+```sh
+drivel mount -h        # errors from a mount name the backends that are installed
+```
 
 ## Build from source
 
 ```sh
 git clone https://github.com/zishmusic/drivel
 cd drivel
-go build -o ./bin/drivel ./cmd/drivel
+make build
 ```
 
-Or `make build`, which is what CI uses and produces a **statically linked** binary
+`make build` produces `bin/drivel` and every backend beside it, which is what CI uses and produces a **statically linked** binary
 with no library dependencies — it runs on any Linux of the same architecture,
 whatever glibc that machine has. `make help` lists every target; contributors
 should read [the developer build guide](../dev/building.md) instead of this page.
@@ -63,10 +90,11 @@ your distribution's patch level and its security updates arrive through your
 package manager rather than waiting on a Drivel release.
 
 Cross-compiling works for every Linux architecture, `darwin/amd64`,
-`darwin/arm64` and FreeBSD:
+`darwin/arm64` and FreeBSD. Remember the backends:
 
 ```sh
 GOOS=darwin GOARCH=arm64 go build ./cmd/drivel
+GOOS=darwin GOARCH=arm64 go build ./cmd/drivel-provider-gdrive
 ```
 
 Windows is not supported — see [Platform support](platforms.md#windows).
@@ -82,9 +110,16 @@ sudo make install         # PREFIX=/usr/local  MANDIR=$PREFIX/share/man  SBINDIR
 | What | Where |
 | --- | --- |
 | The binary | `$PREFIX/bin/drivel` |
+| The backends | `$PREFIX/lib/drivel/plugins/drivel-provider-*` |
 | The man page | `$MANDIR/man1/drivel.1` |
 | The `mount(8)` helper | `$SBINDIR/mount.fuse.drivel` and `$SBINDIR/mount.drivel`, both symlinks to the binary |
 | Shell completions | `$PREFIX/share/bash-completion/completions/drivel`, `$PREFIX/share/zsh/site-functions/_drivel` |
+
+The backends go under `lib` rather than `bin` because they are not commands you
+run: started from a shell, one prints a handshake line and exits. Drivel refuses
+to start a backend that is group- or world-writable, or one whose directory is, so
+install them as root and leave them `0755` — a backend runs with your credentials,
+and a file anyone could replace is a file anyone could replace *with*.
 
 `SBINDIR` defaults to `/sbin` rather than to something under `PREFIX` because
 `mount(8)` searches `/sbin` and `/usr/sbin` only. Those two symlinks are what let
@@ -132,6 +167,7 @@ With `-account NAME`, everything follows the XDG base directories:
 | `~/.config/drivel/NAME/token.json` | The access/refresh token. **Secret.** |
 | `~/.local/state/drivel/NAME/state.db` | Sync bookkeeping — the change cursor and echo records. |
 | Wherever `data =` points | **Your files.** |
+| `~/.local/share/drivel/plugins/` | Backends you installed for yourself, if you did not install them system-wide. |
 
 Both credential files are written `0600`. Neither the state database nor the
 path index is a credential, and neither is authoritative: deleting them costs API
@@ -147,13 +183,14 @@ fusermount3 -u ~/drive                    # unmount first (or just Ctrl-C the pr
 
 sudo make uninstall                       # if you installed with `sudo make install`
 rm "$(command -v drivel)"                 # if you installed with `go install`
+rm ~/go/bin/drivel-provider-*             # ...and the backends it installed beside it
 
-rm -rf ~/.config/drivel ~/.local/state/drivel
+rm -rf ~/.config/drivel ~/.local/state/drivel ~/.local/share/drivel
 ```
 
-`make uninstall` takes the man page, the `mount(8)` helper symlinks and the shell
-completions with it; `rm "$(command -v drivel)"` removes only the binary, so run
-it on its own only if `go install` is how it got there. Remove any `/etc/fstab`
+`make uninstall` takes the backends, the man page, the `mount(8)` helper symlinks
+and the shell completions with it; `rm "$(command -v drivel)"` removes only the
+one binary, which is why the backends need the line after it. Remove any `/etc/fstab`
 lines of type `fuse.drivel` or `drivel` as well.
 
 Revoke the OAuth client from the [Google Cloud

@@ -94,7 +94,7 @@ func TestHelperOptionsReachTheSpec(t *testing.T) {
 	}
 
 	var got gdrive.Config
-	if err := s.ProviderConfig(&got); err != nil {
+	if err := s.ProviderConfig.Decode(&got); err != nil {
 		t.Fatalf("decoding provider config: %v", err)
 	}
 	want := gdrive.Config{
@@ -163,7 +163,7 @@ func TestHelperCarriesTheDeleteMode(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	s := specFor(t, "work", "/m", "-o", "data=/d,credentials=/c.json,token=/t.json,drive-delete=permanent")
 	var got gdrive.Config
-	if err := s.ProviderConfig(&got); err != nil {
+	if err := s.ProviderConfig.Decode(&got); err != nil {
 		t.Fatalf("decoding provider config: %v", err)
 	}
 	if got.Delete != gdrive.DeletePermanent {
@@ -313,7 +313,7 @@ func TestHelperStateDefaultsUnderXDG(t *testing.T) {
 		t.Errorf("StateDB = %q; want %q", s.StateDB, want)
 	}
 	var got gdrive.Config
-	if err := s.ProviderConfig(&got); err != nil {
+	if err := s.ProviderConfig.Decode(&got); err != nil {
 		t.Fatalf("decoding provider config: %v", err)
 	}
 	if got.IndexPath != filepath.Join(state, "drivel", "work", "index.db") {
@@ -330,7 +330,7 @@ func TestHelperAccountResolvesLoginPaths(t *testing.T) {
 
 	s := specFor(t, "work", "/m", "-o", "data=/d,account=work")
 	var got gdrive.Config
-	if err := s.ProviderConfig(&got); err != nil {
+	if err := s.ProviderConfig.Decode(&got); err != nil {
 		t.Fatalf("decoding provider config: %v", err)
 	}
 	if want := filepath.Join(cfg, "drivel", "work", "credentials.json"); got.Credentials != want {
@@ -349,7 +349,7 @@ func TestHelperTokenDefaultsBesideTheCredentials(t *testing.T) {
 
 	s := specFor(t, "work", "/m", "-o", "data=/d,credentials=/etc/drivel/creds.json")
 	var got gdrive.Config
-	if err := s.ProviderConfig(&got); err != nil {
+	if err := s.ProviderConfig.Decode(&got); err != nil {
 		t.Fatalf("decoding provider config: %v", err)
 	}
 	if got.Token != "/etc/drivel/token.json" {

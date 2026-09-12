@@ -59,7 +59,7 @@ func TestAppendAccountRoundTrips(t *testing.T) {
 		Credentials string `toml:"credentials"`
 		Token       string `toml:"token"`
 	}
-	if err := specs[0].ProviderConfig(&got); err != nil {
+	if err := specs[0].ProviderConfig.Decode(&got); err != nil {
 		t.Fatalf("decoding provider config: %v", err)
 	}
 	if got.Credentials != "/abs/personal/credentials.json" {

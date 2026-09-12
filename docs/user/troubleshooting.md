@@ -27,6 +27,54 @@ backing store through the mountpoint path, which recurses into Drivel's own
 handler. Nothing in a normal setup does this; it usually means a script or backup
 tool is pointed at the mounted directory *as if* it were the backing directory.
 
+## Backends
+
+Drivel's storage backends are separate programs it starts for you — see
+[Installing](install.md#install-the-command--and-at-least-one-backend).
+
+**`unknown kind: "gdrive" (available: sftp); no drivel-provider-gdrive in …`** —
+the backend is not installed. The message lists what *is* available and every
+directory Drivel looked in. Install it the same way you installed `drivel`:
+
+```sh
+go install github.com/zishmusic/drivel/cmd/drivel-provider-gdrive@latest
+```
+
+or, from a checkout, `make build` (which builds all of them) or
+`sudo make install`.
+
+**`refusing to run: mode 0777 is writable by everyone`** — the backend is there,
+but anyone on the machine could replace it, and it runs with your credentials.
+Fix the permissions rather than working around it:
+
+```sh
+chmod 755 /usr/local/lib/drivel/plugins/drivel-provider-gdrive
+```
+
+The same message naming a *directory* means the directory it sits in is
+world-writable. Move the backend somewhere only you (or root) can write.
+
+**`backend exited after …; restarting in …`** — the backend crashed and Drivel is
+starting it again. Your mount stays up throughout; pending uploads are retried
+once it is back. If it repeats, the lines just above it in the log are the
+backend's own output and are where the reason will be.
+
+**Drivel is running a backend you did not expect.** With two installed copies of
+the same backend, the first on the search path wins and Drivel logs the other:
+`plugin gdrive: using /usr/bin/drivel-provider-gdrive; also found …`. The search
+order is: next to the `drivel` binary, then `~/.local/share/drivel/plugins`, then
+`/usr/local/lib/drivel/plugins`, then `/usr/lib/drivel/plugins`. Setting
+`DRIVEL_PLUGIN_PATH` replaces that list entirely.
+
+**A backend cannot find something it could find when you ran it by hand.** Drivel
+gives a backend a deliberately small environment — `PATH`, `HOME`, `TMPDIR`,
+locale, TLS roots, proxy settings and `SSH_AUTH_SOCK` — and nothing else. In
+particular, ambient cloud credentials (`GOOGLE_APPLICATION_CREDENTIALS` and its
+equivalents) are not passed on: a backend authenticates with what its own
+configuration names, so that which account a mount uses is a fact about your
+config file and not about the shell you started it from. Put the path in the
+config.
+
 ## Login and credentials
 
 **`403 access_denied`, "app is being tested"** — the account you signed in with is

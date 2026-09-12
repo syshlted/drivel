@@ -19,7 +19,8 @@ import (
 	"google.golang.org/api/option"
 
 	"github.com/zishmusic/drivel/internal/pathindex"
-	"github.com/zishmusic/drivel/internal/provider"
+	"github.com/zishmusic/drivel/internal/provider/gdrive/gdconf"
+	"github.com/zishmusic/drivel/provider"
 )
 
 const folderMIME = "application/vnd.google-apps.folder"
@@ -151,43 +152,37 @@ var (
 // and retryable. The RangePutter path stays exercised by providers that can
 // patch — see the range-write tests in internal/syncengine.
 
-// Config is what a Drive provider needs to open.
-// The struct tags are what a `[mount.provider]` table in drivel's config file
-// decodes into (M8). They exist because this IS the provider's configuration —
-// the same reason a type carries json tags — and naming the keys explicitly beats
-// the decoder's default case-insensitive field matching, which would spell
-// RootID as "rootid".
-type Config struct {
-	// Credentials is the desktop OAuth client secret JSON.
-	Credentials string `toml:"credentials"`
-	// Token caches the user token across runs (written by `drivel login`).
-	Token string `toml:"token"`
-	// RootID is the Drive folder ID mapped to the mount root ("" or "root" => My
-	// Drive root).
-	RootID string `toml:"root"`
-	// IndexPath is where the persistent path↔fileID index lives (M7). Empty
-	// disables persistence, which costs API round trips and nothing else. It must
-	// not sit inside the backing tree, or it would sync itself to Drive.
-	IndexPath string `toml:"index"`
-	// SweepMode selects how the M7b/M7c enumeration sweep walks the tree:
-	// "flat" lists the whole account, "scoped" descends from the mount root, and
-	// "" or "auto" picks by whether RootID names a concrete folder. See
-	// enumerate_scoped.go for why neither is right for every shape of Drive.
-	SweepMode SweepMode `toml:"sweep-mode"`
-	// Delete selects what a removal does to the remote object: "trash" (or "",
-	// the default) moves it to the Drive trash, "permanent" unlinks it outright.
-	// See DeleteMode — the default is the recoverable one because not every
-	// deletion drivel performs was asked for by a user.
-	Delete DeleteMode `toml:"delete"`
-	// Scope is the OAuth scope the token was granted, as `drivel login` recorded
-	// it. Empty means gauth.ScopeDrive.
-	//
-	// It matters little to a refresh — the refresh token carries the scopes the
-	// user actually consented to, whatever we ask for — but asking for a scope the
-	// user declined is a lie in the one place a reader would go to find out what
-	// this mount can do. A read-only account should say so.
-	Scope string `toml:"scope"`
-}
+// The configuration vocabulary — Config and the two enumerated values it can
+// carry — lives in the gdconf leaf so that the drivel binary, which owns the
+// -drive-* flags and generates their completions, can build a settings table
+// without linking the Drive SDK (M9). These aliases keep it spelled gdrive.Config
+// everywhere below the seam, where it is this package's own type in every way
+// that matters.
+type (
+	// Config is what a Drive provider needs to open.
+	Config = gdconf.Config
+	// SweepMode selects how Enumerate walks the tree.
+	SweepMode = gdconf.SweepMode
+	// DeleteMode selects what Remove does to an object remotely: the Drive trash,
+	// which is recoverable and is the default, or an outright unlink.
+	DeleteMode = gdconf.DeleteMode
+)
+
+const (
+	// SweepAuto descends when RootID names a concrete folder and lists the account
+	// when it names the whole Drive.
+	SweepAuto = gdconf.SweepAuto
+	// SweepFlat always lists the account (M7b behaviour).
+	SweepFlat = gdconf.SweepFlat
+	// SweepScoped always descends from the mount root.
+	SweepScoped = gdconf.SweepScoped
+
+	// DeleteTrash moves the object to the Drive trash, where it can be restored
+	// for 30 days. The default, and what "" means.
+	DeleteTrash = gdconf.DeleteTrash
+	// DeletePermanent unlinks the object outright, with no undo.
+	DeletePermanent = gdconf.DeletePermanent
+)
 
 // Open authenticates and returns a Drive provider that logs to the default
 // logger. Callers that own a per-mount logger go through Factory instead.
@@ -201,13 +196,13 @@ func open(ctx context.Context, cfg Config, lg *log.Logger) (*Drive, error) {
 	}
 	// An unreadable value here is the same failure M8 rule 6 makes an unknown key:
 	// a mount that silently sweeps the wrong way is a cost nobody can see.
-	if !cfg.SweepMode.valid() {
+	if !cfg.SweepMode.Valid() {
 		return nil, fmt.Errorf("sweep-mode %q: want \"auto\", \"flat\" or \"scoped\"", cfg.SweepMode)
 	}
 	// Same rule, and it bites harder here: a misspelling that fell back to the
 	// default would leave someone who asked for permanent deletes filling their
 	// trash, and someone who asked for the trash losing files outright.
-	if !cfg.Delete.valid() {
+	if !cfg.Delete.Valid() {
 		return nil, fmt.Errorf("delete %q: want \"trash\" or \"permanent\"", cfg.Delete)
 	}
 	client, closer, err := buildHTTPClient(ctx, cfg.Credentials, cfg.Token, cfg.Scope)
@@ -331,35 +326,6 @@ func (d *Drive) Move(ctx context.Context, oldPath, newPath string) (provider.Rem
 	// carried the old prefix.
 	d.reindexLocked(ctx, oldPath, newPath)
 	return d.rememberLocked(ctx, newPath, moved), nil
-}
-
-// DeleteMode selects what Remove does to an object remotely.
-//
-// The distinction exists because a deletion drivel performs is not always one a
-// user asked for. Every other guard in the tree fails towards keeping bytes —
-// M5 refuses to push a placeholder, M6 falls back to a whole-file Put, M7b
-// abandons a delete pass it cannot justify — and this one operation used to be
-// the exception: a mount pointed at the wrong -drive-root, or an inference
-// from a baseline that turned out to be stale, destroyed the remote copy with no
-// undo anywhere. The trash is Drive's own answer to that, so the default is to
-// use it and the old behaviour is what has to be asked for.
-type DeleteMode string
-
-const (
-	// DeleteTrash moves the object to the Drive trash, where the web UI can
-	// restore it (for 30 days, after which Drive purges it). The default, and
-	// what "" means.
-	DeleteTrash DeleteMode = "trash"
-	// DeletePermanent unlinks the object outright, which is what every release
-	// through M16 did. There is no undo, and the bytes are not recoverable from
-	// anywhere.
-	// Worth choosing when a mount is how storage gets reclaimed: trashed objects
-	// still count against the account's quota until the trash is emptied.
-	DeletePermanent DeleteMode = "permanent"
-)
-
-func (m DeleteMode) valid() bool {
-	return m == "" || m == DeleteTrash || m == DeletePermanent
 }
 
 func (d *Drive) Remove(ctx context.Context, p string) error {

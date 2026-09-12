@@ -104,6 +104,24 @@ is a client you run yourself. It ships no credentials of its own; you supply the
 ones for the backend you point it at, so it runs under an identity you control.
 Each provider uses its own transport: Drive traffic is HTTP/3 (QUIC) with an
 automatic fallback to HTTP/2, and SFTP is the file transfer subsystem of SSH.
+.PP
+A provider is a
+.I separate executable
+that
+.B drivel
+starts for you, named
+.IB drivel-provider- kind
+\(em so
+.B drivel-provider-gdrive
+serves
+.BR provider " = " \(dqgdrive\(dq .
+At least one must be installed for a mount to sync; a
+.B drivel
+with none still mounts, but has nothing to sync with. They are separate so that a
+failure inside a backend cannot take the filesystem down: a backend that crashes
+is restarted underneath a mount that stays up, and pending transfers are retried.
+See
+.BR "PROVIDER BACKENDS" .
 .SH COMMANDS
 .TP
 .B mount-helper
@@ -844,6 +862,56 @@ says so rather than merely being absent elsewhere. On FreeBSD such a file cannot
 created through the mount at all: the attempt fails with
 .B EINVAL
 and creates nothing.
+.SH PROVIDER BACKENDS
+A storage backend runs in its own process.
+.B drivel
+looks for an executable named
+.IB drivel-provider- kind
+in, in order: the directory holding the running
+.B drivel
+binary,
+.IR $XDG_DATA_HOME/drivel/plugins ,
+.IR /usr/local/lib/drivel/plugins ,
+and
+.IR /usr/lib/drivel/plugins .
+The
+.I kind
+is taken from the filename and from nothing else, so it is what a config file
+names with
+.BR provider " = " \(dq kind \(dq .
+If two directories hold the same kind, the first wins and the other is named in
+the log.
+.PP
+.B drivel
+refuses to start a backend that is group- or world-writable, or one whose
+directory is world-writable without the sticky bit: a backend runs with your
+credentials, so a file someone else could replace between installation and launch
+is their code holding them. The refusal names the file and the problem.
+.PP
+This is not a sandbox. A backend runs as the same user as
+.BR drivel ,
+with that user's filesystem access, and installing one is trusting it. What
+.B drivel
+does do is give it nothing it was not configured with: the environment is
+rebuilt rather than inherited, carrying only
+.BR PATH ,
+.BR HOME ,
+.BR TMPDIR ,
+.BR TZ ,
+.BR LANG ,
+.BR LC_ *,
+.BR SSL_CERT_FILE ,
+.BR SSL_CERT_DIR ,
+the proxy variables and
+.BR SSH_AUTH_SOCK .
+Ambient cloud credentials such as
+.B GOOGLE_APPLICATION_CREDENTIALS
+are deliberately not passed on, and neither are the
+.B XDG_
+or
+.B DRIVEL_
+variables \(em so which account a mount uses is a fact about its configuration
+rather than about the shell it was started from.
 .SH ENVIRONMENT AND REQUIREMENTS
 .B drivel
 requires the FUSE mount helper
@@ -858,6 +926,11 @@ HTTP/3/QUIC benefits from a larger UDP receive buffer; if
 .B quic-go
 warns about the buffer size, raise it with
 .BR "sysctl -w net.core.rmem_max=7500000" .
+.TP
+.B DRIVEL_PLUGIN_PATH
+A colon-separated list of directories to search for provider backends. It
+.I replaces
+the default list rather than extending it. Not inherited by a backend.
 .SH PLATFORM SUPPORT
 .B drivel
 is built and tested on
@@ -956,6 +1029,23 @@ is the same thing for the
 .B drivel
 type. Both are placed by
 .BR "make install" .
+.TP
+.I $PREFIX/lib/drivel/plugins/drivel-provider-*
+The provider backends placed by
+.BR "make install" ,
+where
+.I $PREFIX
+defaults to
+.IR /usr/local .
+See
+.BR "PROVIDER BACKENDS" .
+.TP
+.I $XDG_DATA_HOME/drivel/plugins/
+Provider backends installed for one user. Defaults to
+.I ~/.local/share/drivel/plugins
+when
+.I $XDG_DATA_HOME
+is unset.
 .TP
 .I /etc/fstab
 Mounts brought up by

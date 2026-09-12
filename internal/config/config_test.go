@@ -120,10 +120,10 @@ func TestSpecsResolvesTwoAccounts(t *testing.T) {
 
 	// The provider config is the account's settings with the mount's laid over.
 	var a, b driveCfg
-	if err := specs[0].ProviderConfig(&a); err != nil {
+	if err := specs[0].ProviderConfig.Decode(&a); err != nil {
 		t.Fatalf("decoding provider config: %v", err)
 	}
-	if err := specs[1].ProviderConfig(&b); err != nil {
+	if err := specs[1].ProviderConfig.Decode(&b); err != nil {
 		t.Fatalf("decoding provider config: %v", err)
 	}
 	if a.RootID != "0BpersonalFolder" || b.RootID != "0BworkFolder" {
@@ -161,7 +161,7 @@ root = "mount-root"
 		t.Fatalf("Specs: %v", err)
 	}
 	var got driveCfg
-	if err := specs[0].ProviderConfig(&got); err != nil {
+	if err := specs[0].ProviderConfig.Decode(&got); err != nil {
 		t.Fatal(err)
 	}
 	if got.RootID != "mount-root" {
@@ -261,7 +261,7 @@ path    = "./mnt"
 		t.Fatalf("Specs: %v", err)
 	}
 	var got driveCfg
-	if err := specs[0].ProviderConfig(&got); err == nil {
+	if err := specs[0].ProviderConfig.Decode(&got); err == nil {
 		t.Fatal("provider accepted a key it does not define")
 	} else if !strings.Contains(err.Error(), "nonsense") {
 		t.Errorf("error should name the key: %v", err)
@@ -353,7 +353,7 @@ index = "~/idx.db"
 `)
 	specs, _ := c.Specs()
 	var got driveCfg
-	if err := specs[0].ProviderConfig(&got); err != nil {
+	if err := specs[0].ProviderConfig.Decode(&got); err != nil {
 		t.Fatal(err)
 	}
 	if !filepath.IsAbs(got.Token) {

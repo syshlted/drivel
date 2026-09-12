@@ -60,6 +60,12 @@ jobs:
       # the tree and not a failing behaviour.
       - run: make completions-check
 
+      # Same shape, for the plugin protocol (M9): plugin/internal/pb is generated
+      # from proto/ and committed, so the gate is that the committed copy still
+      # matches the .proto it came from. The toolchain is pure Go and installs
+      # itself into bin/ on first use, which the cache above covers.
+      - run: make proto-check
+
       - run: make lint
 
   test:

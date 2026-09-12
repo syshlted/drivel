@@ -15,7 +15,7 @@
 //   - A ranges.Set in the engine state store is a cache and a forward hook. M5
 //     only ever stores the degenerate all-or-nothing cases, but the bitmap schema
 //     is the one M5b (per-block faulting) needs, and M6 reads the same structure
-//     from the other side as its dirty-range map (see internal/ranges).
+//     from the other side as its dirty-range map (see the ranges package).
 //
 // The package is provider-agnostic: it downloads through provider.Store, and uses
 // provider.RangeGetter when the store offers ranged reads.
@@ -32,8 +32,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/zishmusic/drivel/internal/provider"
-	"github.com/zishmusic/drivel/internal/ranges"
+	"github.com/zishmusic/drivel/provider"
+	"github.com/zishmusic/drivel/ranges"
 )
 
 // XattrName is the extended attribute carrying the placeholder Marker. It lives
@@ -129,7 +129,7 @@ func New(dataDir string, store provider.Store, cache Cache, workers int) *Hydrat
 	}
 	// Ranged reads are an optional provider capability; absent it, M5b would fall
 	// back to whole-file fetches anyway.
-	if rg, ok := store.(provider.RangeGetter); ok {
+	if rg, ok := provider.AsRangeGetter(store); ok {
 		h.ranges = rg
 	}
 	return h

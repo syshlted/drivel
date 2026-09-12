@@ -25,6 +25,9 @@ bidirectional sync — don't regress it.
 ## Layout
 
 - `cmd/drivel` — entrypoint; flag parsing, the flag→spec mapping, signal context.
+  Since M9 it links **no backend at all**: `newRegistry` is a scan of the plugin
+  search path. `cmd/drivel-provider-gdrive` and `cmd/drivel-provider-sftp` are the
+  backends, each a three-line `main` around `plugin.Serve`.
   `fstab.go` is the M16 mount(8) helper — argv0 dispatch, the `-o` option table
   and the spec mapping (portable, so its tests run everywhere); `fstab_linux.go`
   holds the privilege drop and the daemonize handshake.
@@ -45,10 +48,28 @@ bidirectional sync — don't regress it.
   store and emits an `fsevent.Event` per mutation. Reads/lookups/attrs pass through.
   `special.go` holds M15's refusals and skips; `mountopts_*.go` the compulsory
   `nodev`/`nosuid`, which is per platform for a reason (see "Special files" below).
-- `internal/provider` — cloud-backend interface (the seam). Drive impl is M2. M8
-  adds the `Registry` (kind → `Factory`), an explicit value rather than an
-  `init()`-filled package map.
+- `provider` — **public**: the backend seam. `Store` + the five optional
+  capability interfaces, `Registry` (kind → `Factory`, an explicit value rather
+  than an `init()`-filled package map, M8), `Config` (a provider's own settings as
+  the TOML the user wrote), and M9's capability negotiation (`Capability`,
+  `Declarer`, `Capabilities`, `As*`). Public since M9 because an out-of-tree plugin
+  has to import it.
+- `ranges` — **public**: the block bitmap (`Set`) used two ways — M5's
+  present-ranges and M6's dirty-ranges. Pure, no I/O. Public because
+  `provider.RangePutter`'s signature names `ranges.Range`. It lives outside
+  `hydrate` on purpose: M6 runs in eager mode too, and the default path must not
+  import the lazy package to describe a write.
+- `plugin` — **public**: M9's out-of-process loading. `Loader` (discovery, the
+  safety checks, one `provider.Factory` per kind found), the host-side proxy and
+  process supervisor, and `Serve` — the three lines a backend's `main` calls.
+  `plugin/internal/pb` is the generated protocol; `proto/` holds the `.proto`.
+  `plugin/testdata/drivel-provider-fake` is the config-driven backend the tests
+  build; it is under `testdata` so `./...` never matches it.
 - `internal/provider/gdrive` — Google Drive impl of the interface.
+  `gdrive/gdconf` is a leaf holding `Config` and the two enumerated types, split
+  out in M9 so `cmd/drivel` can build a Drive settings table and generate its
+  completions without linking the Drive SDK; `gdrive` re-exports them as aliases.
+- `internal/provider/sftp` — SFTP impl (M18). Host key verification fails closed.
 - `internal/provider/sftp` — SFTP impl (M18): the first path-addressed backend, so
   it carries no path index and no `ChangeSource`, and it is the first `RangePutter`
   in the tree. See "SFTP" below.
@@ -75,10 +96,6 @@ bidirectional sync — don't regress it.
   `hydrate.XattrName` xattr marker (per platform since M10), and whole-file
   hydrate-on-first-I/O with
   singleflight. Provider-agnostic.
-- `internal/ranges` — leaf value package: the block bitmap (`Set`) used two ways —
-  M5's present-ranges and M6's dirty-ranges. Pure, no I/O. It lives outside
-  `hydrate` on purpose: M6 runs in eager mode too, and the default path must not
-  import the lazy package to describe a write.
 - `internal/testenv` — test-only leaf: turns "this machine has no user xattrs / no
   `/dev/fuse`" from a silent `t.Skip` into a failure when `DRIVEL_REQUIRE_TESTENV`
   names the facility (`fuse`, `xattr`, `all`). Skipping is right on a laptop and
@@ -266,10 +283,11 @@ config, a provider registry, account-scoped login. See "Multi-account" below.
 M18 SFTP **shipped**: the second provider, path-addressed, no change feed, and the
 tree's first real `RangePutter`. See "SFTP" below.
 
-**v2, planned** (DESIGN.md §9 has the detail). **M9** plugin architecture
-(out-of-process or WASM; Go's `plugin` package is a poor fit). M8 discharged its
-precondition: the §2.5 seam holds under two independently-configured stores in one
-process. **M10** platform parity — both xattr halves are written; **FreeBSD has been
+M9 plugin architecture **shipped**: every backend runs in its own process,
+launched over hashicorp/go-plugin (gRPC on a unix socket), one process per mount.
+`drivel` links no backend. See "Plugin architecture" below for the invariants.
+
+**v2, planned** (DESIGN.md §9 has the detail). **M10** platform parity — both xattr halves are written; **FreeBSD has been
 run on its own OS (2026-09-06), macOS has not**: one shared linux+darwin
 implementation, plus FreeBSD `extattr_*` in its own file (different API, namespace
 as an argument, so `hydrate.XattrName` is now per platform — `drivel.placeholder`
@@ -324,6 +342,50 @@ the out-of-band one primary; that is the shape to copy when it lands.
 `mount(8)` helper as well as a command. See "fstab" below. It was built as "M15"
 before that number went to special files; if you meet a stray M15 in an old
 branch or note meaning the mount helper, this is it.
+
+**M23** embedded plugins & in-memory launch — the host binary carries its backends
+and execs them from a sealed `memfd` without ever writing them to a filesystem,
+eventually as a self-executing zip appended to the binary. Unscheduled, not
+started, and **it is a supply-chain milestone rather than an isolation one**: it
+retires the whole discovery surface (`DRIVEL_PLUGIN_PATH`, the five-directory
+search path, shadowed kinds, and `safeToRun`'s check-then-exec race, which cannot
+be closed while a plugin is named by a path), and it changes nothing about what a
+plugin may do once running — that lever is Landlock/seccomp and is a different
+piece of work. It supersedes M9's "pinned digest per kind" note. Both mechanisms
+are prototyped on Linux (`memfd_create` + all four seals + `ExtraFiles` +
+`/proc/self/fd/3`; `archive/zip` reads a prefixed archive natively and reports a
+clean error when there is no payload). Three things decide the design and are in
+DESIGN.md §9/M23: **FreeBSD's `shm_open(SHM_ANON)` + `fexecve` is unverified** and
+macOS has no equivalent at all, so "never touches disk" is per platform and the
+macOS path is extract-and-unlink; the build graph **inverts** (plugins first, host
+second, ~49 MB per GOOS/GOARCH measured) and a wrong-arch payload must be refused
+by name rather than failing at `exec`; and the one real decision is whether
+embedded plugins **replace** the search path or precede it, which is what decides
+whether out-of-tree backends — the reason `provider` is public — remain possible.
+`embed.FS` is simpler and must be rejected deliberately, not by default.
+
+**M24** plugin registry — a named, versioned, verifiable way to install a
+`drivel-provider-*` executable, modelled on `registry.terraform.io`. Unscheduled,
+not started. **Protocol and client first, service possibly never**: Terraform's
+registry protocol is implementable by a static file tree over plain HTTPS, which is
+what makes private and air-gapped ones work, so `drivel plugin install acme/s3` is
+testable against `testdata` long before anyone operates a server — and operating one
+is a supply-chain target with an abuse policy attached, not a coding task. It serves
+metadata and URLs, never bytes. Four things decide it and are in DESIGN.md §9/M24.
+**M9 made the filename the kind**, so a namespaced registry name (`acme/s3`) and a
+bare local kind (`s3`) need an explicit mapping plus a collision *refused at install
+time naming both* — never a resolution rule, because first-on-the-path-wins is
+tolerable today only because nobody can install two by accident. **There is no
+version solver** — one provider per mount, no dependencies between plugins, so an
+exact version or the newest, and record what you got. **Checksum pinning stops being
+optional** (go-plugin's `SecureConfig`), reversing M23's "moot" note, and the trust
+anchor must *not* be the registry itself — that is the one part of Terraform's design
+not to copy. And **it is a consumer of M23's external-plugin flag**: an installed
+plugin lives in the very search path M23 proposes to retire, so if embedded-only ever
+wins, M24 has no install target and is withdrawn rather than reconciled. The licence
+question (a plugin importing the public `provider` package links AGPL code; one
+speaking only protobuf is the §2.9.2 arms-length case) gets answered before a
+third-party binary is hosted, not after.
 
 **v2, backends on the roadmap** (DESIGN.md §9 has the reasoning; these three are
 unscheduled, none is started, and each one's shape is *decided* — the entries say
@@ -529,7 +591,7 @@ file's length stops at the last byte written. `Release` fstats the file (before 
 wrapped handle closes the fd) and grows the set to the real size. Skip that and the
 engine's size cross-check rejects every set — M6 silently never fires.
 
-In `internal/ranges`, present-ranges round **inward** (`Mark`) and dirty-ranges
+In `ranges`, present-ranges round **inward** (`Mark`) and dirty-ranges
 round **outward** (`MarkCovering`). Same bitmap, opposite rounding, and the
 asymmetry is the point.
 
@@ -900,9 +962,10 @@ composition — and about the ways several mounts can corrupt each other.
    form is what lets a test register `gdrive` twice and run two Drive stores at
    once, which is M8's seam proof. **The pseudo-provider is test-only and stays
    that way**; nothing shipped registers a duplicate.
-4. **Provider config crosses the seam undecoded** (`provider.Params.Decode` fills a
-   provider-defined struct). `internal/config` must never learn what a Drive folder
-   ID is. Adding a provider touches neither package.
+4. **Provider config crosses the seam undecoded** — since M9 as the TOML text the
+   user wrote (`provider.Config`, whose `Decode` fills a provider-defined struct),
+   because a closure cannot cross a process boundary. `internal/config` must never
+   learn what a Drive folder ID is. Adding a provider touches neither package.
 5. **The config file is only ever appended to, never re-serialized.** TOML was
    chosen for comments; any encoder round trip drops them all. `login` prints an
    existing account for the user to reconcile rather than replacing it.
@@ -918,6 +981,136 @@ composition — and about the ways several mounts can corrupt each other.
 8. **Logging is per mount** and a single mount stays unprefixed, so its output is
    byte for byte what it was pre-M8. New log calls belong on `e.logf`/`d.logf`/
    `d.logf`/`n.logf`, never `log.Printf`.
+
+## Plugin architecture (M9)
+
+Every backend runs in its own process. `drivel` discovers `drivel-provider-<kind>`
+on a search path, launches it, and talks to it over gRPC on a unix socket
+(hashicorp/go-plugin). **One plugin process per mount** — two mounts are two sets
+of credentials, which is the same per-mount rule that keeps their state DBs,
+engines and worker pools apart. `cmd/drivel` imports no backend; `newRegistry` is a
+directory scan.
+
+Nine things carry the correctness.
+
+1. **Capability detection is negotiated, not asserted, and this is the load-bearing
+   change.** The host-side proxy is *one type serving every backend*, so it
+   implements all five optional interfaces whatever is behind it — a type assertion
+   would answer "yes" five times for every plugin, and the mount would poll a change
+   feed that does not exist and splice extents into a store that cannot patch. Ask
+   through `provider.AsChangeSource`/`AsEnumerator`/`AsRangeGetter`/`AsRangePutter`/
+   `AsContentHasher`; never `store.(provider.X)`. The invariant is **a declaration
+   narrows and can never widen** — `provider.Capabilities` intersects the method set
+   with the declaration, so a store cannot talk its way into a method it does not
+   have. In-process backends implement what they can honour and do *not* implement
+   `Declarer`; only the proxy and test doubles need it.
+2. **The capability set is fixed at the first Open and held across restarts.** The
+   engine wires itself to the answer once — whether this mount has a pull loop at
+   all is decided at mount time — so a set that changed underneath it would leave a
+   downloader polling a feed that is gone. A restart reporting something different
+   is logged loudly and ignored.
+3. **"Unknown kind" has to say where to install one.** `provider.Registry.Hint`
+   is set by `Loader.Register` so a config naming an uninstalled backend gets
+   "no drivel-provider-gdrive in …" appended to the registry's own message. The
+   registry must not learn what a plugin is — it holds factories and nothing else
+   — so the layer that knows contributes the sentence.
+4. **The kind is the executable's filename and nothing the plugin says.** A plugin
+   that named itself could contradict its filename, and two files could then claim
+   one kind with a resolution order that is either a directory listing or
+   last-install-wins. Two files claiming one kind *by filename* resolve
+   first-on-the-path-wins and the loser is named in the log.
+5. **Three error classifications are rebuilt on the far side, and each one lost is
+   silent.** The plugin classifies (only it can see its backend's error types) and
+   sends the classification as a gRPC status detail. `ErrNotExist` lost ⇒ renames
+   stop syncing. `ErrCursorExpired` lost ⇒ inbound sync stops forever, which is the
+   bug the sentinel exists for. `IsRetryable` lost ⇒ the first 429 is permanent. The
+   concrete error *type* is deliberately not preserved.
+6. **A dead backend is a retryable error, not a dead mount.** The next call
+   relaunches behind an exponential backoff and the engine's M4 retry loop is what
+   waits, so a crash costs a deferred push. A process that lived ≥ 60s has its
+   failure counter reset, so a backend that dies hourly does not inherit a crash
+   loop's delay. Do not add a supervisor; the retry already is one.
+7. **`PutRange` reads backwards through a Content service, and both narrowings are
+   deliberate.** `provider.RangePutter` takes an `io.ReaderAt` *because* an
+   implementation may seek in whatever order its protocol prefers, so the file
+   cannot be streamed into the call — that would change the contract for a backend
+   loaded as a plugin while leaving it intact for the same backend constructed
+   directly, which is how its own tests run it. The channel is opened **once per
+   connection** (go-plugin's `AcceptAndServe` returns only when the whole broker
+   shuts down, so a per-call listener accumulates one per range write for the life
+   of the mount), and a **handle is registered immediately before the call and
+   dropped immediately after**, so the plugin can ask for bytes of the file the host
+   chose and never for a path.
+8. **The environment is built, not inherited, and this is not a sandbox.**
+   `plugin/env.go` holds the allowlist: `PATH`, `HOME`, `TMPDIR`, locale, TLS roots,
+   proxy settings, plus `SSH_AUTH_SOCK` — the one entry that *is* a credential, kept
+   because the SFTP backend documents the agent as an auth method and has a setting
+   for declining it, so scrubbing it would leave that setting silently doing nothing
+   (M8 rule 6 again). Everything else is dropped: ambient-credential conventions,
+   all `XDG_*` (M16's privilege-drop lesson), all `DRIVEL_*` so a plugin cannot load
+   plugins. A plugin still runs as the same user with that user's whole filesystem —
+   say so plainly in any doc that describes it. What *is* enforced is narrower: a
+   group- or world-writable binary, or a non-sticky world-writable directory, is
+   refused, because a binary anybody can replace between install and launch is a
+   stranger's code holding the user's credentials.
+
+9. **The host computes content digests itself, and identifies the algorithm by
+   observation rather than by declaration.** Proxying `ContentHasher` naively
+   streams a whole file across the socket for thirty-two bytes back — and it is
+   the call that runs *most*, because M6 gate 3 precedes most content pushes and
+   `gdrive` declines `RangePutter`, so gate 2 always falls through to it. A changed
+   1 GB file crossed the socket twice: once to be hashed, once in `Put`. On the
+   first hash of a mount, `matchLocalHash` asks the backend to digest two fixed
+   vectors and adopts a local implementation only if one reproduces **both**
+   exactly (`plugin/hash.go`). Three things are load-bearing. **No match is an
+   ordinary outcome** — a digest this build cannot compute, or the same one in
+   another encoding, keeps streaming, and that fallback is what makes the whole
+   thing safe. **Identification cannot be lied about**, which is why it is a probe
+   and not a declared name: the answer is checked against the backend's own
+   output, the same reasoning as rule 1's negotiated capabilities. And
+   **mis-identification fails benign** — a wrong algorithm yields digests that
+   never equal what `Stat` reports, so gate 3 declines and the file is pushed; the
+   failure mode is a gate that stops helping, never a push that is wrongly
+   skipped. Two vectors, not one, because a single input that two functions agree
+   on would be adopted for every file after it. `HashContent` takes an `io.Reader`
+   and nothing else, so a digest is structurally a function of the bytes alone —
+   that is what makes a two-vector probe sufficient. An in-process backend never
+   reaches the proxy and is unaffected.
+
+**Versioning is one number.** `plugin.ProtocolVersion` is in the handshake and a
+mismatch refuses the launch naming both. Adding a protobuf field does **not** bump
+it — protobuf is already compatible both ways and that is the mechanism for anything
+additive, and a capability name the host does not recognise is dropped with a log
+line rather than refused. Removing a field or changing its meaning does bump it. A
+compatible *range* is what to avoid: an almost-compatible plugin answers most calls
+right and loses a sentinel or an mtime in the middle, which surfaces as data not
+syncing.
+
+**The protocol is generated and committed.** `make proto` regenerates
+`plugin/internal/pb` from `proto/`; `make proto-check` is in `make check` and fails
+on drift — the same arrangement the completions use, for the same reason (a distro
+package has no protobuf toolchain). The toolchain is pure Go: `buf` is the compiler
+as well as the driver, so **there is no protoc anywhere** and adding one would be a
+step backwards.
+
+**`gdconf` exists for one reason.** The `-drive-*` flags are the host's, so the host
+must build a Drive settings table and generate completions for the two enumerated
+values — and completions rule 3 says those words must be the program's own
+constants. `internal/provider/gdrive/gdconf` is the leaf that carries the vocabulary
+without the SDK; `gdrive` re-exports `Config`/`SweepMode`/`DeleteMode` as aliases, so
+nothing below the seam changed. A new backend with enumerated flags needs the same
+split, and a backend with no host-side flags needs nothing.
+
+**Do not merge this protocol with M14's control socket.** The trust directions are
+opposite — a plugin is code drivel launches and trusts, a control client is a user
+drivel serves — and one transport serving both is how a plugin ends up able to stop
+the daemon.
+
+**Still compiled in: mount backends.** The `mount.Backend` seam would take the same
+treatment, nothing is asking for it, and a FUSE connection is not a thing to hand
+across a process boundary casually. **Not implemented: checksum pinning** —
+go-plugin offers `SecureConfig`; the mode and directory checks are what ships, and a
+pinned digest per kind in the config file is the obvious next step.
 
 ## fstab & non-interactive mount (M16)
 
@@ -1139,6 +1332,8 @@ the seam clean anyway — the cross-compile shows that costs nothing.
 ```sh
 make help                                      # every gate as a target, plus examples
 make check                                     # everything CI runs, in CI's order
+make build                                     # drivel AND every cmd/drivel-provider-*
+make proto                                     # regenerate plugin/internal/pb after editing proto/
 make completions                               # regenerate completions/ after a flag change
 make hooks                                     # install the git hooks (once per clone)
 make run ARGS='-debug'                         # build, then mount ./mnt over ./data
@@ -1147,11 +1342,16 @@ go build ./...
 go vet ./...
 go test -race ./...                            # what `make test` runs
 DRIVEL_REQUIRE_TESTENV=all go test -race ./... # ...and nothing silently skipped
+
+# A backend is a separate executable, so `go build ./cmd/drivel` alone leaves a
+# binary with no providers. bin/ is first on the plugin search path, which is what
+# makes the pair below work with no configuration.
 go build -o ./bin/drivel ./cmd/drivel
+go build -o ./bin/drivel-provider-gdrive ./cmd/drivel-provider-gdrive
 ./bin/drivel mount -mount ./mnt -data ./data   # separate backing dir; -debug for FUSE tracing
 ./bin/drivel mount -mount ./dir                # in-place: ./dir is its own backing (Linux)
 
-sudo make install                              # + /sbin/mount.fuse.drivel for fstab
+sudo make install                              # + /sbin/mount.fuse.drivel, + $PREFIX/lib/drivel/plugins
 ```
 
 `./mnt` and `./data` are gitignored scratch dirs; create them (the binary
@@ -1174,8 +1374,11 @@ events. Ctrl-C unmounts.
   SIGINT/SIGTERM, which makes `server.Wait()` return.
 - Change events use root-relative paths (no leading slash); `NewPath` is set only
   for `OpRename`.
-- Keep the FS layer provider-agnostic — depend on `internal/provider`, never on a
-  concrete Drive type.
+- Keep the FS layer provider-agnostic — depend on `provider`, never on a concrete
+  Drive type. Nothing above the seam may import `internal/provider/gdrive` or
+  `internal/provider/sftp`; since M9 those are not even in the drivel binary.
+- Ask a store what it can do with `provider.As*`, never with a type assertion. See
+  "Plugin architecture" rule 1 for what the assertion answers wrongly.
 - FS operations must not block on the network; sync happens off the FUSE path via
   the buffered event channel.
 - Secrets (`credentials.json`, `token.json`, `*.local.json`) are gitignored —

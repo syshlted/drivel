@@ -12,9 +12,14 @@ With no flags at all, `drivel mount` reads
 ## The config file
 
 An **account** is a set of credentials: a provider kind plus that provider's
-settings. Two kinds ship: `gdrive` and [`sftp`](sftp.md). A **mount** references an account and says what to mount from it. Their
-provider settings merge, with the mount's winning, so one account can be mounted
-several times with different roots.
+settings. Two kinds ship: `gdrive` and [`sftp`](sftp.md). A **mount** references an
+account and says what to mount from it. Their provider settings merge, with the
+mount's winning, so one account can be mounted several times with different roots.
+
+The kind names a **backend**, which is a separate program Drivel starts for you —
+`provider = "gdrive"` needs `drivel-provider-gdrive` installed. See
+[Installing](install.md#install-the-command--and-at-least-one-backend); if it is
+missing, the mount fails with a message naming every directory that was searched.
 
 ```toml
 [account.personal]
