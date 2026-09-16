@@ -10,6 +10,67 @@ from source with `make build`.
 
 ## Unreleased
 
+### Control how soon a change is uploaded — 2026-09-15
+
+**`drivel mount -push-delay D`** (config `push-delay`, fstab `push-delay=D`) sets
+how long a file must go unchanged before Drivel uploads it. The default is
+`300ms`, which is what every previous version did.
+
+The window coalesces, so a file you save three times in a row is uploaded once.
+Raising it is worth doing in two situations:
+
+- **You keep re-saving the same files.** A longer window means one upload per
+  window instead of one per save, which costs less quota.
+- **You are copying a large number of small files in.** Drivel keeps a queue of
+  pending uploads, and a bulk copy can fill it — at which point the filesystem
+  itself slows down to the speed of your uplink. A longer window drains that
+  queue on a calmer cycle and makes the stall far less likely.
+
+```sh
+drivel mount -push-delay 30s        # coalesce aggressively
+```
+
+Three things it deliberately does not do. It cannot hold a file forever — one
+that changes again inside every window is still uploaded, on a bound derived from
+the delay. It has no effect on a file that is held open and never closed, such as
+a database or a VM disk image, whose changes Drivel does not see until the file is
+closed and otherwise picks up on the periodic sweep. And it does not reduce
+conflicts: a longer window leaves *more* time for the remote to change underneath
+you, so a conflict copy becomes marginally more likely, not less.
+
+`0` is refused rather than quietly meaning "the default", the same way the worker
+counts are.
+
+### Drivel prints its own shell completions — 2026-09-13
+
+**`drivel completion bash` and `drivel completion zsh`** write a completion
+script to standard output, generated from the flags your binary actually has. To
+try it straight away:
+
+```sh
+eval "$(drivel completion bash)"
+```
+
+That runs Drivel at every shell start, so for a permanent install write the script
+where your shell already looks instead:
+
+```sh
+drivel completion bash > ~/.local/share/bash-completion/completions/drivel
+```
+
+For zsh the file is the better route rather than just the tidier one: `_drivel` is
+an autoloaded function file, so the `eval` form works only if it comes after
+`compinit` in your `~/.zshrc`.
+
+**Why it changed.** The completions used to be two files shipped in the
+repository and placed by `make install`. That left anyone running a downloaded
+binary — no repository, no `make` — with no way to get them at all. A binary that
+can print its own works everywhere, and packagers get a better deal too: they run
+the command instead of needing a Go toolchain.
+
+`sudo make install` still places them for you, so nothing changes if that is how
+you install.
+
 ### Storage backends are now separate programs — 2026-09-11
 
 **Drivel no longer contains its storage backends; it starts them.** Google Drive

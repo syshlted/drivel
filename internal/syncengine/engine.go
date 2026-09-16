@@ -37,10 +37,39 @@ import (
 )
 
 // Defaults for the outbound uploader. All are overridable via Config.
-const (
-	defaultDebounce     = 300 * time.Millisecond
-	defaultDrainTimeout = 30 * time.Second
-)
+const defaultDrainTimeout = 30 * time.Second
+
+// DefaultPushDelay is how long a path must go without a further content change
+// before its upload is dispatched — Config.Debounce's default, and what
+// `drivel mount -push-delay` overrides.
+//
+// It is short because the events it coalesces are already coarse: OpWrite is
+// emitted once per close (push-on-close, internal/vfs/file.go), not once per
+// write(2), so a 50 GB copy arrives as one OpCreate and one OpWrite rather than
+// a stream. The window exists to merge those two and to absorb a program that
+// closes a file several times in quick succession, not to batch a transfer.
+//
+// Raising it trades promptness for quota: a file rewritten repeatedly inside the
+// window is uploaded once instead of once per close, and the outbound queue
+// drains on a longer cycle, which is what keeps a bulk import from filling the
+// event channel and stalling the FUSE handler (see eventBuffer in internal/app).
+const DefaultPushDelay = 300 * time.Millisecond
+
+// maxWaitFactor bounds how long a path may be held by repeated re-arming of its
+// debounce timer, as a multiple of the delay itself: a pending change is always
+// dispatched within DefaultPushDelay*maxWaitFactor of the *first* change that
+// made it pending, however much activity follows.
+//
+// Without it, a path touched again inside every window is never dispatched at
+// all, and the longer -push-delay is set the easier that is to hit — a script
+// appending to a file once a second starves a 5m delay forever. It cannot
+// disturb a large copy, because a copy emits one OpWrite at close rather than
+// one per write, so there is no stream of events to keep re-arming the timer.
+//
+// Ten rather than two so that the coalescing a long delay was set to buy is not
+// undone at the first sign of activity; at the 300ms default it puts the bound
+// at 3s, which nothing observable reaches.
+const maxWaitFactor = 10
 
 // DefaultWorkers is the out-of-the-box size of the path-hashed upload pool.
 //
@@ -84,6 +113,7 @@ type Engine struct {
 
 	lg           *log.Logger
 	debounce     time.Duration
+	maxWait      time.Duration
 	workers      int
 	drainTimeout time.Duration
 	retry        retryPolicy
@@ -111,9 +141,16 @@ type Config struct {
 	// does not say which mount it belongs to is close to useless (M8).
 	Logger *log.Logger
 
-	Debounce     time.Duration // per-path coalescing window
+	Debounce     time.Duration // per-path coalescing window; see DefaultPushDelay
 	Workers      int           // size of the path-hashed worker pool
 	DrainTimeout time.Duration // bound on the shutdown drain
+
+	// MaxWait bounds how long repeated activity may hold a path pending, counted
+	// from the change that made it pending rather than from the last one. Unset
+	// derives it from Debounce (maxWaitFactor); it is separate only so a test can
+	// pin both ends of the window independently. A value below Debounce would
+	// defeat the coalescing entirely and is raised to it.
+	MaxWait time.Duration
 }
 
 // New constructs an Engine, applying defaults for any unset tuning fields.
@@ -125,12 +162,22 @@ func New(cfg Config) *Engine {
 		holes:        cfg.Holes,
 		lg:           cfg.Logger,
 		debounce:     cfg.Debounce,
+		maxWait:      cfg.MaxWait,
 		workers:      cfg.Workers,
 		drainTimeout: cfg.DrainTimeout,
 		retry:        defaultRetry,
 	}
 	if e.debounce <= 0 {
-		e.debounce = defaultDebounce
+		e.debounce = DefaultPushDelay
+	}
+	// After the debounce default, since it is derived from it. Clamped upward so
+	// that a caller who sets MaxWait below Debounce gets a window that still
+	// coalesces rather than one that dispatches on the first event.
+	if e.maxWait <= 0 {
+		e.maxWait = e.debounce * maxWaitFactor
+	}
+	if e.maxWait < e.debounce {
+		e.maxWait = e.debounce
 	}
 	if e.workers <= 0 {
 		e.workers = DefaultWorkers
@@ -179,11 +226,23 @@ func (e *Engine) Run(ctx context.Context, events <-chan fsevent.Event) {
 	c := coalescer{pending: map[string]*ranges.Set{}}
 	timers := map[string]*time.Timer{}
 	flushCh := make(chan string, 64)
+	// since[p] is when p's oldest un-dispatched content change arrived. The
+	// trailing timer is re-armed by every later change, so this is the only thing
+	// that bounds how long one path can be held: see maxWaitFactor.
+	since := map[string]time.Time{}
 	stopTimer := func(p string) {
 		if t, ok := timers[p]; ok {
 			t.Stop()
 			delete(timers, p)
 		}
+	}
+	// settle forgets everything that was holding p pending. It must run whenever p
+	// is dispatched — including when the coalescer turns out to have nothing for
+	// it — because a stale `since` entry would put the next change to that path
+	// past its deadline the moment it arrived.
+	settle := func(p string) {
+		stopTimer(p)
+		delete(since, p)
 	}
 
 loop:
@@ -200,7 +259,18 @@ loop:
 				c.markContent(ev.Path, ev.Dirty)
 				stopTimer(ev.Path)
 				p := ev.Path
-				timers[p] = time.AfterFunc(e.debounce, func() {
+				now := time.Now()
+				if _, pending := since[p]; !pending {
+					since[p] = now
+				}
+				// Trailing delay, except that it may not push the dispatch past
+				// the max-wait deadline measured from the first pending change.
+				// Negative means the deadline has already passed: fire at once.
+				delay := e.debounce
+				if left := since[p].Add(e.maxWait).Sub(now); left < delay {
+					delay = max(left, 0)
+				}
+				timers[p] = time.AfterFunc(delay, func() {
 					select {
 					case flushCh <- p:
 					case <-opCtx.Done():
@@ -210,13 +280,13 @@ loop:
 				// Metadata-only; no content upload (M2 parity).
 			default:
 				for _, t := range c.structural(ev) {
-					stopTimer(t.Path)
+					settle(t.Path)
 					dispatch(t)
 				}
 			}
 		case p := <-flushCh:
+			settle(p)
 			for _, t := range c.flush(p) {
-				stopTimer(p)
 				dispatch(t)
 			}
 		}

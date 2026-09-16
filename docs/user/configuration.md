@@ -72,6 +72,7 @@ Every key mirrors a flag. Both are listed together below; `drivel mount -h` and
 | `-materialize` | `materialize` | off | In eager mode, download remote files that have no local copy. Implied by `-lazy`, where it costs only a placeholder. |
 | `-max-deletes N` | `max-deletes` | `100` | Cap on deletions one reconcile may infer, in either direction. `0` is unlimited. See [Data safety](data-safety.md#deletion). |
 | `-sweep-interval D` | `sweep-interval` | `24h` | How often to re-enumerate. `0` disables it. On a backend with no change feed — [SFTP](sftp.md#how-changes-reach-you) — this is the *poll interval*, and the default is far too slow. |
+| `-push-delay D` | `push-delay` | `300ms` | How long a file must go unchanged before it is uploaded. See [When a change is pushed](#when-a-change-is-pushed). |
 | `-upload-workers N` | `upload-workers` | `4` | How many files this mount uploads at once. See [Transfer concurrency](#transfer-concurrency). |
 | `-hydrate-workers N` | `hydrate-workers` | `8` | How many placeholders this mount fetches at once under `-lazy`. See [Transfer concurrency](#transfer-concurrency). |
 | `-debug` | `debug` | off | FUSE-level tracing. Very verbose. |
@@ -81,9 +82,44 @@ Every key mirrors a flag. Both are listed together below; `drivel mount -h` and
 
 `max-deletes` and `sweep-interval` are stored as optional values so that writing
 an explicit `0` survives: merging "zero" with "unset" would silently uncap the
-delete guard. The two worker counts are optional for the opposite reason — `0` is
-not a pool size, so an explicit one is refused rather than read as "use the
-default".
+delete guard. The two worker counts and `push-delay` are optional for the opposite
+reason — `0` is neither a pool size nor a window, so an explicit one is refused
+rather than read as "use the default".
+
+## When a change is pushed
+
+A file is uploaded once it has gone `push-delay` without changing again. The
+window exists to coalesce: a file saved three times in quick succession is
+uploaded once, not three times.
+
+The default of 300ms is short because the events it merges are already coarse.
+Drivel notices a write when the file is **closed**, not on every `write(2)`, so
+copying a 50 GB file produces two events rather than millions — the window is
+merging those two, not batching a transfer.
+
+Raising it trades promptness for quota and for a calmer queue:
+
+- A file that is rewritten repeatedly — a document you keep saving, a build
+  artefact — is uploaded once per window instead of once per save.
+- The outbound queue drains on a longer cycle. During a bulk copy of many small
+  files Drivel can otherwise fill its internal queue, at which point the
+  filesystem itself slows to the speed of your uplink. A longer window makes that
+  far less likely.
+
+What it will **not** do:
+
+- It cannot hold a file forever. A file changed again inside every window is
+  still uploaded, on a bound derived from the delay, so a busy file cannot starve.
+- It has no effect on a file that is held open and never closed — a database, a
+  VM disk image, a log an application keeps open. Drivel does not see those
+  changes until the file is closed; until then they are picked up by the periodic
+  sweep (`sweep-interval`), not by this.
+- It changes nothing about conflicts. A longer window means a longer period in
+  which the remote can change under you, so it makes [conflict
+  copies](data-safety.md) slightly more likely, not less.
+
+Anything still queued when you unmount is flushed before Drivel exits, and
+anything lost to a crash is found again by the next sweep.
 
 ## Transfer concurrency
 

@@ -8,6 +8,9 @@ drivel \- cloud-backed FUSE interceptor filesystem
 .RI [ command ]
 .RI [ flags ]
 .br
+.B drivel completion
+.RB { bash | zsh }
+.br
 .B drivel login
 .RB [ -account
 .IR name ]
@@ -59,6 +62,8 @@ drivel \- cloud-backed FUSE interceptor filesystem
 .RB [ -max-deletes
 .IR n ]
 .RB [ -sweep-interval
+.IR d ]
+.RB [ -push-delay
 .IR d ]
 .RB [ -upload-workers
 .IR n ]
@@ -153,6 +158,40 @@ Mount a directory and sync it. Non-interactive: it requires a token produced by
 and never prompts on stdin. This is the default command, so
 .B drivel -mount \fIdir\fB ...
 (with a leading flag and no subcommand word) also selects it.
+.TP
+.B completion \fIshell\fR
+Print a shell completion script on standard output, for
+.B bash
+or
+.BR zsh .
+The script is rendered from this binary's own flag definitions when the command
+runs, so it always describes the flags this build has. Nothing is installed by
+running it; the caller decides where the output goes.
+.IP
+To enable completion in the current shell:
+.IP
+.EX
+eval "$(drivel completion bash)"
+.EE
+.IP
+That runs
+.B drivel
+at every shell start. To install it once instead, write it where the shell looks
+\(em for bash,
+.I ~/.local/share/bash-completion/completions/drivel
+or
+.IR /usr/share/bash-completion/completions/drivel ;
+for zsh, a file named
+.I _drivel
+in a directory on
+.IR $fpath .
+For zsh the file is the better route rather than merely the tidier one:
+.I _drivel
+is an autoloaded function file, so the
+.B eval
+form works only after
+.B compinit
+has run.
 .TP
 .B help
 Print top-level usage.
@@ -388,6 +427,32 @@ that means a first run, a resumed sweep, an expired cursor or
 .BR -resync ,
 which for a long-lived mount can be never.
 .TP
+.BI -push-delay " d"
+How long a file must go unchanged before it is uploaded. Default:
+.BR 300ms .
+Must be greater than zero; an explicit
+.B 0
+is refused rather than read as \(lquse the default\(rq.
+.IP
+The window coalesces: a file saved three times inside it is uploaded once. It is
+short by default because the events it merges are already coarse \(em a write is
+noticed when the file is
+.IR closed ,
+not on every
+.BR write (2),
+so copying a large file produces two events rather than millions. Raising it
+trades promptness for quota, and drains the outbound queue on a longer cycle,
+which is what keeps a bulk copy of many small files from filling that queue and
+slowing the filesystem itself to the speed of the uplink.
+.IP
+It cannot hold a file indefinitely: one changed again inside every window is still
+uploaded, on a bound derived from the delay. It has no effect at all on a file
+that is held open and never closed \(em a database, a VM image, a log \(em whose
+changes are not seen until it is closed and are otherwise picked up by
+.BR -sweep-interval .
+And it does not reduce conflicts; a longer window leaves more time for the remote
+to change underneath, so it makes a conflict copy marginally more likely.
+.TP
 .BI -upload-workers " n"
 How many files this mount uploads at once. Default:
 .BR 4 .
@@ -602,7 +667,7 @@ watching, and
 .B drive-delete=permanent
 is how such a mount reclaims space rather than filling the trash.
 .TP
-.BR lazy ", " xattr ", " resync ", " materialize ", " "max-deletes=" ", " "sweep-interval=" ", " "upload-workers=" ", " "hydrate-workers="
+.BR lazy ", " xattr ", " resync ", " materialize ", " "max-deletes=" ", " "sweep-interval=" ", " "push-delay=" ", " "upload-workers=" ", " "hydrate-workers="
 As the corresponding
 .B mount
 flags.
@@ -720,6 +785,7 @@ Mount keys mirror the flags:
 .IR materialize ,
 .IR max-deletes ,
 .IR sweep-interval ,
+.IR push-delay ,
 .I upload-workers
 and
 .IR hydrate-workers .

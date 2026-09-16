@@ -133,21 +133,45 @@ are placed on every platform but only work on Linux.
 `sudo make install` places them, so if you installed that way there is nothing to
 do — start a new shell and `drivel mount -<TAB>` works.
 
-To install them by hand, they live in [`completions/`](../../completions):
+If you installed some other way — a downloaded binary, `go install`, a copy you
+built — **Drivel prints its own completion script**, so there is no file to fetch
+from anywhere:
 
 ```sh
-# bash — system-wide, or source it from ~/.bashrc
-sudo cp completions/drivel.bash /usr/share/bash-completion/completions/drivel
+drivel completion bash
+drivel completion zsh
+```
+
+To try it in the shell you are in right now:
+
+```sh
+eval "$(drivel completion bash)"
+```
+
+That works, but it runs Drivel every time a shell starts. For a permanent install,
+write the script to the place your shell already looks:
+
+```sh
+# bash — per-user
+drivel completion bash > ~/.local/share/bash-completion/completions/drivel
+
+# bash — system-wide
+drivel completion bash | sudo tee /usr/share/bash-completion/completions/drivel >/dev/null
 
 # zsh — into a directory on your $fpath; the filename must be _drivel
-cp completions/_drivel ~/.zsh/completions/_drivel
+mkdir -p ~/.zsh/completions
+drivel completion zsh > ~/.zsh/completions/_drivel
 autoload -Uz compinit && compinit
 ```
 
-Both files are **generated from Drivel's own flag definitions** (`make
-completions`), so they know every flag the binary does, including which ones take
-a directory and which take one of a fixed set of words — `-drive-delete <TAB>`
-offers `trash` and `permanent`.
+For zsh the file is the better route rather than merely the tidier one: `_drivel`
+is an autoloaded function file, so the `eval` form only works if it comes *after*
+`compinit` in your `~/.zshrc`.
+
+The script is **generated from Drivel's own flag definitions** at the moment you
+run the command, so it knows every flag your binary does — including which take a
+directory and which take one of a fixed set of words. `-drive-delete <TAB>` offers
+`trash` and `permanent`.
 
 ## Man page
 

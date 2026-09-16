@@ -46,6 +46,7 @@ type mountEntry struct {
 	materialize    bool
 	maxDeletes     *int
 	sweepInterval  *string
+	pushDelay      *string
 	uploadWorkers  *int
 	hydrateWorkers *int
 	provider       map[string]any
@@ -76,6 +77,10 @@ type mountTOML struct {
 	Materialize   bool    `toml:"materialize"`
 	MaxDeletes    *int    `toml:"max-deletes"`
 	SweepInterval *string `toml:"sweep-interval"`
+	// A pointer for the same reason the pool sizes below are: an explicit 0 has
+	// no meaning here (a mount that dispatches before it has coalesced anything)
+	// and is refused rather than read as "use the default".
+	PushDelay *string `toml:"push-delay"`
 	// Pointers so that an explicit 0 is distinguishable from "not mentioned" and
 	// can be refused. Neither number has a meaning at 0 — an upload pool of that
 	// size never pushes and a fetch pool of it never hydrates — and in a file
@@ -142,6 +147,7 @@ func Load(path string) (*Config, error) {
 			materialize:    m.Materialize,
 			maxDeletes:     m.MaxDeletes,
 			sweepInterval:  m.SweepInterval,
+			pushDelay:      m.PushDelay,
 			uploadWorkers:  m.UploadWorkers,
 			hydrateWorkers: m.HydrateWorkers,
 			provider:       m.Provider,
@@ -255,6 +261,18 @@ func (c *Config) spec(m mountEntry) (app.MountSpec, error) {
 			return spec, fmt.Errorf("sweep-interval: %w", err)
 		}
 		spec.SweepInterval = d
+	}
+	spec.PushDelay = syncengine.DefaultPushDelay
+	if m.pushDelay != nil {
+		d, err := time.ParseDuration(*m.pushDelay)
+		if err != nil {
+			return spec, fmt.Errorf("push-delay: %w", err)
+		}
+		if d <= 0 {
+			return spec, fmt.Errorf("push-delay: %s is not a coalescing window (omit the key for the default of %s)",
+				*m.pushDelay, syncengine.DefaultPushDelay)
+		}
+		spec.PushDelay = d
 	}
 
 	spec.UploadWorkers = syncengine.DefaultWorkers

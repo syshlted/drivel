@@ -75,7 +75,8 @@ Key points, mapped to DESIGN.md:
   the backing directory (§2.1–§2.2). Only *mutations* generate an
   `fsevent.Event`, pushed onto a buffered channel so the FUSE path never blocks
   on the network.
-- **Outbound** (`Engine`, §5): debounce per path → path-hashed worker pool →
+- **Outbound** (`Engine`, §5): debounce per path (`-push-delay`, bounded so a
+  never-quiet path cannot be held indefinitely) → path-hashed worker pool →
   provider `Store` calls, with retry/backoff on retryable errors.
 - **Inbound** (`Downloader`, §3): poll the provider's `changes.list` cursor feed,
   apply changes to the backing directory.

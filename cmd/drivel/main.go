@@ -53,17 +53,11 @@ func main() {
 		// The same entry point, reachable without the symlink: it is how the helper
 		// is tested, and how you debug an fstab line by hand.
 		failHelper(runMountHelper(args))
+	case "completion":
+		fail(runCompletion(args))
 	case "help", "-h", "--help":
 		usage(os.Stdout)
 	default:
-		// Build-tagged subcommands (today: gen-completions, under `completions`)
-		// get a chance before this is an error. `handled` is separate from the
-		// error on purpose: a generator that ran and failed must report why, not
-		// fall through to "unknown command" and print the usage text instead.
-		if handled, err := runExtraCommand(cmd, args); handled {
-			fail(err)
-			return
-		}
 		fmt.Fprintf(os.Stderr, "unknown command %q\n\n", cmd)
 		usage(os.Stderr)
 		os.Exit(2)
@@ -96,10 +90,13 @@ License AGPLv3: GNU Affero GPL v3 <https://www.gnu.org/licenses/agpl-3.0.html>
 This is free software with NO WARRANTY, to the extent permitted by law.
 
 Usage:
-  drivel login [flags]   Interactive Google OAuth setup (credentials.json + token.json)
-  drivel mount [flags]   Mount a directory and sync it with Google Drive
+  drivel login [flags]     Interactive Google OAuth setup (credentials.json + token.json)
+  drivel mount [flags]     Mount a directory and sync it with Google Drive
+  drivel completion SHELL  Print the completion script for bash or zsh
 
 Run 'drivel login -h' or 'drivel mount -h' for command flags.
+
+To try completion in this shell:  eval "$(drivel completion bash)"
 
 As /sbin/mount.fuse.drivel (or 'drivel mount-helper') this is also the mount(8)
 helper for /etc/fstab; see drivel(1) and docs/user/fstab.md. Linux only.

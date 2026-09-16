@@ -81,6 +81,19 @@ type MountSpec struct {
 	MaxDeletes    int
 	SweepInterval time.Duration
 
+	// PushDelay is how long a path must go without a further content change
+	// before its upload is dispatched — the engine's per-path coalescing window.
+	// Zero selects syncengine.DefaultPushDelay.
+	//
+	// It is a tuning value rather than a safety one: every setting pushes the
+	// same bytes, just sooner or later and in more or fewer requests. Raising it
+	// trades promptness for quota and for a calmer outbound queue, which is what
+	// keeps a bulk import from filling the event channel and stalling the FUSE
+	// handler. It cannot starve a path — see syncengine's maxWaitFactor — and it
+	// has no bearing on a file that is held open and never closed, which emits no
+	// event at any setting (push-on-close; see internal/vfs/file.go).
+	PushDelay time.Duration
+
 	// Transfer concurrency, per mount and deliberately not per process. Two
 	// mounts are two sets of credentials; a limiter they shared would let either
 	// one starve the other and read its activity off the contention, which is the
@@ -280,12 +293,13 @@ func Open(ctx context.Context, spec MountSpec, reg *provider.Registry) (*Mount, 
 	}
 
 	m.engine = syncengine.New(syncengine.Config{
-		Store:   m.store,
-		DataDir: backing.Path,
-		State:   m.state,
-		Holes:   holesOf(m.hyd),
-		Logger:  m.lg,
-		Workers: spec.UploadWorkers,
+		Store:    m.store,
+		DataDir:  backing.Path,
+		State:    m.state,
+		Holes:    holesOf(m.hyd),
+		Logger:   m.lg,
+		Workers:  spec.UploadWorkers,
+		Debounce: spec.PushDelay,
 	})
 
 	// Inbound sync. A change feed (M3) is one way in and the M7b sweep is the

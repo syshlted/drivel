@@ -50,6 +50,12 @@ The per-path debounce in `Engine.Run` that merges a burst of writes into one
 upload. It also merges [dirty ranges](#dirty-ranges), where **unknown absorbs
 known**.
 
+The window is `-push-delay` (default 300ms). Because every later change re-arms
+the trailing timer, the window cannot by itself bound how long a path is held —
+a second deadline, measured from the change that made the path pending, caps that
+at ten times the delay. Without it a path changed inside every window would never
+be dispatched while the mount is running.
+
 ### cursor
 
 The opaque resume token for a provider's change feed (Drive's `changes.list`

@@ -228,3 +228,77 @@ func TestRunDrainFlushesPendingWrite(t *testing.T) {
 		t.Fatalf("pending write not drained: calls=%v", fs.calls)
 	}
 }
+
+// --- Run: the max-wait bound on a never-quiet path ---------------------------
+
+// A path changed again inside every debounce window is still dispatched, because
+// the deadline is measured from the first pending change rather than the last.
+// Without that bound the trailing timer is re-armed forever and the path is held
+// until the shutdown drain — which, at the long -push-delay this flag exists to
+// allow, means it is never pushed at all while the mount is up.
+func TestRunMaxWaitDispatchesAPathThatIsNeverQuiet(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "busy.log", "content")
+	fs := newFakeStore()
+	e := New(Config{
+		Store:    fs,
+		DataDir:  dir,
+		Debounce: 50 * time.Millisecond,
+		MaxWait:  100 * time.Millisecond,
+	})
+
+	// Unbuffered, so each send is paced by Run actually consuming it.
+	events := make(chan fsevent.Event)
+	done := make(chan struct{})
+	go func() { e.Run(context.Background(), events); close(done) }()
+
+	// One change every 10ms: always inside the 50ms window, so the trailing timer
+	// never survives long enough to fire on its own. Bounded at ~2s so a
+	// regression fails the test rather than hanging it.
+	var dispatched bool
+	for i := 0; i < 200 && !dispatched; i++ {
+		events <- fsevent.Event{Op: fsevent.OpWrite, Path: "busy.log"}
+		time.Sleep(10 * time.Millisecond)
+		fs.mu.Lock()
+		dispatched = len(fs.calls) > 0
+		fs.mu.Unlock()
+	}
+	// Read the verdict before the drain, which would upload it either way.
+	close(events)
+	<-done
+
+	if !dispatched {
+		t.Fatal("a path changed inside every debounce window was never dispatched while running; the max-wait deadline did not fire")
+	}
+}
+
+// MaxWait below Debounce is raised to it rather than taken literally: a deadline
+// shorter than the window would dispatch on the first change and coalesce
+// nothing, which is the opposite of what every caller of this knob wants.
+func TestRunMaxWaitBelowDebounceStillCoalesces(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "a.txt", "hello")
+	fs := newFakeStore()
+	e := New(Config{
+		Store:    fs,
+		DataDir:  dir,
+		Debounce: 200 * time.Millisecond,
+		MaxWait:  time.Nanosecond, // nonsense: must be clamped up to Debounce
+	})
+
+	events := make(chan fsevent.Event)
+	done := make(chan struct{})
+	go func() { e.Run(context.Background(), events); close(done) }()
+
+	events <- fsevent.Event{Op: fsevent.OpCreate, Path: "a.txt"}
+	time.Sleep(20 * time.Millisecond) // well inside the 200ms window
+	events <- fsevent.Event{Op: fsevent.OpWrite, Path: "a.txt"}
+	close(events)
+	<-done
+
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+	if len(fs.calls) != 1 {
+		t.Fatalf("clamp failed: got %d store calls, want 1 (both changes coalesced): %v", len(fs.calls), fs.calls)
+	}
+}

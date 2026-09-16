@@ -33,6 +33,7 @@ func defaults() specFlags {
 		driveRoot:     "root",
 		maxDeletes:    syncengine.DefaultMaxDeletes,
 		sweepInterval: syncengine.DefaultSweepInterval,
+		pushDelay:     syncengine.DefaultPushDelay,
 
 		uploadWorkers:  syncengine.DefaultWorkers,
 		hydrateWorkers: hydrate.DefaultWorkers,
@@ -58,6 +59,7 @@ func TestFlagsReachTheSpec(t *testing.T) {
 	f.materialize = true
 	f.maxDeletes = 7
 	f.sweepInterval = 90 * time.Minute
+	f.pushDelay = 12 * time.Second
 	f.uploadWorkers = 11
 	f.hydrateWorkers = 13
 
@@ -80,6 +82,9 @@ func TestFlagsReachTheSpec(t *testing.T) {
 	}
 	if s.SweepInterval != 90*time.Minute {
 		t.Errorf("SweepInterval = %v; want 90m", s.SweepInterval)
+	}
+	if s.PushDelay != 12*time.Second {
+		t.Errorf("PushDelay = %v; want 12s", s.PushDelay)
 	}
 	// Distinct values on purpose: one number reaching both fields would satisfy a
 	// test that used the same one, and the whole point is that the two directions
@@ -262,6 +267,23 @@ func TestWorkerPoolOfZeroIsRefused(t *testing.T) {
 				t.Errorf("error %q does not name %s", err, tc.want)
 			}
 		})
+	}
+}
+
+// A push delay of zero is refused for the same reason a pool of zero is: it is
+// not a window, New would substitute the default behind the user's back, and
+// -max-deletes 0 in the same flag set means "no limit" rather than "unset".
+func TestPushDelayOfZeroIsRefused(t *testing.T) {
+	for _, d := range []time.Duration{0, -time.Second} {
+		f := defaults()
+		f.mountpoint, f.pushDelay = "/m", d
+		_, err := mountSpecs(quietFlagSet(), map[string]bool{"mount": true}, f)
+		if err == nil {
+			t.Fatalf("-push-delay %s was accepted", d)
+		}
+		if !strings.Contains(err.Error(), "-push-delay") {
+			t.Errorf("error %q does not name -push-delay", err)
+		}
 	}
 }
 

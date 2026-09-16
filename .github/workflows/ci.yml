@@ -58,7 +58,6 @@ jobs:
       # from. It belongs with the static gates rather than with the tests: what
       # it catches is a flag added without a completion, which is a stale file in
       # the tree and not a failing behaviour.
-      - run: make completions-check
 
       # Same shape, for the plugin protocol (M9): plugin/internal/pb is generated
       # from proto/ and committed, so the gate is that the committed copy still

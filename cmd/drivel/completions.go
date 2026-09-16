@@ -1,25 +1,33 @@
-//go:build completions
-
-// Completion generation, compiled only under the `completions` build tag.
+// Shell completion, printed by the program itself.
 //
-// It lives behind a tag because it is build-time machinery, not a feature of the
-// program: a released drivel has no reason to carry a shell-script renderer, and
-// `internal/completion` is imported from this file alone, so an ordinary build
-// contains neither it nor the table below. Run it through the Makefile:
+//	drivel completion bash   # source it from an rc file, or redirect it to a file
+//	drivel completion zsh
 //
-//	make completions        # rewrite completions/ from these definitions
-//	make completions-check  # fail if the checked-in files have drifted
+// This was build-time machinery behind a `completions` tag until the portable
+// single binary became a distribution shape drivel has to support. A binary
+// somebody downloaded on its own has no `make install` behind it to have placed
+// anything in /usr/share, so the only completion that can exist for it is the one
+// the binary can print. The packaging case is not weakened by the move, it is
+// served better: the reason the generated files were committed was that "a distro
+// package has no Go toolchain", and a package build that can run the binary it
+// just built needs no toolchain either.
 //
-// or directly:
+// What it costs is `internal/completion` linking into every build, which the tag
+// existed to prevent. That was a layering decision rather than a size one, and it
+// is overturned deliberately rather than by neglect: the renderer is string
+// formatting, and the alternative is a feature that cannot work at all for a
+// whole class of install.
 //
-//	go run -tags completions ./cmd/drivel gen-completions -o completions
+// The flags remain the source. Nothing here lists a flag by name — describe walks
+// the same flag.FlagSet the program parses, and completionHints supplies only what
+// a FlagSet cannot know.
 package main
 
 import (
 	"flag"
 	"fmt"
 	"os"
-	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/zishmusic/drivel/internal/completion"
@@ -67,6 +75,7 @@ var completionHints = map[string]hint{
 	"mount/materialize":        {"eager mode: download remote files that have no local copy", completion.None, nil, ""},
 	"mount/max-deletes":        {"cap on deletions one reconcile may infer; 0 for no limit", completion.Opaque, nil, "count"},
 	"mount/sweep-interval":     {"re-enumerate this often, from the last completed sweep; 0 disables", completion.Opaque, nil, "duration"},
+	"mount/push-delay":         {"how long a file must go unchanged before it is uploaded", completion.Opaque, nil, "duration"},
 	"mount/upload-workers":     {"how many files this mount uploads at once", completion.Opaque, nil, "count"},
 	"mount/hydrate-workers":    {"how many placeholders this mount fetches at once under -lazy", completion.Opaque, nil, "count"},
 	"mount/debug":              {"enable FUSE debug logging", completion.None, nil, ""},
@@ -122,7 +131,10 @@ func completionApp() (completion.App, error) {
 	app := completion.App{
 		Name:     "drivel",
 		Commands: []completion.Command{login, mount},
-		Extra:    []completion.Command{{Name: "help", Summary: "Show top-level usage"}},
+		Extra: []completion.Command{
+			{Name: "help", Summary: "Show top-level usage"},
+			{Name: "completion", Summary: "Print the completion script for bash or zsh"},
+		},
 	}
 	if err := checkHintsAreSpent(app); err != nil {
 		return completion.App{}, err
@@ -190,58 +202,63 @@ func checkHintsAreSpent(app completion.App) error {
 	return nil
 }
 
-// generated is what the completions directory should contain.
-func generated() (map[string][]byte, error) {
-	app, err := completionApp()
-	if err != nil {
-		return nil, err
-	}
-	bash, err := completion.Bash(app)
-	if err != nil {
-		return nil, err
-	}
-	zsh, err := completion.Zsh(app)
-	if err != nil {
-		return nil, err
-	}
-	return map[string][]byte{"drivel.bash": bash, "_drivel": zsh}, nil
+// renderers maps a shell to the function that writes its script. It is also the
+// list the error message offers, so a shell cannot be supported in one and
+// missing from the other.
+var renderers = map[string]func(completion.App) ([]byte, error){
+	"bash": completion.Bash,
+	"zsh":  completion.Zsh,
 }
 
-// runGenCompletions writes (or checks) the generated files.
-func runGenCompletions(args []string) error {
-	fs := flag.NewFlagSet("gen-completions", flag.ExitOnError)
-	out := fs.String("o", "completions", "directory to write the completion files to")
-	check := fs.Bool("check", false, "do not write; fail if the files on disk differ from what would be written")
-	_ = fs.Parse(args)
+// shells names the supported shells in a stable order, for messages.
+func shells() []string {
+	out := make([]string, 0, len(renderers))
+	for s := range renderers {
+		out = append(out, s)
+	}
+	sort.Strings(out)
+	return out
+}
 
-	files, err := generated()
+// runCompletion prints one shell's completion script on stdout.
+//
+// Stdout and not a file: the caller decides where it goes, which is what lets the
+// same command serve `eval "$(drivel completion bash)"` in an rc file and a
+// redirect into a packaging directory. Writing a file would have to guess at a
+// location, and the right one differs per distro, per shell and per user.
+func runCompletion(args []string) error {
+	fs := flag.NewFlagSet("completion", flag.ExitOnError)
+	fs.Usage = func() {
+		fmt.Fprintf(os.Stderr, "Usage: drivel completion %s\n\n", strings.Join(shells(), "|"))
+		fmt.Fprint(os.Stderr, ""+
+			"Prints a completion script on stdout. To try it in this shell:\n"+
+			"  eval \"$(drivel completion bash)\"\n\n"+
+			"To install it permanently, write it where your shell looks; see drivel(1).\n")
+	}
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() != 1 {
+		return fmt.Errorf("completion takes one shell (%s)", strings.Join(shells(), ", "))
+	}
+	shell := fs.Arg(0)
+	render, ok := renderers[shell]
+	if !ok {
+		return fmt.Errorf("no completion for %q; drivel generates %s", shell, strings.Join(shells(), " and "))
+	}
+
+	// completionApp is what fails when a flag has been added without a hint, so a
+	// missing entry surfaces here rather than in a shell script that quietly omits
+	// the newest flag. It used to fail `make completions-check`; now it fails the
+	// command, and completions_test.go is what keeps it failing in CI.
+	app, err := completionApp()
 	if err != nil {
 		return err
 	}
-	for _, name := range []string{"drivel.bash", "_drivel"} {
-		path := filepath.Join(*out, name)
-		if *check {
-			have, err := os.ReadFile(path) //nolint:gosec // G304: a path this program was told to check
-			if err != nil {
-				return fmt.Errorf("%s: %w (run 'make completions')", path, err)
-			}
-			if string(have) != string(files[name]) {
-				return fmt.Errorf("%s is out of date; run 'make completions' and commit the result", path)
-			}
-			continue
-		}
-		if err := os.WriteFile(path, files[name], 0o644); err != nil { //nolint:gosec // G306: a shell script, world-readable by design
-			return err
-		}
-		fmt.Fprintf(os.Stderr, "wrote %s\n", path)
+	out, err := render(app)
+	if err != nil {
+		return err
 	}
-	return nil
-}
-
-// runExtraCommand is the tagged half of the pair in completions_off.go.
-func runExtraCommand(cmd string, args []string) (handled bool, err error) {
-	if cmd == "gen-completions" {
-		return true, runGenCompletions(args)
-	}
-	return false, nil
+	_, err = os.Stdout.Write(out)
+	return err
 }

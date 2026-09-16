@@ -131,6 +131,19 @@ func TestHelperRefusesAZeroPool(t *testing.T) {
 	}
 }
 
+// The flag path's push-delay refusal, worded for the option an admin typed.
+func TestHelperRefusesAZeroPushDelay(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	for _, opt := range []string{"push-delay=0", "push-delay=-5s"} {
+		h, c := resolveHelper(t, "work", "/m", "-o", "data=/d,"+opt)
+		if _, err := helperSpec(h, c); err == nil {
+			t.Errorf("%s was accepted", opt)
+		} else if !strings.Contains(err.Error(), "push-delay") {
+			t.Errorf("error %q does not name push-delay", err)
+		}
+	}
+}
+
 // Every flag that describes a mount must have an fstab option, or an admin who
 // can write the flag on a command line cannot write the same mount in fstab.
 //

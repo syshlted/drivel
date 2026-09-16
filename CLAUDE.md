@@ -236,6 +236,31 @@ cursor-advance ordering and per-path ordering within a page. Anyone adding a
 pools. The right default is ultimately the *provider's* to suggest (they cap
 up/down differently); nothing crosses the seam for that yet.
 
+**`-push-delay D` (config `push-delay`, fstab `push-delay=D`, default 300ms) is
+*when* a change is pushed, as the two counts above are *how many at once*.** It is
+the engine's per-path coalescing window (`syncengine.Config.Debounce`), and three
+things about it are load-bearing. **The default is short because what it merges is
+already coarse** — `OpWrite` is emitted once per *close*, not once per `write(2)`,
+so a 50 GB copy arrives as one `OpCreate` plus one `OpWrite`, and the window is
+merging those two rather than batching a transfer; anyone reasoning about this as
+if writes streamed will get every trade-off backwards. **A trailing timer re-armed
+by every later change cannot bound how long a path is held**, so there is a
+max-wait deadline measured from the change that made the path pending
+(`maxWaitFactor`, ten times the delay) — without it a path touched inside every
+window is never dispatched while the mount is up, and a long delay makes that easy
+to reach, which is why the bound is not separable from the flag. And **an explicit
+`0` is refused at all three boundaries**, because `New` would substitute the
+default behind the user — M8 rule 6, the same reasoning as the pool sizes.
+
+Two things it does not do, and the docs say so rather than implying otherwise. **A
+file held open and never closed emits no event at any setting**, so it is invisible
+to the push path until it is closed and is otherwise reached only by the M7b sweep
+— that is push-on-close, not a tuning gap. And **a longer window makes §6 conflict
+copies more likely, not less**, since it leaves more time for the remote to diverge
+before the push lands: deferral buys quota and back-pressure headroom, never
+conflict resolution. Do not let a later session "simplify" the echo/baseline
+machinery on the opposite premise.
+
 From M16 `drivel` is also the **mount(8) helper**, when reached through
 `/sbin/mount.fuse.drivel` (argv[0] dispatch) or as `drivel mount-helper` — so a
 mount can live in `/etc/fstab` and come up at boot. **Linux only.** `make install`
@@ -386,6 +411,28 @@ wins, M24 has no install target and is withdrawn rather than reconciled. The lic
 question (a plugin importing the public `provider` package links AGPL code; one
 speaking only protobuf is the §2.9.2 arms-length case) gets answered before a
 third-party binary is hosted, not after.
+
+**M25** logging — levels + structured output, destinations + rotation, and what a
+log line may name. Unscheduled, not started. **A durable record of what synced is
+M14, not this**; a log is read once by a human, sync history is state a tool
+queries. Four things are decided and in DESIGN.md §9/M25. **drivel has no
+verbosity control of its own** — `-debug` is go-fuse's `MountOptions.Debug`, a
+FUSE protocol trace from another program, and it must never come to mean two
+things. **The per-mount `logf` methods are the interface**: ~124 call sites already
+go through `e.logf`/`d.logf`/`n.logf`/`m.logf` rather than `log.Printf`, so levels,
+a handler and a redaction filter land behind them without touching callers — and
+per mount stays, because one stream carrying two accounts' filenames is M8's
+cross-mount coupling arriving as an output format. **`log/slog` is not the
+dependency `docs/dev/dependencies.md` declined** (that row rejects a *third-party*
+logger, and the judgement stands); rewrite the row rather than overrule it.
+And **redaction has a boundary it cannot enforce**: paths and filenames are logged
+verbatim today, a §6 conflict copy's *name* contains the original path, and a
+plugin's stderr is forwarded onto the mount's logger verbatim (`plugin.lineWriter`
+→ `process.logf`) — so either say so where the filter is documented or prefix that
+line and never filter it. Rotation is the one with no default at all: M16 rule 3
+already sends the fstab daemon's stdio to `logfile=` or `/dev/null`, so the mount
+that runs longest writes a file nothing rotates; reopen-on-`SIGHUP` first, because
+it forecloses neither internal rotation nor a syslog/journald destination.
 
 **v2, backends on the roadmap** (DESIGN.md §9 has the reasoning; these three are
 unscheduled, none is started, and each one's shape is *decided* — the entries say
@@ -1174,36 +1221,51 @@ verified for real. Don't promote it to "works under systemd" without a run.
 
 ## Shell completions
 
-`completions/drivel.bash` and `completions/_drivel` are **generated, not written**
-— `make completions`, gated in `make check` by `make completions-check`. Four
-things carry it.
+**The binary prints its own** — `drivel completion bash|zsh`, to stdout. Nothing
+is committed under `completions/` and there is no `make completions`. Four things
+carry it.
 
 1. **The flags are the source.** `mountFlagSet`/`loginFlagSet` exist so the
-   program and the generator walk one `flag.FlagSet`; that is why flag definition
-   is a function rather than a block inside `runMount`. Nothing in the generator
-   lists a flag by name.
-2. **The generator is build-tagged and the reason is layering, not size.**
-   `cmd/drivel/completions.go` is `//go:build completions`; `completions_off.go`
-   is its `!completions` half, holding the `runExtraCommand` stub. That pair is
-   the same shape `mountopts_{linux,darwin,freebsd}.go` uses — no `init()`, no
-   package-global registry to mutate (M8 rule 3), the compiler decides. It is also
-   what keeps `internal/completion` out of every release binary.
-   `runExtraCommand` returns `(handled, err)` and not just `err`: a generator that
-   ran and failed must report why, not fall through to "unknown command".
+   program and the renderer walk one `flag.FlagSet`; that is why flag definition
+   is a function rather than a block inside `runMount`. Nothing in
+   `completions.go` lists a flag by name.
+2. **It stopped being build-tagged, and that was a reversal to make on purpose.**
+   The tag kept `internal/completion` out of release binaries and was justified as
+   layering rather than size. It was overturned because a **portable single
+   binary** has no `make install` behind it to have placed a file in
+   `/usr/share`, so the only completion that can exist for it is the one the
+   binary prints. The old rationale for committing the files — "a distro package
+   has no Go toolchain" — is *better* served, not violated: a package build that
+   can run the binary it just built needs no toolchain either. `completions_off.go`
+   and the `runExtraCommand` seam are gone with it; `completion` is an ordinary
+   subcommand in `main`'s switch.
 3. **`completionHints` is the only hand-written part, and it fails both ways.** A
-   flag with no entry fails the generator; an entry naming a flag that no longer
+   flag with no entry fails `completionApp`; an entry naming a flag that no longer
    exists fails it too. The kind is cross-checked against `IsBoolFlag`, and enum
-   values are the program's own constants (`gdrive.DeleteTrash`, …) so a renamed
+   values are the program's own constants (`gdconf.DeleteTrash`, …) so a renamed
    mode cannot leave the completions offering a word the binary refuses. The
    summary is deliberately *not* the flag's usage string — usage is a paragraph,
    a menu line is a line.
-4. **The generated files are committed** (a distro package has no Go toolchain)
-   and installed by `make install`. `App.Validate` refuses one flag name meaning
-   two different things across subcommands, because bash completes a value from
-   the previous word alone and cannot tell which subcommand it is in.
+4. **What `make completions-check` guarded is now a test**
+   (`cmd/drivel/completions_test.go`), and the move is not cosmetic: that target
+   compared two committed files against the flags, so it could only ever catch
+   "someone forgot to regenerate" — a check on an artefact that no longer exists.
+   The four real mistakes live in `completionApp`, which the test runs.
+   `App.Validate` is the fourth of them: it refuses one flag name meaning two
+   different things across subcommands, because bash completes a value from the
+   previous word alone and cannot tell which subcommand it is in.
 
-The renderers are tested by **running** the output — bash sources the generated
-script and answers a real completion; zsh parses the file. An assertion that
+`make install` generates at install time by running the binary it just built,
+which means **cross-compiling and then installing needs an emulator or a second
+native build**. That is the trade, and it is the same one every other Go CLI makes.
+
+The `eval "$(drivel completion bash)"` form is documented but is deliberately not
+the only advice: it runs drivel at every shell start, and for zsh it works only
+*after* `compinit`, since `_drivel` is an autoloaded function file rather than a
+script. Writing the file is what the man page and `install.md` lead with.
+
+The renderers are tested by **running** the output — bash sources the rendered
+script and answers a real completion; zsh parses it. An assertion that
 cannot fail is worse than none: the opaque-value case only discriminates when the
 half-typed value starts with a dash, since with an empty one the flag branch
 declines too and the test passes either way.
@@ -1334,7 +1396,7 @@ make help                                      # every gate as a target, plus ex
 make check                                     # everything CI runs, in CI's order
 make build                                     # drivel AND every cmd/drivel-provider-*
 make proto                                     # regenerate plugin/internal/pb after editing proto/
-make completions                               # regenerate completions/ after a flag change
+drivel completion bash                         # print the bash completion script
 make hooks                                     # install the git hooks (once per clone)
 make run ARGS='-debug'                         # build, then mount ./mnt over ./data
 

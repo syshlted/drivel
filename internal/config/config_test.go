@@ -430,6 +430,28 @@ hydrate-workers = 13
 	}
 }
 
+// push-delay reaches the spec, and a zero is refused rather than read as unset
+// for the same reason the pool sizes are.
+func TestPushDelayFromConfig(t *testing.T) {
+	c := load(t, "[[mount]]\npath = \"./a\"\npush-delay = \"90s\"\n")
+	specs, err := c.Specs()
+	if err != nil {
+		t.Fatalf("Specs: %v", err)
+	}
+	if specs[0].PushDelay != 90*time.Second {
+		t.Errorf("PushDelay = %v; want 90s", specs[0].PushDelay)
+	}
+
+	for _, val := range []string{"0s", "-1s"} {
+		c := load(t, "[[mount]]\npath = \"./a\"\npush-delay = \""+val+"\"\n")
+		if _, err := c.Specs(); err == nil {
+			t.Errorf("push-delay = %s was accepted", val)
+		} else if !strings.Contains(err.Error(), "push-delay") {
+			t.Errorf("error %q does not name push-delay", err)
+		}
+	}
+}
+
 // Zero is a request, not an omission — `max-deletes = 0` means "no limit" three
 // lines up in the same file, so reading `upload-workers = 0` as "use the default"
 // is the M8 rule 6 failure: a setting that looks applied and is not.

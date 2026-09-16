@@ -200,6 +200,7 @@ type helperOptions struct {
 	materialize   bool
 	maxDeletes    *int
 	sweepInterval *time.Duration
+	pushDelay     *time.Duration
 	// Pool sizes, as pointers for the reason max-deletes is one: an explicit 0 is
 	// refused rather than read as "the default", and merging it with "unset" is
 	// what would make that impossible to tell apart.
@@ -334,6 +335,11 @@ func (h *helperArgs) resolve() (*helperOptions, error) {
 			var d time.Duration
 			if d, err = durationValue(o); err == nil {
 				c.sweepInterval = &d
+			}
+		case "push-delay":
+			var d time.Duration
+			if d, err = durationValue(o); err == nil {
+				c.pushDelay = &d
 			}
 		case "upload-workers":
 			var n int
@@ -598,6 +604,7 @@ func helperOptionSpec(h *helperArgs, c *helperOptions) (app.MountSpec, error) {
 		Materialize:   c.materialize,
 		MaxDeletes:    syncengine.DefaultMaxDeletes,
 		SweepInterval: syncengine.DefaultSweepInterval,
+		PushDelay:     syncengine.DefaultPushDelay,
 
 		UploadWorkers:  syncengine.DefaultWorkers,
 		HydrateWorkers: hydrate.DefaultWorkers,
@@ -607,6 +614,13 @@ func helperOptionSpec(h *helperArgs, c *helperOptions) (app.MountSpec, error) {
 	}
 	if c.sweepInterval != nil {
 		spec.SweepInterval = *c.sweepInterval
+	}
+	if c.pushDelay != nil {
+		if *c.pushDelay <= 0 {
+			return zero, fmt.Errorf("push-delay=%s is not a coalescing window (omit the option for the default of %s)",
+				*c.pushDelay, syncengine.DefaultPushDelay)
+		}
+		spec.PushDelay = *c.pushDelay
 	}
 	// The same refusal the flag path makes, worded for the option that was typed:
 	// zero is not a pool size, and max-deletes=0 means "no limit" two options

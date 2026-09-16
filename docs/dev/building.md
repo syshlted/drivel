@@ -93,21 +93,28 @@ stripping is the lever that matters:
 | `CGO_ENABLED=0` | 28.5 MB |
 | `CGO_ENABLED=0 -trimpath -ldflags="-s -w"` | 19.6 MB |
 
-## Shell completions are generated
+## Shell completions are printed by the binary
 
-`completions/drivel.bash` and `completions/_drivel` are **not written by hand**.
-They are rendered from the same `flag.FlagSet`s the program parses:
+Nothing is committed and nothing is generated at build time. `drivel completion
+bash` and `drivel completion zsh` render the script from the same `flag.FlagSet`s
+the program parses, on demand:
 
 ```sh
-make completions        # rewrite them after adding or renaming a flag
-make completions-check  # what `make check` runs: fails if they have drifted
+go run ./cmd/drivel completion bash
 ```
 
+That is what makes a downloaded single binary able to install its own completion,
+with no repository, no Makefile and no Go toolchain behind it — which is also why
+the renderer is no longer behind a build tag. `make install` runs the binary it
+just built rather than copying a checked-in file, so cross-compiling and then
+installing needs an emulator or a second native build.
+
 The renderers are in `internal/completion`; the flag→completion table is
-`completionHints` in [cmd/drivel/completions.go](../../cmd/drivel/completions.go),
-which is compiled **only under the `completions` build tag** — a released binary
-has no reason to carry a shell-script renderer, and that file is the only thing
-that imports `internal/completion`.
+`completionHints` in [cmd/drivel/completions.go](../../cmd/drivel/completions.go).
+There is no `completions-check` target: what it guarded is now
+`cmd/drivel/completions_test.go`, because the failure it catches — a flag with no
+hint, a hint for a flag that has gone — is in the program rather than in a file
+that could drift from it.
 
 Adding a flag therefore means adding one line to `completionHints` naming what
 its value looks like (a file, a directory, one of a fixed set of words, or

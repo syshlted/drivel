@@ -59,7 +59,8 @@ func newRegistry() (*provider.Registry, error) {
 var mountShapingFlags = []string{
 	"mount", "data", "credentials", "token", "state", "index",
 	"drive-root", "drive-sweep-mode", "drive-delete", "lazy", "xattr", "resync",
-	"materialize", "max-deletes", "sweep-interval", "upload-workers", "hydrate-workers",
+	"materialize", "max-deletes", "sweep-interval", "push-delay",
+	"upload-workers", "hydrate-workers",
 }
 
 // mountCLI is everything `drivel mount` accepts: the mount description in
@@ -98,6 +99,7 @@ func mountFlagSet(c *mountCLI) *flag.FlagSet {
 	fset.BoolVar(&c.materialize, "materialize", false, "during a reconcile in eager mode, download remote files that have no local copy (implied by -lazy, where it costs only a placeholder)")
 	fset.IntVar(&c.maxDeletes, "max-deletes", syncengine.DefaultMaxDeletes, "cap on deletions one reconcile may infer, in either direction; 0 for no limit")
 	fset.DurationVar(&c.sweepInterval, "sweep-interval", syncengine.DefaultSweepInterval, "re-enumerate and reconcile the remote tree this often, timed from the last completed sweep; 0 disables it")
+	fset.DurationVar(&c.pushDelay, "push-delay", syncengine.DefaultPushDelay, "how long a file must go unchanged before it is uploaded; a longer window coalesces repeated saves into one request and drains the outbound queue on a calmer cycle, at the cost of how soon a change reaches the remote. It cannot hold a file indefinitely, and it has no effect on one that is never closed")
 	fset.IntVar(&c.uploadWorkers, "upload-workers", syncengine.DefaultWorkers, "how many files this mount uploads at once; same-path writes stay ordered whatever this is. Each in-flight upload can hold a provider-sized chunk buffer (16 MiB on Drive), and past the point the provider throttles, more workers cost quota rather than throughput")
 	fset.IntVar(&c.hydrateWorkers, "hydrate-workers", hydrate.DefaultWorkers, "how many placeholders this mount fetches at once under -lazy; bounds a recursive read over a lazy tree, which would otherwise fault every file simultaneously")
 	fset.BoolVar(&c.debug, "debug", false, "enable FUSE debug logging")
@@ -173,6 +175,7 @@ type specFlags struct {
 	materialize   bool
 	maxDeletes    int
 	sweepInterval time.Duration
+	pushDelay     time.Duration
 	debug         bool
 
 	uploadWorkers  int
@@ -230,6 +233,13 @@ func mountSpecs(fset *flag.FlagSet, given map[string]bool, f specFlags) ([]app.M
 	if f.hydrateWorkers < 1 {
 		return nil, fmt.Errorf("-hydrate-workers %d is not a pool size (1 or more; omit the flag for the default of %d)", f.hydrateWorkers, hydrate.DefaultWorkers)
 	}
+	// Zero is refused for the reason the pool sizes are: it is not a window, the
+	// engine would silently substitute the default, and a user who has just read
+	// that -max-deletes 0 means "no limit" has every reason to expect 0 to mean
+	// something here as well.
+	if f.pushDelay <= 0 {
+		return nil, fmt.Errorf("-push-delay %s is not a coalescing window (omit the flag for the default of %s)", f.pushDelay, syncengine.DefaultPushDelay)
+	}
 	if f.lazy && f.credentials == "" {
 		// A placeholder is a promise that the bytes can be fetched later; without a
 		// provider there is nothing to redeem it against. Checked here as well as in
@@ -248,6 +258,7 @@ func mountSpecs(fset *flag.FlagSet, given map[string]bool, f specFlags) ([]app.M
 		Materialize:   f.materialize,
 		MaxDeletes:    f.maxDeletes,
 		SweepInterval: f.sweepInterval,
+		PushDelay:     f.pushDelay,
 
 		UploadWorkers:  f.uploadWorkers,
 		HydrateWorkers: f.hydrateWorkers,

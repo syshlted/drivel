@@ -106,6 +106,7 @@ would leave a mount nothing can address.
 | `resync`, `materialize` | same | |
 | `max-deletes=N` | `-max-deletes` | |
 | `sweep-interval=D` | `-sweep-interval` | A Go duration: `24h`, `90m`. |
+| `push-delay=D` | `-push-delay` | A Go duration. Defaults to `300ms`. `0` is refused, not read as "the default". |
 | `upload-workers=N` | `-upload-workers` | Defaults to 4. `0` is refused, not read as "the default". |
 | `hydrate-workers=N` | `-hydrate-workers` | Defaults to 8. Only matters with `lazy`. |
 

@@ -949,6 +949,27 @@ are both lossy and racy.
 1. FUSE op succeeds against underlying dir → enqueue `LocalChange{op, path}`.
 2. Uploader coalesces rapid events per path (debounce writes; a burst of `Write`s +
    `Release` becomes one upload) and serializes per-path to avoid reordering.
+   The window is `-push-delay` (config `push-delay`, default 300ms). It is short
+   by default because what it merges is already coarse: `OpWrite` is emitted once
+   per *close*, not once per `write(2)` (§2.1), so a 50 GB copy arrives as one
+   `OpCreate` and one `OpWrite` rather than as millions of events. Raising it
+   buys quota — a file rewritten repeatedly uploads once per window — and drains
+   the outbound queue on a longer cycle, which is what keeps a bulk import of
+   small files from filling the event channel and back-pressuring the FUSE
+   handler (`vfs.node.emit` blocks rather than drops, by design).
+   **The trailing timer is re-armed by every later change, so the window alone
+   cannot bound how long a path is held.** A max-wait deadline, measured from the
+   change that made the path pending rather than from the last one, is what does:
+   `syncengine.maxWaitFactor` puts it at ten times the delay. Without it a path
+   touched again inside every window is never dispatched while the mount is up,
+   and the longer the delay is set the easier that is to reach — which is why the
+   bound landed with the flag rather than after it.
+   Two things it does *not* fix, and neither should be implied of it. A file held
+   open and never closed emits no event at any setting, so it is invisible to the
+   push path entirely until it is closed and is otherwise picked up only by the
+   M7b sweep. And a longer window makes §6 conflict copies *more* likely, not
+   less: it leaves more time for the remote to diverge before the push lands.
+   Deferral is a quota and back-pressure trade, never a conflict-resolution one.
 3. Resolve parent Drive folder (create dirs on demand, memoized), write `pending`
    record, call `Upload`/`Update`/`Move`/`Delete`, then record new version in state.
 4. Retries with backoff on transient Drive errors; failures re-queued and surfaced in
@@ -3475,6 +3496,96 @@ this whole group walks through, so it is a precondition rather than a note.
     the answer is no: that manifest describes the plugin **you have installed**, has
     to work with no network, and is derived from the executable itself, so it
     belongs to plugin loading and not to distribution.
+
+27. **M25 — Logging.** Unscheduled, not started. Three faces — levels and
+    structured output, destinations and rotation, and what a log line is allowed to
+    name — grouped because they are one decision about a single stream. They are
+    split from the fourth thing the word "logging" is used for: a durable record of
+    what synced and when belongs to **M14**, not here. A log line is something a
+    human reads once; sync history is state a tool queries, and the two have
+    different lifetimes, different schemas and different authorities. Building the
+    second one here would break M14's "a view, never an authority" rule by the back
+    door, because a log somebody greps to answer "did this sync?" is a status API
+    with no schema and no version.
+
+    **What exists is less than the `-debug` flag suggests, and saying so is where
+    the milestone starts.** `drivel` has no verbosity control of its own at all.
+    `-debug` sets go-fuse's `MountOptions.Debug` (`mount.Options.Debug` →
+    `vfs/backend.go`) — a FUSE *protocol* trace from another program, off or
+    firehose, that says nothing about sync. Everything drivel says in its own words
+    goes to a `*log.Logger` at one implicit level, across ~124 call sites. M16's
+    `logfile=` is the only control over *where*, and only on the fstab path.
+
+    **The `logf` methods are the leverage, and the reason this is smaller than it
+    looks.** Every one of those sites already goes through a per-mount method —
+    `e.logf`, `d.logf`, `n.logf`, `m.logf`, the loader's and the plugin proxy's —
+    rather than `log.Printf`, so a level argument, a structured back end and a
+    redaction filter can all land behind them without touching the callers. The
+    only bare `log.Printf` outside those methods' own nil-logger fallbacks is in
+    `cmd/drivel` (the pprof server, the fstab helper), which is process-level by
+    construction and stays that way. `docs/dev/conventions.md`'s "never
+    `log.Printf`" stops being a tidiness rule here and becomes the interface.
+    Whatever is decided below, **per mount stays**, and a single mount's output
+    stays byte for byte what it prints today (§2.8): a process-wide logger would
+    put two accounts' filenames in one undifferentiated stream, which is the
+    cross-mount coupling `app.Validate` exists to prevent, arriving as an output
+    format.
+
+    **`log/slog` is not the dependency `docs/dev/dependencies.md` declined.** That
+    table's "a logging library" row rejects a *third-party* one as the first
+    dependency whose value is a matter of taste, and that judgement stands. slog is
+    the standard library, its text handler can be made to print what drivel prints
+    now, and its `Handler` interface is the natural seam for both the redaction
+    filter and the fan-out to a destination — so the row needs rewriting rather
+    than overruling, since what it protects against is a format nobody can change
+    and a dependency that owns the process's output, and slog is neither. The cost
+    is real and should be recorded with the decision: an attribute-per-line style
+    spreads through call sites over time, and `logf("%s: %s", …)` reads better than
+    the alternative at every site no machine will ever parse.
+
+    **Redaction is the half whose default is wrong today.** drivel's log names
+    synced paths and filenames verbatim — the same data `-pprof` binds to loopback
+    for and `/debug/pprof/cmdline` goes unregistered over — except that unlike a
+    profiler the log is written to a file someone else may read, shipped to a
+    collector, or pasted into a bug report. The question is therefore not whether
+    to offer a quiet mode but what the *default* line may contain, and the likely
+    answer is a level boundary (paths at debug, counts and outcomes at info) rather
+    than a switch nobody sets. Two things are load-bearing and easy to miss. A §6
+    conflict copy's *name* contains the original path, so the line announcing one
+    leaks in quiet mode too. And a plugin's stderr is forwarded verbatim onto the
+    mount's logger (`plugin.lineWriter` → `process.logf`), so a backend this repo
+    did not write can put anything it likes into a stream drivel would be claiming
+    to have filtered — that forwarding is the boundary where redaction cannot be
+    enforced, and the honest options are to say so wherever the filter is
+    documented or to prefix the line and never filter it. The second is the same
+    rule that governs every other plugin claim: drivel cannot answer for software
+    it did not write.
+
+    **Destinations and rotation are where an unattended mount fails.** M16 rule 3
+    gave up journal integration deliberately — the daemon's stdio goes to
+    `logfile=` or `/dev/null`, because a descriptor inherited by `mount -a` blocks
+    until unmount — so a file that nothing rotates is the shipped answer for
+    exactly the mount that runs longest and is watched least. Two routes, not
+    equivalent. **External rotation** (logrotate, newsyslog) costs a reopen on
+    `SIGHUP` and one documented example per platform, and leaves retention where an
+    operator's other retention policy already lives; it needs a signal handler in a
+    process whose existing signal handling means "unmount", which is the whole risk.
+    **Internal rotation** is a dependency (`lumberjack` is the conventional one) and
+    needs no configuration anywhere, which is the entire argument for it on a
+    desktop mount. A syslog or journald destination sidesteps both, at the price of
+    `log/syslog` for the first and a cgo-free journal writer for the second.
+    Recommended order: reopen-on-`SIGHUP` first — small, unblocks the packaging
+    story, forecloses neither of the others.
+
+    **Unsettled, in the order that matters.** Whether the handler is slog, because
+    it decides what a call site looks like and every later choice hangs off that
+    `Handler` seam. Then the default level and what a line at that level may name,
+    because it is user-visible and becomes a compatibility surface the moment
+    anyone greps it. Then rotation. Deliberately out of scope: a log the program
+    reads back (M14); per-package level filtering, since the unit a user thinks in
+    is the mount and they already have that; and anything that makes `-debug` mean
+    two things — if go-fuse's trace ever moves behind a drivel level, the flag keeps
+    naming the FUSE trace and the level is a separate name.
 
 
 ### M0 — Test & CI (cross-cutting, always open)

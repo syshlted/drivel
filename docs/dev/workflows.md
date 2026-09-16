@@ -29,7 +29,7 @@ sequenceDiagram
     vfs->>back: fstat — grow the extent set<br/>to the file's real size
     vfs->>eng: fsevent.Event{OpWrite, path, Dirty}
 
-    eng->>eng: coalesce per path,<br/>reset the debounce timer
+    eng->>eng: coalesce per path,<br/>re-arm the -push-delay timer<br/>(capped by the max-wait deadline)
     Note over eng: a structural op (rename,<br/>unlink) flushes that path first,<br/>preserving per-path order
     eng->>w: dispatch after the timer fires
     w->>w: three gates (below)
@@ -38,7 +38,7 @@ sequenceDiagram
     w->>state: record echo (§4)
 ```
 
-Two details that look incidental and are not:
+Three details that look incidental and are not:
 
 - **`Release` fstats the backing file before the wrapped handle closes.** A handle
   only sees its own writes, so its idea of the file's length stops at the last
@@ -46,6 +46,15 @@ Two details that look incidental and are not:
   extent set and range writes silently never fire.
 - **Workers are chosen by path hash**, so all operations on one path are ordered
   with respect to each other, while unrelated paths proceed in parallel.
+- **The `OpWrite` arrives on `close`, not on each `write(2)`** — note where the
+  arrow leaves the diagram. That is why `-push-delay` defaults to a value as short
+  as 300ms: it is merging an `OpCreate` with one `OpWrite`, not batching a
+  transfer, and a 50 GB copy passes through it as two events. It also means a file
+  held open and never closed produces *no* event at all, at any setting, and is
+  reached only by the sweep. Because each later event re-arms the timer, the
+  window alone cannot bound how long a path waits; the max-wait deadline, counted
+  from the change that made the path pending, is what stops a never-quiet path
+  from being held until shutdown.
 
 ## 2. The three gates before a content push
 

@@ -114,6 +114,15 @@ contacting Google. Check the log for `[sync]` lines that never turn into uploads
 download the whole Drive unless you ask: add `-materialize`, or use
 [`-lazy`](lazy-mode.md), where the whole tree appears as placeholders for free.
 
+**Copying many files in starts fast, then the filesystem itself slows down.**
+Drivel keeps a queue of pending uploads. A bulk copy of many small files can fill
+it faster than they upload, and once it is full the filesystem waits rather than
+dropping anything — so the copy proceeds at the speed of your uplink. Raising
+[`-push-delay`](configuration.md#when-a-change-is-pushed) drains that queue on a
+calmer cycle and makes it far less likely; `-upload-workers` does not help, since
+the limit is the link rather than the pool. A single large file is unaffected:
+Drivel notices it once, when it is closed.
+
 **A file came back after I deleted it.** Most likely [same-name
 siblings](data-safety.md#same-name-siblings): the path names more than one Drive
 object, deleting removed the visible one, and an older one is now visible. Resolve
@@ -171,6 +180,14 @@ account: `-drive-sweep-mode scoped`. See
 default, and a trashed file counts against your quota until the trash is emptied.
 Empty it from the web UI, or run the mount with `-drive-delete permanent` if
 reclaiming space as you delete matters more to you than being able to undo one.
+
+**The same file is uploaded again and again.** Drivel uploads a file once it has
+gone [`-push-delay`](configuration.md#when-a-change-is-pushed) without changing,
+300ms by default, so a file written repeatedly — an editor autosaving, a log, a
+build artefact — is uploaded once per save. Raising the delay coalesces those into
+one upload per window. Note that a file which is *appended to* is re-uploaded
+whole each time on backends that cannot patch byte ranges, Drive among them, so
+the saving here can be large.
 
 **Several mounts of one account each poll the whole change feed.** Drive's change
 feed has no folder filter, so this is inherent, not a misconfiguration. It costs
