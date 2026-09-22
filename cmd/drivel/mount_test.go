@@ -7,6 +7,7 @@ package main
 
 import (
 	"flag"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -22,7 +23,12 @@ import (
 // quietFlagSet stands in for the real one; mountSpecs only ever calls Usage.
 func quietFlagSet() *flag.FlagSet {
 	fset := flag.NewFlagSet("mount", flag.ContinueOnError)
-	fset.SetOutput(os.NewFile(0, os.DevNull))
+	// io.Discard, not os.NewFile(0, ...): that wrapped *stdin* (fd 0, not
+	// /dev/null) in a new *os.File whose finalizer closes the fd. Each call
+	// made another owner of fd 0, so after the first finalizer freed it the next
+	// socket in the test binary took fd 0 and a later finalizer closed that
+	// instead — a pprof listener failing accept(2) with EBADF, at random.
+	fset.SetOutput(io.Discard)
 	fset.Usage = func() {}
 	return fset
 }
