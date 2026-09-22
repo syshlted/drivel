@@ -1,3 +1,8 @@
+// This Source Code Form is subject to the terms of the Mozilla Public
+// License, v. 2.0. If a copy of the MPL was not distributed with this
+// file, You can obtain one at https://mozilla.org/MPL/2.0/.
+// SPDX-License-Identifier: MPL-2.0
+
 // Command drivel-provider-gdrive is drivel's Google Drive backend, running as an
 // out-of-process plugin (M9).
 //
@@ -10,8 +15,8 @@
 // The kind it provides — `gdrive` — is this executable's filename, not anything
 // it says about itself. See plugin.BinaryPrefix.
 //
-// Copyright (C) SystemHalted and Jeremy Melanson. Licensed under the GNU Affero
-// General Public License version 3.
+// Copyright (C) SystemHalted and Jeremy Melanson. Licensed under the Mozilla
+// Public License, version 2.0.
 package main
 
 import (

@@ -1,3 +1,8 @@
+// This Source Code Form is subject to the terms of the Mozilla Public
+// License, v. 2.0. If a copy of the MPL was not distributed with this
+// file, You can obtain one at https://mozilla.org/MPL/2.0/.
+// SPDX-License-Identifier: MPL-2.0
+
 // Package gauth handles Google OAuth for Drivel: reading/writing the client
 // secret (credentials.json), the interactive login flow (loopback redirect with a
 // manual paste fallback, à la rclone), and token persistence. It is transport-

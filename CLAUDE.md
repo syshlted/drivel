@@ -116,10 +116,15 @@ Two published collections, split by audience, plus repo housekeeping:
   load-bearing rules), building, testing, new-provider, glossary, and the
   multiclient test plan. These *do* cite `DESIGN.md §N`, for reasoning.
 - `docs/project/` — publishing to pkg.go.dev, marketing copy, the mascot's lore
-  and drawing brief.
+  and drawing brief, and `licensing.md` (why MPL-2.0; the decision record).
 - Root: `README.md` is a slim landing page, `CHANGELOG.md` is the **externally
   facing** change record (abbreviated, in user terms — not a milestone log),
-  `CONTRIBUTING.md`, `SECURITY.md`.
+  `CONTRIBUTING.md`, `SECURITY.md`, and `MANIFESTO.md` — the nine commitments
+  that decide arguments, written for someone deciding whether to trust Drivel
+  with their files. It is **public-facing and normative**: it is quoted back at
+  us, so a change to it is a change of position, not an edit. Its claims are
+  bound by the same rule as the rest of the copy — no promise about traffic or
+  telemetry, and nothing answering for a backend (see `docs/project/marketing.md`).
 
 **`DESIGN.md` and this file are internal working documents** and are deliberately
 not part of either collection. Don't link them from `docs/user/`, and don't slim
@@ -407,10 +412,11 @@ optional** (go-plugin's `SecureConfig`), reversing M23's "moot" note, and the tr
 anchor must *not* be the registry itself — that is the one part of Terraform's design
 not to copy. And **it is a consumer of M23's external-plugin flag**: an installed
 plugin lives in the very search path M23 proposes to retire, so if embedded-only ever
-wins, M24 has no install target and is withdrawn rather than reconciled. The licence
-question (a plugin importing the public `provider` package links AGPL code; one
-speaking only protobuf is the §2.9.2 arms-length case) gets answered before a
-third-party binary is hosted, not after.
+wins, M24 has no install target and is withdrawn rather than reconciled. **The
+licence question is answered and was dissolved rather than resolved**: under MPL-2.0
+a plugin may carry any licence whether it imports `provider` or speaks only protobuf,
+because the copyleft reaches drivel's own files and no further. The registry records a
+declared licence per plugin as metadata, not as a gate.
 
 **M25** logging — levels + structured output, destinations + rotation, and what a
 log line may name. Unscheduled, not started. **A durable record of what synced is
@@ -1376,12 +1382,13 @@ linking libfuse, which is FUSE-T's integration point. If that is ever fixed, the
 selection must be **runtime detection, not build tags** — which helper exists is a
 property of the running machine.
 
-**AGPLv3 is not in conflict with macFUSE.** go-fuse contains no cgo and does not
-link libfuse; it `exec`s the mount helper and talks over an fd, which is arms-length
-communication between separate programs, not a combined work. The only rule this
-imposes is a distribution one: **never bundle macFUSE, never ship an installer that
-fetches it.** macFUSE 4.x's own non-free terms are a burden on the user, not a
-licence conflict — don't restate them as one. §2.9.2 has the argument.
+**Licensing is not in conflict with macFUSE, and under MPL-2.0 barely arises.** The
+copyleft is per file and never reaches a separate program, so there is no combined-work
+question; go-fuse also contains no cgo and does not link libfuse, which is why the same
+answer held under AGPL. The only rule this imposes is a distribution one: **never
+bundle macFUSE, never ship an installer that fetches it.** macFUSE 4.x's own non-free
+terms are a burden on the user, not a licence conflict — don't restate them as one.
+§2.9.2 has the argument and flags it as belt-and-braces now.
 
 **Windows is a decided non-goal, not a gap** (§2.9.4): WSL2 covers the audience,
 Drive for Desktop covers the rest, WinFsp/cgofuse forfeits the pure-Go build, and
@@ -1445,10 +1452,18 @@ events. Ctrl-C unmounts.
   the buffered event channel.
 - Secrets (`credentials.json`, `token.json`, `*.local.json`) are gitignored —
   never commit them.
-- **AGPLv3, copyright SystemHalted and Jeremy Melanson.** `LICENSE` is the
-  verbatim FSF text — never edit it, and never add a second license file at the
-  root (two of them confuse the `licensecheck` detector pkg.go.dev uses; see
-  `docs/project/publishing.md`). The copyright notice lives in four places that must stay
-  in sync: README §License, `docs/user/drivel.1`, the `cmd/drivel` package doc comment,
-  and the `usage()` text `drivel help` prints. The grant is version 3, *not*
-  "or later" — promoting it is a licensing decision, not an editorial one.
+- **MPL-2.0, copyright SystemHalted and Jeremy Melanson** (AGPLv3 until 2026-09-21;
+  `docs/project/licensing.md` records why it changed and what the alternatives cost).
+  `LICENSE` is Mozilla's verbatim text — never edit it, never append to it, and never
+  add a second license file at the root (both break the `licensecheck` detector
+  pkg.go.dev uses; see `docs/project/publishing.md`). **The copyleft is per file**, so
+  a closed-source backend against the `provider` seam is permanently fine and anything
+  that would oblige a *caller* to open its source is outside what this licence asks —
+  that boundary is the reason for the choice, not a side effect of it. **Every `.go`
+  file carries the Exhibit A header**; without it a file copied out of this tree says
+  nothing about what it is, which is exactly where file-level copyleft leaks. The
+  copyright notice lives in four places that must stay in sync: README §License,
+  `docs/user/drivel.1`, the `cmd/drivel` package doc comment, and the `usage()` text
+  `drivel help` prints. What the licence cannot require, `README` §License *asks* —
+  publish your backends, report your platforms; keep that a request and never let it
+  drift into sounding like a term.

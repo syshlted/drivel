@@ -79,15 +79,15 @@ one. Drive is case-sensitive, so `Foo.txt` and `foo.txt` are two distinct remote
 files that collide into one local path. Nothing currently handles this; a live
 macOS run is what will establish how it behaves.
 
-### On AGPLv3 and macFUSE
+### On licensing and macFUSE
 
 There is no licence conflict, and using Drivel with macFUSE does not affect
-Drivel's licence or yours. Drivel does not link macFUSE: its FUSE library is pure
-Go and speaks the protocol directly, launching macFUSE's mount helper as a
-separate program and talking to it over a file descriptor. Separate programs
-communicating at arm's length are not a combined work, so no copyleft obligation
-crosses in either direction, and nothing in macFUSE's licence restricts what you
-may do with Drivel.
+Drivel's licence or yours. Drivel's copyleft is per file and reaches only
+Drivel's own source files, so nothing propagates to a separate program in any
+case — and Drivel does not link macFUSE regardless: its FUSE library is pure Go
+and speaks the protocol directly, launching macFUSE's mount helper as a separate
+program and talking to it over a file descriptor. Nothing in macFUSE's licence
+restricts what you may do with Drivel.
 
 (Not legal advice.)
 

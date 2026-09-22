@@ -678,23 +678,24 @@ a user discovers.
    dev: option not supported`. Asking for a flag this platform does not have would
    have cost every FreeBSD mount, to tighten nothing.
 
-#### 2.9.2 macOS: AGPLv3 and macFUSE
+#### 2.9.2 macOS: licensing and macFUSE
 
-There is **no license incompatibility**, and the reason is structural rather than a
-judgement call. go-fuse contains no cgo and does not link libfuse — it implements the
-FUSE kernel protocol in pure Go. Its entire interaction with macFUSE is to `exec` the
-`mount_macfuse` helper and then read and write a file descriptor received over a unix
-socketpair (`fuse/mount_darwin.go`). Two programs communicating at arms length over a
-pipe are separate works under long-standing GPL doctrine, not a combined one, so no
-copyleft obligation propagates in either direction. AGPLv3's §13 network clause is
-about *our* users interacting with *our* program remotely and is not implicated at
-all; §1's System Library carve-out would cover an OS-level component regardless,
-though nothing here needs to rely on it.
+Under MPL-2.0 this question is close to vacuous. It is recorded anyway so a later
+session does not re-derive the AGPL-era argument and mistake it for a live concern.
+MPL's copyleft attaches to **files** (§1.10, §3.2): the obligation is to publish
+modified Drivel source files, and it does not reach a separate program under any
+theory, so there is no combined-work analysis to perform in either direction.
 
-The obligation that does exist is a distribution rule, and it is easy to honour:
-**never bundle macFUSE, never ship an installer that fetches it, never publish a
-combined image.** Distributing our AGPL binaries is unaffected by what the user
-separately chooses to install, exactly as GPL software running on a proprietary OS is.
+The arms-length reasoning this section used to carry is still true and is why the
+same question was answerable under AGPL: go-fuse contains no cgo and does not link
+libfuse — it implements the FUSE kernel protocol in pure Go, and its entire
+interaction with macFUSE is to `exec` the `mount_macfuse` helper and then read and
+write a file descriptor received over a unix socketpair (`fuse/mount_darwin.go`).
+Two programs communicating at arms length are separate works, not a combined one.
+That is now belt and braces rather than the load-bearing argument.
+
+One rule survives, and it is about macFUSE's terms rather than ours: **never bundle
+macFUSE, never ship an installer that fetches it, never publish a combined image.**
 
 What is *not* a license conflict but is a real adoption problem: macFUSE 4.x is no
 longer open source (osxfuse 3.x was BSD-2-clause), and its own terms restrict
@@ -3477,16 +3478,17 @@ this whole group walks through, so it is a precondition rather than a note.
     host whose plugin set can be varied after it is built is the same property a
     registry needs.
 
-    **One licence question has to be answered before a third-party binary is
-    hosted, not after.** A plugin that imports `github.com/zishmusic/drivel/provider`
-    links AGPLv3 Go code into its own binary. A plugin that speaks the protobuf
-    protocol directly links none of drivel's code, and its relationship to the host
-    is the same arms-length one §2.9.2 argues for go-fuse and macFUSE — separate
-    programs communicating over a socket. Those two cases plausibly have different
-    answers; `provider` is public *specifically* to enable the first; and a registry
-    turns the question from academic into operational the moment it hosts something
-    somebody else wrote. Record a declared licence per plugin, and get the answer in
-    writing before the first upload rather than after a dispute.
+    **The licence question this entry carried is answered, and the answer came from
+    relicensing rather than from resolving it.** Under AGPLv3 a plugin importing
+    `github.com/zishmusic/drivel/provider` plausibly had to be AGPL itself, while one
+    speaking only protobuf was the §2.9.2 arms-length case — two routes to the same
+    seam with different answers, which is intolerable for a registry that hosts what
+    other people wrote. MPL-2.0 dissolves it: the copyleft reaches Drivel's own files
+    and no further, so importing `provider` obliges an author to publish changes *to
+    Drivel's files* and says nothing about their own. Either kind of plugin may carry
+    any licence. The registry should still record a declared licence per plugin
+    because users need to know what they are installing — but it is metadata now, not
+    a gate, and no answer has to be got in writing before the first upload.
 
     **Unsettled, in the order that matters.** The M23 dependency, because it decides
     whether there is anything to install at all. Then the naming decision above,

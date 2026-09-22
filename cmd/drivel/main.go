@@ -1,3 +1,8 @@
+// This Source Code Form is subject to the terms of the Mozilla Public
+// License, v. 2.0. If a copy of the MPL was not distributed with this
+// file, You can obtain one at https://mozilla.org/MPL/2.0/.
+// SPDX-License-Identifier: MPL-2.0
+
 // Command drivel mounts a loopback FUSE filesystem that proxies operations to an
 // underlying directory and syncs that directory with Google Drive.
 //
@@ -12,8 +17,8 @@
 // See DESIGN.md for the architecture.
 //
 // Copyright (C) 2026 SystemHalted and Jeremy Melanson. Drivel is free software
-// under the GNU Affero General Public License, version 3; see the LICENSE file
-// at the repository root.
+// under the Mozilla Public License, version 2.0; see the LICENSE file at the
+// repository root.
 package main
 
 import (
@@ -86,7 +91,7 @@ func fail(err error) {
 func usage(w *os.File) {
 	fmt.Fprint(w, `Drivel - a Drive-backed FUSE interceptor filesystem
 Copyright (C) 2026 SystemHalted and Jeremy Melanson
-License AGPLv3: GNU Affero GPL v3 <https://www.gnu.org/licenses/agpl-3.0.html>
+License MPL-2.0: Mozilla Public License 2.0 <https://mozilla.org/MPL/2.0/>
 This is free software with NO WARRANTY, to the extent permitted by law.
 
 Usage:

@@ -1,3 +1,8 @@
+// This Source Code Form is subject to the terms of the Mozilla Public
+// License, v. 2.0. If a copy of the MPL was not distributed with this
+// file, You can obtain one at https://mozilla.org/MPL/2.0/.
+// SPDX-License-Identifier: MPL-2.0
+
 // Package mount is the seam between the sync core and a concrete mount frontend.
 // A Backend mounts an interceptor filesystem that proxies to a backing store and
 // emits change events; go-fuse is the first (and currently only) implementation.

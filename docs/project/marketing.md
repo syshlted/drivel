@@ -56,8 +56,8 @@ convenience of a cloud drive without the write-through latency.
 **Drivel is a client you run yourself — there is no Drivel service.** It ships no
 credentials of its own: you supply the ones for whatever backend you point it at,
 so Drivel reaches your storage under an identity that is yours to inspect and
-revoke. It's free software under the GNU AGPLv3, so the code you run is the code
-you can read.
+revoke. It's free software under the MPL-2.0, so the code you run is the code you
+can read.
 
 ## Technical-audience paragraph
 
@@ -96,7 +96,7 @@ the only possible one.
   data loss.
 - **Clean shutdown** — Ctrl-C unmounts and drains in-flight uploads before
   exiting.
-- **Free and open** under the GNU AGPLv3.
+- **Free and open** under the Mozilla Public License 2.0.
 
 ## One-liner for a repo description
 

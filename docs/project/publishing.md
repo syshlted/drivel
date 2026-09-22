@@ -34,10 +34,12 @@ this repo.
    is what you want for a "latest" badge.
 
 4. **An OSI-recognized `LICENSE` file at the repo root.**
-   Present: **AGPL-3.0**. pkg.go.dev only renders documentation for modules whose
+   Present: **MPL-2.0**. pkg.go.dev only renders documentation for modules whose
    license it can detect and recognize (it uses the same detector as
-   `licensecheck`). AGPL-3.0 is recognized, so docs will render; the page shows
-   the detected license name.
+   `licensecheck`). MPL-2.0 is recognized, so docs will render; the page shows
+   the detected license name. `LICENSE` is Mozilla's text verbatim — an appended
+   note or a reworded preamble is what breaks detection, which is the whole
+   reason the project's own licence request lives in the README instead.
 
 ## Trigger indexing
 

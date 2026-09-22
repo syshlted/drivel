@@ -299,12 +299,30 @@ fmt: $(GOLANGCI_LINT)
 fmt-check: $(GOLANGCI_LINT)
 	$(GOLANGCI_LINT) fmt --diff
 
+#> make license-check              # every source file carries its MPL header
+## license-check: fail if a source file is missing its MPL Exhibit A header
+#
+# MPL's copyleft is per file, so a file that leaves this tree without the notice
+# arrives somewhere else saying nothing about what it is. That is the one place
+# file-level copyleft actually leaks, and this is the only thing that closes it.
+# Generated code counts: the header lives in the .proto and buf propagates it.
+.PHONY: license-check
+license-check:
+	@missing=$$(git ls-files '*.go' '*.proto' | while read -r f; do \
+		head -8 "$$f" | grep -q 'SPDX-License-Identifier: MPL-2.0' || echo "$$f"; \
+	done); \
+	if [ -n "$$missing" ]; then \
+		echo "missing the MPL Exhibit A header (docs/dev/conventions.md, 'Licence'):"; \
+		echo "$$missing" | sed 's/^/  /'; \
+		exit 1; \
+	fi
+
 ## lint: run the golangci-lint suite
 .PHONY: lint
 lint: $(GOLANGCI_LINT)
 	$(GOLANGCI_LINT) run
 
-#> make lint-new MAIN_BRANCH=main   # lint only what this branch adds
+#> make lint-new MAIN_BRANCH=master # lint only what this branch adds
 ## lint-new: lint only what this branch adds (the retrofit ramp)
 .PHONY: lint-new
 lint-new: $(GOLANGCI_LINT)
@@ -336,11 +354,11 @@ tidy-check:
 #> make check                       # everything CI runs, in CI's order
 ## check: everything CI runs, in CI's order
 .PHONY: check
-check: tidy-check fmt-check proto-check lint test-full vuln
+check: tidy-check fmt-check proto-check license-check lint test-full vuln
 
 ## precommit: the fast gate the pre-commit hook runs
 .PHONY: precommit
-precommit: fmt-check lint build
+precommit: fmt-check license-check lint build
 
 # --------------------------------------------------------------------- tools
 

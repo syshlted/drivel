@@ -3,12 +3,33 @@
 What has changed in Drivel, in plain terms. The long-form reasoning behind each
 decision lives in the repo's design notes; this file is the summary.
 
-There are **no tagged releases yet**. Everything below is on the main branch.
+There are **no tagged releases yet**. Everything below is on the master branch.
 Install with `go install github.com/zishmusic/drivel/cmd/drivel@latest`
 **plus at least one backend** (`…/cmd/drivel-provider-gdrive@latest`), or build
 from source with `make build`.
 
 ## Unreleased
+
+### Relicensed to the Mozilla Public License 2.0 — 2026-09-21
+
+Drivel was AGPLv3 and is now **MPL-2.0**. Nothing about the software changed; what
+changed is what you are permitted to build on it.
+
+MPL is copyleft per *file*. If you modify one of Drivel's source files and ship it,
+that file's source stays open — which is the part worth protecting, since it is the
+sync engine where a subtle mistake loses somebody's data. Everything you build
+*around* Drivel is yours: commercial products, proprietary integrations, and
+closed-source backends written against the provider interface are all permitted and
+always will be. Under AGPLv3 none of that was clear, and a backend importing the
+public `provider` package may have had to be AGPL itself — which discouraged exactly
+the third-party backends the plugin architecture exists to make possible.
+
+There is no CLA; MPL §5 makes contributions inbound-match-outbound. If you were using
+Drivel under AGPLv3 you may continue to, or move to MPL-2.0; MPL §3.3 keeps it
+compatible with the GPL family either way.
+
+The reasoning is recorded in `docs/project/licensing.md`, and `MANIFESTO.md` states
+what the project is trying to be.
 
 ### Control how soon a change is uploaded — 2026-09-15
 

@@ -20,7 +20,8 @@ make hooks            # once per clone — installs the git hooks
 make check            # everything CI runs, in CI's order
 ```
 
-`make check` is `tidy-check`, `fmt-check`, `lint`, `test-full` and `vuln`. The
+`make check` is `tidy-check`, `fmt-check`, `proto-check`, `license-check`,
+`lint`, `test-full` and `vuln`. The
 hooks split the same gates by cost: fast ones at commit time, the whole-tree lint
 and the race suite at push time.
 
@@ -46,11 +47,17 @@ locally" and "it passed in CI" cannot mean different things. See
 
 ## Licence
 
-Drivel is licensed under the **GNU AGPL version 3** (not "or later"). Contributions
-are accepted under that same licence. There is no CLA and no separate proprietary
-edition, so a patch you send stays free software for everyone who receives it.
+Drivel is licensed under the **Mozilla Public License, version 2.0**.
+Contributions are accepted under that same licence — MPL §5 makes inbound match
+outbound, so there is no CLA to sign and no separate proprietary edition.
 
-Do not edit `LICENSE` — it is the FSF's text verbatim. The copyright notice lives
+MPL is copyleft *per file*: a change to a file in this tree stays open, while a
+separate work that merely uses Drivel does not. That boundary is why a
+closed-source backend against the `provider` seam is fine and always will be.
+[docs/project/licensing.md](docs/project/licensing.md) records why the line is
+drawn there.
+
+Do not edit `LICENSE` — it is Mozilla's text verbatim. The copyright notice lives
 in four places that must stay in sync: the README's licence section,
 `docs/user/drivel.1`, the `cmd/drivel` package doc comment, and the usage text
 `drivel help` prints.

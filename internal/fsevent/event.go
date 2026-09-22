@@ -1,3 +1,8 @@
+// This Source Code Form is subject to the terms of the Mozilla Public
+// License, v. 2.0. If a copy of the MPL was not distributed with this
+// file, You can obtain one at https://mozilla.org/MPL/2.0/.
+// SPDX-License-Identifier: MPL-2.0
+
 // Package fsevent defines the backend-neutral change events emitted by a mount
 // frontend (go-fuse today; cgofuse or an NFS-loopback backend later) and consumed
 // by the sync engine. Keeping it separate from any concrete backend lets the

@@ -1,3 +1,8 @@
+// This Source Code Form is subject to the terms of the Mozilla Public
+// License, v. 2.0. If a copy of the MPL was not distributed with this
+// file, You can obtain one at https://mozilla.org/MPL/2.0/.
+// SPDX-License-Identifier: MPL-2.0
+
 // Package pathindex is a persistent path↔native-ID map for providers whose API
 // addresses objects by an opaque ID rather than by path — Drive's fileIDs today
 // (DESIGN.md §2.5, §9 M7).

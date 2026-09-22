@@ -1,3 +1,8 @@
+// This Source Code Form is subject to the terms of the Mozilla Public
+// License, v. 2.0. If a copy of the MPL was not distributed with this
+// file, You can obtain one at https://mozilla.org/MPL/2.0/.
+// SPDX-License-Identifier: MPL-2.0
+
 // Package ranges is the byte-extent bookkeeping shared by lazy hydration (M5)
 // and range writes (M6). It is a leaf: pure value types, no I/O, no provider.
 //

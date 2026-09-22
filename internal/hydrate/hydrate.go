@@ -1,3 +1,8 @@
+// This Source Code Form is subject to the terms of the Mozilla Public
+// License, v. 2.0. If a copy of the MPL was not distributed with this
+// file, You can obtain one at https://mozilla.org/MPL/2.0/.
+// SPDX-License-Identifier: MPL-2.0
+
 // Package hydrate implements M5 lazy hydration: a remote file can exist in the
 // backing directory as a *placeholder* — correct name, size and mtime, no bytes
 // resident — and is materialised on first read (DESIGN.md §9, M5).

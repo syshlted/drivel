@@ -1,3 +1,8 @@
+// This Source Code Form is subject to the terms of the Mozilla Public
+// License, v. 2.0. If a copy of the MPL was not distributed with this
+// file, You can obtain one at https://mozilla.org/MPL/2.0/.
+// SPDX-License-Identifier: MPL-2.0
+
 // Package vfs is Drivel's go-fuse mount backend: a loopback filesystem that
 // proxies every operation to a backing store (a directory, or /proc/self/fd/N in
 // in-place mode) and emits an fsevent.Event for each mutating operation so the

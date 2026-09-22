@@ -1,3 +1,8 @@
+// This Source Code Form is subject to the terms of the Mozilla Public
+// License, v. 2.0. If a copy of the MPL was not distributed with this
+// file, You can obtain one at https://mozilla.org/MPL/2.0/.
+// SPDX-License-Identifier: MPL-2.0
+
 // Package transport builds the *http.Client used for all cloud-provider traffic.
 //
 // Project requirement: prefer HTTP/3 (QUIC). Go's stdlib has no HTTP/3 client, so

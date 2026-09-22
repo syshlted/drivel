@@ -1,3 +1,8 @@
+// This Source Code Form is subject to the terms of the Mozilla Public
+// License, v. 2.0. If a copy of the MPL was not distributed with this
+// file, You can obtain one at https://mozilla.org/MPL/2.0/.
+// SPDX-License-Identifier: MPL-2.0
+
 // Package gdrive implements provider.Store (and provider.ChangeSource) for Google Drive.
 //
 // All Drive traffic rides the HTTP/3-preferred transport from internal/transport,

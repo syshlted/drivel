@@ -196,16 +196,22 @@ that already exists would keep whatever permissions it arrived with.
 
 ## Licence
 
-Drivel is copyright (C) 2026 SystemHalted and Jeremy Melanson, licensed **GNU
-AGPL version 3** — not "or later"; promoting it is a licensing decision, not an
-editorial one. Contributions are accepted under the same licence; there is no CLA
-and no separate proprietary edition.
+Drivel is copyright (C) 2026 SystemHalted and Jeremy Melanson, licensed
+**Mozilla Public License, version 2.0**. Contributions are accepted under the
+same licence — MPL §5 makes inbound match outbound, so there is no CLA and no
+separate proprietary edition. [docs/project/licensing.md](../project/licensing.md)
+records why this licence and not another.
 
-Two practical consequences. **Network use counts as distribution** (AGPL §13): if
-you run a modified Drivel as part of a service others interact with over a
-network, they are entitled to your modified source. And `LICENSE` is the FSF's
-text **unmodified** — never edit it, and never add a second licence file at the
-root, which confuses the detector pkg.go.dev uses. The copyright notice lives in
-four places that must stay in sync: the README's licence section,
-`docs/user/drivel.1`, the `cmd/drivel` package doc comment, and the usage text
-`drivel help` prints.
+Three practical consequences. **The copyleft is per file, not per program**
+(MPL §1.10, §3.2): a modified Drivel source file must ship with its source, and
+a larger work that merely uses Drivel need not. That is what makes a
+closed-source backend against the `provider` seam permanently safe, and it is a
+boundary to preserve — anything that would require a *caller* to open its source
+is outside what this licence asks for. **Every new source file carries the
+Exhibit A header**, because without it a file copied out of this tree arrives
+with nothing saying what it is, which is precisely where file-level copyleft
+leaks. And `LICENSE` is Mozilla's text **unmodified** — never edit it, and never
+add a second licence file at the root, which confuses the detector pkg.go.dev
+uses. The copyright notice lives in four places that must stay in sync: the
+README's licence section, `docs/user/drivel.1`, the `cmd/drivel` package doc
+comment, and the usage text `drivel help` prints.

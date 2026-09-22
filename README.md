@@ -18,7 +18,8 @@ credentials of its own. You supply the ones for whatever backend you point it at
 so Drivel reaches your storage under an identity that is yours to inspect and
 revoke.
 
-Free software under the [GNU AGPLv3](#license).
+Free software under the [Mozilla Public License 2.0](#license). What the project
+is trying to be, and what that costs: **[MANIFESTO.md](MANIFESTO.md)**.
 
 ## Quickstart
 
@@ -76,6 +77,9 @@ credentials](docs/user/google-cloud-setup.md), free and about five minutes.
 [writing a provider](docs/dev/new-provider.md) ·
 [glossary](docs/dev/glossary.md)
 
+**What Drivel stands for** — [MANIFESTO.md](MANIFESTO.md) ·
+[why MPL-2.0](docs/project/licensing.md)
+
 Release history is in [CHANGELOG.md](CHANGELOG.md). Contributions:
 [CONTRIBUTING.md](CONTRIBUTING.md). Vulnerabilities:
 [SECURITY.md](SECURITY.md).
@@ -115,7 +119,7 @@ Release history is in [CHANGELOG.md](CHANGELOG.md). Contributions:
 | **Windows** | **Not supported, not planned.** Use WSL2, or Google Drive for Desktop. |
 
 Details, and what changes off Linux — in-place mode, extended attributes,
-case-insensitive filesystems, macFUSE and AGPL — are in
+case-insensitive filesystems, macFUSE and licensing — are in
 [docs/user/platforms.md](docs/user/platforms.md).
 
 ## Status
@@ -141,11 +145,24 @@ make check            # everything CI runs, in CI's order
 
 Copyright (C) 2026 SystemHalted and Jeremy Melanson.
 
-Drivel is free software licensed under the **GNU Affero General Public License,
-version 3** — see [LICENSE](LICENSE). In short: you may use, modify and
-redistribute it, but derivative works — **including software you offer to others
-over a network** — must be made available under the same license. There is no CLA
-and no separate proprietary edition.
+Drivel is free software licensed under the **Mozilla Public License, version
+2.0** — see [LICENSE](LICENSE). MPL is copyleft *per file*, with an explicit
+patent grant: ship a modified Drivel source file and that file's source stays
+open; everything you build around it stays yours. Commercial products, linking
+into proprietary software, and closed-source backends written against the
+provider interface are all fine and always will be. There is no CLA.
+
+**What we ask, and deliberately do not require.** The licence reaches Drivel's
+own files and stops. Past that line we can only ask, so we do: if you write a
+`drivel-provider-*` backend, publish it; if you run Drivel somewhere we cannot
+test, tell us what happened. The provider seam is public precisely so backends
+can live outside this tree — a fix that stays in your fork is a fix the next
+person has to find again. That is a request, not a term, and nothing in it
+conditions your rights under the licence.
+
+The name is the exception. The licence covers the code, not the trademark, so
+please don't ship a fork calling itself Drivel. Call it something else and we'll
+cheer for it.
 
 Drivel bundles no application secrets. The provider credentials you supply are
 yours; how you use a storage provider through them is governed by that provider's
