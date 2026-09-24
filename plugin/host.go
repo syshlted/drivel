@@ -21,8 +21,8 @@ import (
 	goplugin "github.com/hashicorp/go-plugin"
 	"google.golang.org/grpc"
 
-	"github.com/zishmusic/drivel/plugin/internal/pb"
-	"github.com/zishmusic/drivel/provider"
+	"github.com/syshlted/drivel/plugin/internal/pb"
+	"github.com/syshlted/drivel/provider"
 )
 
 // How a backend that has died is brought back.

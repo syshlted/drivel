@@ -38,7 +38,7 @@ fire.
 **And it fought the architecture.** M9 made `provider` public *specifically* so
 backends could be written outside this tree; M24 is a registry for installing
 third-party ones. Under AGPLv3 a plugin importing
-`github.com/zishmusic/drivel/provider` plausibly had to be AGPL itself, while a
+`github.com/syshlted/drivel/provider` plausibly had to be AGPL itself, while a
 plugin speaking only protobuf was the §2.9.2 arms-length case — two routes to
 the same seam with different answers, and the more convenient route was the one
 that punished the author. DESIGN.md §9/M24 carried that as an unresolved

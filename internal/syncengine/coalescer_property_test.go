@@ -9,8 +9,8 @@ import (
 	"math/rand/v2"
 	"testing"
 
-	"github.com/zishmusic/drivel/internal/fsevent"
-	"github.com/zishmusic/drivel/ranges"
+	"github.com/syshlted/drivel/internal/fsevent"
+	"github.com/syshlted/drivel/ranges"
 )
 
 // Property tests for the coalescer's merge rule (DESIGN.md §9, M0 item 3).

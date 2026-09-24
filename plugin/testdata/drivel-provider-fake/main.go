@@ -30,9 +30,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/zishmusic/drivel/plugin"
-	"github.com/zishmusic/drivel/provider"
-	"github.com/zishmusic/drivel/ranges"
+	"github.com/syshlted/drivel/plugin"
+	"github.com/syshlted/drivel/provider"
+	"github.com/syshlted/drivel/ranges"
 )
 
 func main() { plugin.Serve(factory) }

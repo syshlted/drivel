@@ -14,7 +14,7 @@ import (
 	"google.golang.org/api/drive/v3"
 	"google.golang.org/api/googleapi"
 
-	"github.com/zishmusic/drivel/provider"
+	"github.com/syshlted/drivel/provider"
 )
 
 // Scoped enumeration (DESIGN.md §9, M7c).

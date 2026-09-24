@@ -11,7 +11,7 @@ import (
 	"fmt"
 	"path"
 
-	"github.com/zishmusic/drivel/provider"
+	"github.com/syshlted/drivel/provider"
 )
 
 // enumPageSize bounds one Enumerate call. The sweep persists its cursor after

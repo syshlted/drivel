@@ -18,8 +18,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/zishmusic/drivel/internal/state"
-	"github.com/zishmusic/drivel/provider"
+	"github.com/syshlted/drivel/internal/state"
+	"github.com/syshlted/drivel/provider"
 )
 
 // Cadence bounds the adaptive poll interval (DESIGN.md §3.4): poll at Fast while

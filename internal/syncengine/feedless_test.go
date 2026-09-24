@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/zishmusic/drivel/provider"
+	"github.com/syshlted/drivel/provider"
 )
 
 // A provider with no change feed is a supported shape, not a degraded one. Every

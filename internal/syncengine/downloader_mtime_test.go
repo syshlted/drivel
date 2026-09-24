@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/zishmusic/drivel/provider"
+	"github.com/syshlted/drivel/provider"
 )
 
 // A downloaded file carries the remote's modifiedTime, not the time it landed.

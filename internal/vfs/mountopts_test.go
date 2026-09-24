@@ -10,7 +10,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/zishmusic/drivel/internal/mount"
+	"github.com/syshlted/drivel/internal/mount"
 )
 
 // Whatever else a platform can express, nosuid is not negotiable. This is the

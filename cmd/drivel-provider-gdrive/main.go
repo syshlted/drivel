@@ -20,8 +20,8 @@
 package main
 
 import (
-	"github.com/zishmusic/drivel/internal/provider/gdrive"
-	"github.com/zishmusic/drivel/plugin"
+	"github.com/syshlted/drivel/internal/provider/gdrive"
+	"github.com/syshlted/drivel/plugin"
 )
 
 func main() {

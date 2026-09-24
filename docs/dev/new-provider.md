@@ -215,7 +215,7 @@ where the implementation lives — and the whole of the wiring is a `main`:
 package main
 
 import (
-    "github.com/zishmusic/drivel/plugin"
+    "github.com/syshlted/drivel/plugin"
     "example.com/drivel-provider-thing/thing"
 )
 

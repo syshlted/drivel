@@ -17,9 +17,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/zishmusic/drivel/internal/fsevent"
-	"github.com/zishmusic/drivel/internal/mount"
-	"github.com/zishmusic/drivel/internal/testenv"
+	"github.com/syshlted/drivel/internal/fsevent"
+	"github.com/syshlted/drivel/internal/mount"
+	"github.com/syshlted/drivel/internal/testenv"
 )
 
 // testHydrator is a mount.Hydrator over a real backing dir: "placeholders" are

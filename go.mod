@@ -1,4 +1,4 @@
-module github.com/zishmusic/drivel
+module github.com/syshlted/drivel
 
 go 1.27.1
 

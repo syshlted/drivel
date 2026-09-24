@@ -21,7 +21,7 @@ import (
 
 	"golang.org/x/crypto/ssh"
 
-	"github.com/zishmusic/drivel/provider"
+	"github.com/syshlted/drivel/provider"
 )
 
 // ssh.InsecureIgnoreHostKey must not appear in this tree, not even behind a flag

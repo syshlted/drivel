@@ -20,8 +20,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/zishmusic/drivel/provider"
-	"github.com/zishmusic/drivel/ranges"
+	"github.com/syshlted/drivel/provider"
+	"github.com/syshlted/drivel/ranges"
 )
 
 // These tests launch a real plugin process.

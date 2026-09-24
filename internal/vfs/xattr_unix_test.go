@@ -15,8 +15,8 @@ import (
 
 	"golang.org/x/sys/unix"
 
-	"github.com/zishmusic/drivel/internal/mount"
-	"github.com/zishmusic/drivel/internal/testenv"
+	"github.com/syshlted/drivel/internal/mount"
+	"github.com/syshlted/drivel/internal/testenv"
 )
 
 // The marker M5 keeps on the backing file, named without its namespace (the

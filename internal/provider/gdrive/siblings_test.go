@@ -12,7 +12,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/zishmusic/drivel/provider"
+	"github.com/syshlted/drivel/provider"
 )
 
 // MC-30 from docs/dev/multiclient-test-plan.md, at the layer that owns it.

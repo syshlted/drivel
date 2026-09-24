@@ -9,7 +9,7 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/zishmusic/drivel/provider"
+	"github.com/syshlted/drivel/provider"
 )
 
 // Kind is the name this backend is registered and configured under.

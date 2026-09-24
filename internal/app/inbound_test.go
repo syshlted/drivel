@@ -9,7 +9,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/zishmusic/drivel/provider"
+	"github.com/syshlted/drivel/provider"
 )
 
 // A store needs a change feed OR the ability to enumerate to sync inbound, not

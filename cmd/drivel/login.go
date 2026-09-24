@@ -17,8 +17,8 @@ import (
 	"strings"
 	"syscall"
 
-	"github.com/zishmusic/drivel/internal/config"
-	"github.com/zishmusic/drivel/internal/gauth"
+	"github.com/syshlted/drivel/internal/config"
+	"github.com/syshlted/drivel/internal/gauth"
 )
 
 // loginCLI is everything `drivel login` accepts.

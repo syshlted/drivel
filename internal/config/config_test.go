@@ -12,8 +12,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/zishmusic/drivel/internal/hydrate"
-	"github.com/zishmusic/drivel/internal/syncengine"
+	"github.com/syshlted/drivel/internal/hydrate"
+	"github.com/syshlted/drivel/internal/syncengine"
 )
 
 // write puts a config file in a fresh directory and points XDG at it, so the

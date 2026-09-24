@@ -35,10 +35,10 @@ import (
 	"sync"
 	"time"
 
-	"github.com/zishmusic/drivel/internal/fsevent"
-	"github.com/zishmusic/drivel/internal/state"
-	"github.com/zishmusic/drivel/provider"
-	"github.com/zishmusic/drivel/ranges"
+	"github.com/syshlted/drivel/internal/fsevent"
+	"github.com/syshlted/drivel/internal/state"
+	"github.com/syshlted/drivel/provider"
+	"github.com/syshlted/drivel/ranges"
 )
 
 // Defaults for the outbound uploader. All are overridable via Config.

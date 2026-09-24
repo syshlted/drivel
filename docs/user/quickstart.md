@@ -12,8 +12,8 @@ You need Go 1.27+ and a FUSE mount helper.
 sudo apt install fuse3        # Debian/Ubuntu
 sudo dnf install fuse3        # Fedora
 
-go install github.com/zishmusic/drivel/cmd/drivel@latest
-go install github.com/zishmusic/drivel/cmd/drivel-provider-gdrive@latest
+go install github.com/syshlted/drivel/cmd/drivel@latest
+go install github.com/syshlted/drivel/cmd/drivel-provider-gdrive@latest
 ```
 
 That puts both in `$(go env GOPATH)/bin`. The second one is the Google Drive

@@ -15,9 +15,9 @@ import (
 	"github.com/hanwen/go-fuse/v2/fs"
 	"github.com/hanwen/go-fuse/v2/fuse"
 
-	"github.com/zishmusic/drivel/internal/fsevent"
-	"github.com/zishmusic/drivel/internal/mount"
-	"github.com/zishmusic/drivel/ranges"
+	"github.com/syshlted/drivel/internal/fsevent"
+	"github.com/syshlted/drivel/internal/mount"
+	"github.com/syshlted/drivel/ranges"
 )
 
 // fileHandle wraps a loopback file handle to capture content writes. All ops are

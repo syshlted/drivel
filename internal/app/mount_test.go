@@ -17,10 +17,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/zishmusic/drivel/internal/hydrate"
-	"github.com/zishmusic/drivel/internal/syncengine"
-	"github.com/zishmusic/drivel/internal/testenv"
-	"github.com/zishmusic/drivel/provider"
+	"github.com/syshlted/drivel/internal/hydrate"
+	"github.com/syshlted/drivel/internal/syncengine"
+	"github.com/syshlted/drivel/internal/testenv"
+	"github.com/syshlted/drivel/provider"
 )
 
 // fakeStore is a provider.Store that keeps everything in memory and records what

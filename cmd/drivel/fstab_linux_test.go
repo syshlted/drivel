@@ -16,7 +16,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/zishmusic/drivel/internal/testenv"
+	"github.com/syshlted/drivel/internal/testenv"
 )
 
 // The unsets are the load-bearing half of the run-as environment.

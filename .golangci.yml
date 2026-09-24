@@ -111,7 +111,7 @@ formatters:
   settings:
     goimports:
       local-prefixes:
-        - github.com/zishmusic/drivel
+        - github.com/syshlted/drivel
 
   exclusions:
     generated: lax

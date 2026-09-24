@@ -17,8 +17,8 @@ import (
 
 	"golang.org/x/oauth2"
 
-	"github.com/zishmusic/drivel/internal/gauth"
-	"github.com/zishmusic/drivel/internal/transport"
+	"github.com/syshlted/drivel/internal/gauth"
+	"github.com/syshlted/drivel/internal/transport"
 )
 
 // buildHTTPClient constructs the OAuth-authenticated *http.Client whose transport

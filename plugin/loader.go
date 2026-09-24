@@ -17,7 +17,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/zishmusic/drivel/provider"
+	"github.com/syshlted/drivel/provider"
 )
 
 // PathEnv names the environment variable that replaces the default search path.

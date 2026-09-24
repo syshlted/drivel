@@ -28,13 +28,13 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/zishmusic/drivel/internal/fsevent"
-	"github.com/zishmusic/drivel/internal/hydrate"
-	"github.com/zishmusic/drivel/internal/mount"
-	"github.com/zishmusic/drivel/internal/state"
-	"github.com/zishmusic/drivel/internal/syncengine"
-	"github.com/zishmusic/drivel/internal/vfs"
-	"github.com/zishmusic/drivel/provider"
+	"github.com/syshlted/drivel/internal/fsevent"
+	"github.com/syshlted/drivel/internal/hydrate"
+	"github.com/syshlted/drivel/internal/mount"
+	"github.com/syshlted/drivel/internal/state"
+	"github.com/syshlted/drivel/internal/syncengine"
+	"github.com/syshlted/drivel/internal/vfs"
+	"github.com/syshlted/drivel/provider"
 )
 
 // eventBuffer is how many mount events may be in flight before the FUSE handler

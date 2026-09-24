@@ -10,7 +10,7 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/zishmusic/drivel/provider"
+	"github.com/syshlted/drivel/provider"
 )
 
 // Factory opens a Drive store from an undecoded config (M8). Register it under

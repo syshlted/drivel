@@ -21,7 +21,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/zishmusic/drivel/provider"
+	"github.com/syshlted/drivel/provider"
 )
 
 // hasher turns a hash constructor into the shape a backend's HashContent has, so

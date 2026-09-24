@@ -13,8 +13,8 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
-	"github.com/zishmusic/drivel/plugin/internal/pb"
-	"github.com/zishmusic/drivel/provider"
+	"github.com/syshlted/drivel/plugin/internal/pb"
+	"github.com/syshlted/drivel/provider"
 )
 
 // An error crossing the seam has to survive as more than its text, because the

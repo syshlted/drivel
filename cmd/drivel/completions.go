@@ -35,8 +35,8 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/zishmusic/drivel/internal/completion"
-	"github.com/zishmusic/drivel/internal/provider/gdrive/gdconf"
+	"github.com/syshlted/drivel/internal/completion"
+	"github.com/syshlted/drivel/internal/provider/gdrive/gdconf"
 )
 
 // hint is the half of a flag's completion that its definition cannot supply: the

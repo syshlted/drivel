@@ -13,7 +13,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/zishmusic/drivel/internal/testenv"
+	"github.com/syshlted/drivel/internal/testenv"
 )
 
 // The whole path, once, through one provider: an initial sweep materialises what

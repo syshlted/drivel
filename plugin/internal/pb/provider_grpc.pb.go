@@ -7,7 +7,7 @@
 //
 // This file is the compatibility surface between a drivel host and a backend
 // running in its own process. Everything in it mirrors a Go declaration in
-// github.com/zishmusic/drivel/provider, and the mapping is deliberately dull:
+// github.com/syshlted/drivel/provider, and the mapping is deliberately dull:
 // the seam was designed in M2 and proven in M8, and M9 is about the loading
 // mechanism, not about redesigning the interface.
 //

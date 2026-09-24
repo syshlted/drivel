@@ -23,9 +23,9 @@ import (
 	"google.golang.org/api/googleapi"
 	"google.golang.org/api/option"
 
-	"github.com/zishmusic/drivel/internal/pathindex"
-	"github.com/zishmusic/drivel/internal/provider/gdrive/gdconf"
-	"github.com/zishmusic/drivel/provider"
+	"github.com/syshlted/drivel/internal/pathindex"
+	"github.com/syshlted/drivel/internal/provider/gdrive/gdconf"
+	"github.com/syshlted/drivel/provider"
 )
 
 const folderMIME = "application/vnd.google-apps.folder"

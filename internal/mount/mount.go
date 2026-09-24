@@ -16,7 +16,7 @@ import (
 	"io"
 	"log"
 
-	"github.com/zishmusic/drivel/internal/fsevent"
+	"github.com/syshlted/drivel/internal/fsevent"
 )
 
 // Hydrator is the OPTIONAL lazy-hydration hook (M5). A mount backend consults it

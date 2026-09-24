@@ -15,7 +15,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/zishmusic/drivel/internal/fsevent"
+	"github.com/syshlted/drivel/internal/fsevent"
 )
 
 // What a successful push says about itself.

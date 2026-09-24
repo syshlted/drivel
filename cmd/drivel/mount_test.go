@@ -14,10 +14,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/zishmusic/drivel/internal/config"
-	"github.com/zishmusic/drivel/internal/hydrate"
-	"github.com/zishmusic/drivel/internal/provider/gdrive"
-	"github.com/zishmusic/drivel/internal/syncengine"
+	"github.com/syshlted/drivel/internal/config"
+	"github.com/syshlted/drivel/internal/hydrate"
+	"github.com/syshlted/drivel/internal/provider/gdrive"
+	"github.com/syshlted/drivel/internal/syncengine"
 )
 
 // quietFlagSet stands in for the real one; mountSpecs only ever calls Usage.

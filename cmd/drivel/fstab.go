@@ -33,12 +33,12 @@ import (
 	"strings"
 	"time"
 
-	"github.com/zishmusic/drivel/internal/app"
-	"github.com/zishmusic/drivel/internal/config"
-	"github.com/zishmusic/drivel/internal/hydrate"
-	"github.com/zishmusic/drivel/internal/provider/gdrive/gdconf"
-	"github.com/zishmusic/drivel/internal/syncengine"
-	"github.com/zishmusic/drivel/provider"
+	"github.com/syshlted/drivel/internal/app"
+	"github.com/syshlted/drivel/internal/config"
+	"github.com/syshlted/drivel/internal/hydrate"
+	"github.com/syshlted/drivel/internal/provider/gdrive/gdconf"
+	"github.com/syshlted/drivel/internal/syncengine"
+	"github.com/syshlted/drivel/provider"
 )
 
 // helperArgs is a parsed mount(8) helper command line.

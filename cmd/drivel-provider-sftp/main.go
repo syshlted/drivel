@@ -14,8 +14,8 @@
 package main
 
 import (
-	"github.com/zishmusic/drivel/internal/provider/sftp"
-	"github.com/zishmusic/drivel/plugin"
+	"github.com/syshlted/drivel/internal/provider/sftp"
+	"github.com/syshlted/drivel/plugin"
 )
 
 func main() {

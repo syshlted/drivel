@@ -4,14 +4,14 @@
 is no manual "submit" form. A module appears once the [module
 proxy](https://proxy.golang.org) has fetched a specific version, which happens
 the first time anyone (including you) requests it. This page is the checklist to
-get `github.com/zishmusic/drivel` listed cleanly, plus the caveats specific to
+get `github.com/syshlted/drivel` listed cleanly, plus the caveats specific to
 this repo.
 
 ## Prerequisites
 
 1. **A public, fetchable VCS repo at the module path.**
-   `go.mod` declares `module github.com/zishmusic/drivel`, so the repo must be
-   publicly reachable at `https://github.com/zishmusic/drivel`. The path in
+   `go.mod` declares `module github.com/syshlted/drivel`, so the repo must be
+   publicly reachable at `https://github.com/syshlted/drivel`. The path in
    `go.mod` and the real repo URL must match exactly — the proxy clones the URL
    derived from the module path.
 
@@ -47,13 +47,13 @@ After the tag is pushed, prime the proxy from a machine with network access:
 
 ```sh
 # Either of these makes the proxy fetch (and thus index) the version:
-GOPROXY=https://proxy.golang.org go list -m github.com/zishmusic/drivel@v0.1.0
+GOPROXY=https://proxy.golang.org go list -m github.com/syshlted/drivel@v0.1.0
 # or hit the proxy endpoint directly:
-curl https://proxy.golang.org/github.com/zishmusic/drivel/@v/v0.1.0.info
+curl https://proxy.golang.org/github.com/syshlted/drivel/@v/v0.1.0.info
 ```
 
 Within a minute or two the version resolves and
-`https://pkg.go.dev/github.com/zishmusic/drivel` populates. `@latest` follows the
+`https://pkg.go.dev/github.com/syshlted/drivel` populates. `@latest` follows the
 highest semver tag.
 
 ## What will (and won't) be documented
@@ -99,8 +99,8 @@ writing a backend, and is written as one.
 Once a tag exists, users install the command with:
 
 ```sh
-go install github.com/zishmusic/drivel/cmd/drivel@latest
-go install github.com/zishmusic/drivel/cmd/drivel-provider-gdrive@latest
+go install github.com/syshlted/drivel/cmd/drivel@latest
+go install github.com/syshlted/drivel/cmd/drivel-provider-gdrive@latest
 ```
 
 (That places both binaries in `$(go env GOBIN)` or `$GOPATH/bin`. The second one

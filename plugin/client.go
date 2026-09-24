@@ -13,9 +13,9 @@ import (
 	"io"
 	"sync"
 
-	"github.com/zishmusic/drivel/plugin/internal/pb"
-	"github.com/zishmusic/drivel/provider"
-	"github.com/zishmusic/drivel/ranges"
+	"github.com/syshlted/drivel/plugin/internal/pb"
+	"github.com/syshlted/drivel/provider"
+	"github.com/syshlted/drivel/ranges"
 )
 
 // session hands out a live connection to the backend process, launching or

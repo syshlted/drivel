@@ -12,7 +12,7 @@ import (
 	"github.com/hanwen/go-fuse/v2/fs"
 	"github.com/hanwen/go-fuse/v2/fuse"
 
-	"github.com/zishmusic/drivel/internal/fsevent"
+	"github.com/syshlted/drivel/internal/fsevent"
 )
 
 // Hard links, symlinks and special files: what the mount does with the things a

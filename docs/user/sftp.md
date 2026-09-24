@@ -17,7 +17,7 @@ First, install the backend. Drivel runs its storage backends as separate program
 so the SFTP one has to be there for a mount to use it:
 
 ```sh
-go install github.com/zishmusic/drivel/cmd/drivel-provider-sftp@latest
+go install github.com/syshlted/drivel/cmd/drivel-provider-sftp@latest
 ```
 
 (or `make build` / `sudo make install` from a checkout, which build every backend).

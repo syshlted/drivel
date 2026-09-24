@@ -18,9 +18,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/zishmusic/drivel/internal/state"
-	"github.com/zishmusic/drivel/internal/testenv"
-	"github.com/zishmusic/drivel/provider"
+	"github.com/syshlted/drivel/internal/state"
+	"github.com/syshlted/drivel/internal/testenv"
+	"github.com/syshlted/drivel/provider"
 )
 
 // The state store is the intended Cache implementation; this pins the contract so

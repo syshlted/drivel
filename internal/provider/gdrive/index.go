@@ -14,8 +14,8 @@ import (
 	"google.golang.org/api/drive/v3"
 	"google.golang.org/api/googleapi"
 
-	"github.com/zishmusic/drivel/internal/pathindex"
-	"github.com/zishmusic/drivel/provider"
+	"github.com/syshlted/drivel/internal/pathindex"
+	"github.com/syshlted/drivel/provider"
 )
 
 // Path↔fileID translation (DESIGN.md §2.5, §9 M7).

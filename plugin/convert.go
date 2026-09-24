@@ -8,9 +8,9 @@ package plugin
 import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 
-	"github.com/zishmusic/drivel/plugin/internal/pb"
-	"github.com/zishmusic/drivel/provider"
-	"github.com/zishmusic/drivel/ranges"
+	"github.com/syshlted/drivel/plugin/internal/pb"
+	"github.com/syshlted/drivel/provider"
+	"github.com/syshlted/drivel/ranges"
 )
 
 // The translations between the Go seam and the wire. They are boring on purpose:

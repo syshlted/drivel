@@ -7,7 +7,7 @@
 //
 // This file is the compatibility surface between a drivel host and a backend
 // running in its own process. Everything in it mirrors a Go declaration in
-// github.com/zishmusic/drivel/provider, and the mapping is deliberately dull:
+// github.com/syshlted/drivel/provider, and the mapping is deliberately dull:
 // the seam was designed in M2 and proven in M8, and M9 is about the loading
 // mechanism, not about redesigning the interface.
 //
@@ -1723,7 +1723,7 @@ const file_drivel_plugin_v1_provider_proto_rawDesc = "" +
 	"\bPutRange\x12!.drivel.plugin.v1.PutRangeRequest\x1a\x1e.drivel.plugin.v1.FileResponse\x12O\n" +
 	"\vHashContent\x12\x17.drivel.plugin.v1.Chunk\x1a%.drivel.plugin.v1.HashContentResponse(\x012V\n" +
 	"\aContent\x12K\n" +
-	"\x06ReadAt\x12\x1f.drivel.plugin.v1.ReadAtRequest\x1a .drivel.plugin.v1.ReadAtResponseB3Z1github.com/zishmusic/drivel/plugin/internal/pb;pbb\x06proto3"
+	"\x06ReadAt\x12\x1f.drivel.plugin.v1.ReadAtRequest\x1a .drivel.plugin.v1.ReadAtResponseB2Z0github.com/syshlted/drivel/plugin/internal/pb;pbb\x06proto3"
 
 var (
 	file_drivel_plugin_v1_provider_proto_rawDescOnce sync.Once

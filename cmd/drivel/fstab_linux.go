@@ -28,7 +28,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/zishmusic/drivel/internal/app"
+	"github.com/syshlted/drivel/internal/app"
 )
 
 const (

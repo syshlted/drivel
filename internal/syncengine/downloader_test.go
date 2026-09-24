@@ -15,8 +15,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/zishmusic/drivel/internal/state"
-	"github.com/zishmusic/drivel/provider"
+	"github.com/syshlted/drivel/internal/state"
+	"github.com/syshlted/drivel/provider"
 )
 
 // fakeSource is a scripted provider.ChangeSource: it hands out a fixed sequence

@@ -12,10 +12,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/zishmusic/drivel/internal/app"
-	"github.com/zishmusic/drivel/internal/hydrate"
-	"github.com/zishmusic/drivel/internal/provider/gdrive"
-	"github.com/zishmusic/drivel/internal/syncengine"
+	"github.com/syshlted/drivel/internal/app"
+	"github.com/syshlted/drivel/internal/hydrate"
+	"github.com/syshlted/drivel/internal/provider/gdrive"
+	"github.com/syshlted/drivel/internal/syncengine"
 )
 
 // resolveHelper parses a helper command line the way mount(8) presents one.

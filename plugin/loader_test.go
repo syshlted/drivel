@@ -16,7 +16,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/zishmusic/drivel/provider"
+	"github.com/syshlted/drivel/provider"
 )
 
 // touchExec writes an executable file with the given mode.

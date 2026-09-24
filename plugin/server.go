@@ -15,8 +15,8 @@ import (
 
 	goplugin "github.com/hashicorp/go-plugin"
 
-	"github.com/zishmusic/drivel/plugin/internal/pb"
-	"github.com/zishmusic/drivel/provider"
+	"github.com/syshlted/drivel/plugin/internal/pb"
+	"github.com/syshlted/drivel/provider"
 )
 
 // chunkSize is how much content one stream message carries.

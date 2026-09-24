@@ -8,7 +8,7 @@ inputs:
 plugins:
   - local: bin/protoc-gen-go
     out: .
-    opt: module=github.com/zishmusic/drivel
+    opt: module=github.com/syshlted/drivel
   - local: bin/protoc-gen-go-grpc
     out: .
-    opt: module=github.com/zishmusic/drivel
+    opt: module=github.com/syshlted/drivel

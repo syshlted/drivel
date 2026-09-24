@@ -37,7 +37,7 @@ the backend is not installed. The message lists what *is* available and every
 directory Drivel looked in. Install it the same way you installed `drivel`:
 
 ```sh
-go install github.com/zishmusic/drivel/cmd/drivel-provider-gdrive@latest
+go install github.com/syshlted/drivel/cmd/drivel-provider-gdrive@latest
 ```
 
 or, from a checkout, `make build` (which builds all of them) or

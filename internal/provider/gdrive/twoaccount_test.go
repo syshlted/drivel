@@ -10,7 +10,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/zishmusic/drivel/internal/pathindex"
+	"github.com/syshlted/drivel/internal/pathindex"
 )
 
 // M8's seam proof, below the seam: two independently-configured Drive stores in

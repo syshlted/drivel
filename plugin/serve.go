@@ -13,7 +13,7 @@ import (
 	goplugin "github.com/hashicorp/go-plugin"
 	"google.golang.org/grpc"
 
-	"github.com/zishmusic/drivel/provider"
+	"github.com/syshlted/drivel/provider"
 )
 
 // Serve runs a provider backend as a drivel plugin. It is what a plugin's main
@@ -22,7 +22,7 @@ import (
 //	package main
 //
 //	import (
-//		"github.com/zishmusic/drivel/plugin"
+//		"github.com/syshlted/drivel/plugin"
 //		"example.com/drivel-provider-thing/thing"
 //	)
 //

@@ -11,7 +11,7 @@ import (
 
 	drive "google.golang.org/api/drive/v3"
 
-	"github.com/zishmusic/drivel/internal/pathindex"
+	"github.com/syshlted/drivel/internal/pathindex"
 )
 
 // withIndex attaches a persistent index backed by a temp file.

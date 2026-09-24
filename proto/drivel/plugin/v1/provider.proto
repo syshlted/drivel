@@ -7,7 +7,7 @@
 //
 // This file is the compatibility surface between a drivel host and a backend
 // running in its own process. Everything in it mirrors a Go declaration in
-// github.com/zishmusic/drivel/provider, and the mapping is deliberately dull:
+// github.com/syshlted/drivel/provider, and the mapping is deliberately dull:
 // the seam was designed in M2 and proven in M8, and M9 is about the loading
 // mechanism, not about redesigning the interface.
 //
@@ -26,7 +26,7 @@ package drivel.plugin.v1;
 
 import "google/protobuf/timestamp.proto";
 
-option go_package = "github.com/zishmusic/drivel/plugin/internal/pb;pb";
+option go_package = "github.com/syshlted/drivel/plugin/internal/pb;pb";
 
 // Provider is one backend, serving exactly one mount. A host launches one plugin
 // process per mount rather than sharing one across a process's mounts: two

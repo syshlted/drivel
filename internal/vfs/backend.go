@@ -12,7 +12,7 @@ import (
 	"github.com/hanwen/go-fuse/v2/fs"
 	"github.com/hanwen/go-fuse/v2/fuse"
 
-	"github.com/zishmusic/drivel/internal/mount"
+	"github.com/syshlted/drivel/internal/mount"
 )
 
 // backend is the go-fuse implementation of mount.Backend.

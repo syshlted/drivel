@@ -12,7 +12,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/zishmusic/drivel/internal/testenv"
+	"github.com/syshlted/drivel/internal/testenv"
 )
 
 // probeFile returns a file on a filesystem that stores user xattrs, skipping (or

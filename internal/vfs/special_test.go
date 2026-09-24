@@ -20,8 +20,8 @@ import (
 
 	"golang.org/x/sys/unix"
 
-	"github.com/zishmusic/drivel/internal/fsevent"
-	"github.com/zishmusic/drivel/internal/mount"
+	"github.com/syshlted/drivel/internal/fsevent"
+	"github.com/syshlted/drivel/internal/mount"
 )
 
 // logSink collects a mount's log lines. The FUSE server writes them from its own

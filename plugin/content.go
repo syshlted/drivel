@@ -15,7 +15,7 @@ import (
 	goplugin "github.com/hashicorp/go-plugin"
 	"google.golang.org/grpc"
 
-	"github.com/zishmusic/drivel/plugin/internal/pb"
+	"github.com/syshlted/drivel/plugin/internal/pb"
 )
 
 // The Content service is the one call that runs from the plugin back to the

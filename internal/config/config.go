@@ -14,10 +14,10 @@ import (
 
 	"github.com/BurntSushi/toml"
 
-	"github.com/zishmusic/drivel/internal/app"
-	"github.com/zishmusic/drivel/internal/hydrate"
-	"github.com/zishmusic/drivel/internal/syncengine"
-	"github.com/zishmusic/drivel/provider"
+	"github.com/syshlted/drivel/internal/app"
+	"github.com/syshlted/drivel/internal/hydrate"
+	"github.com/syshlted/drivel/internal/syncengine"
+	"github.com/syshlted/drivel/provider"
 )
 
 // Config is a parsed config file, not yet resolved into mounts.

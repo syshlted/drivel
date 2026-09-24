@@ -37,8 +37,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/zishmusic/drivel/provider"
-	"github.com/zishmusic/drivel/ranges"
+	"github.com/syshlted/drivel/provider"
+	"github.com/syshlted/drivel/ranges"
 )
 
 // XattrName is the extended attribute carrying the placeholder Marker. It lives

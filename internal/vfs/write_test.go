@@ -11,7 +11,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/zishmusic/drivel/internal/fsevent"
+	"github.com/syshlted/drivel/internal/fsevent"
 )
 
 // A partial write through a handle the client opened write-only has to land, and

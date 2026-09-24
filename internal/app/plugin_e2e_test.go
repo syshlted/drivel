@@ -17,9 +17,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/zishmusic/drivel/internal/testenv"
-	"github.com/zishmusic/drivel/plugin"
-	"github.com/zishmusic/drivel/provider"
+	"github.com/syshlted/drivel/internal/testenv"
+	"github.com/syshlted/drivel/plugin"
+	"github.com/syshlted/drivel/provider"
 )
 
 // The same path the in-process end-to-end test covers, but with the backend in

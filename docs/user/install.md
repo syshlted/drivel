@@ -51,8 +51,8 @@ again. It also means you only install the backends you actually use.
 directory, but it has nothing to sync with.
 
 ```sh
-go install github.com/zishmusic/drivel/cmd/drivel@latest
-go install github.com/zishmusic/drivel/cmd/drivel-provider-gdrive@latest
+go install github.com/syshlted/drivel/cmd/drivel@latest
+go install github.com/syshlted/drivel/cmd/drivel-provider-gdrive@latest
 ```
 
 Everything lands in `$(go env GOBIN)`, or `$(go env GOPATH)/bin` if `GOBIN` is
@@ -62,7 +62,7 @@ first, so installing them the same way is all it takes.
 If you want SFTP as well:
 
 ```sh
-go install github.com/zishmusic/drivel/cmd/drivel-provider-sftp@latest
+go install github.com/syshlted/drivel/cmd/drivel-provider-sftp@latest
 ```
 
 To see what Drivel can find:
@@ -74,7 +74,7 @@ drivel mount -h        # errors from a mount name the backends that are installe
 ## Build from source
 
 ```sh
-git clone https://github.com/zishmusic/drivel
+git clone https://github.com/syshlted/drivel
 cd drivel
 make build
 ```

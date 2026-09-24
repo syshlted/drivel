@@ -25,8 +25,8 @@ is trying to be, and what that costs: **[MANIFESTO.md](MANIFESTO.md)**.
 
 ```sh
 sudo apt install fuse3                                    # or: dnf install fuse3
-go install github.com/zishmusic/drivel/cmd/drivel@latest
-go install github.com/zishmusic/drivel/cmd/drivel-provider-gdrive@latest  # the backend
+go install github.com/syshlted/drivel/cmd/drivel@latest
+go install github.com/syshlted/drivel/cmd/drivel-provider-gdrive@latest  # the backend
 
 drivel login -account personal                            # one-time OAuth wizard
 drivel mount                                              # serves your config file

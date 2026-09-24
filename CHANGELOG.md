@@ -4,7 +4,7 @@ What has changed in Drivel, in plain terms. The long-form reasoning behind each
 decision lives in the repo's design notes; this file is the summary.
 
 There are **no tagged releases yet**. Everything below is on the master branch.
-Install with `go install github.com/zishmusic/drivel/cmd/drivel@latest`
+Install with `go install github.com/syshlted/drivel/cmd/drivel@latest`
 **plus at least one backend** (`…/cmd/drivel-provider-gdrive@latest`), or build
 from source with `make build`.
 
@@ -103,8 +103,8 @@ command — a `drivel` with none can still mount a directory, but has nothing to
 sync with:
 
 ```sh
-go install github.com/zishmusic/drivel/cmd/drivel@latest
-go install github.com/zishmusic/drivel/cmd/drivel-provider-gdrive@latest
+go install github.com/syshlted/drivel/cmd/drivel@latest
+go install github.com/syshlted/drivel/cmd/drivel-provider-gdrive@latest
 ```
 
 From a checkout, `make build` builds all of them and `sudo make install` places
