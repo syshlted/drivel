@@ -48,6 +48,35 @@ pre-push:
     - name: test
       run: make test
 
+    # Signatures. Inline rather than a make target, for the same reason the
+    # commit-msg job below is: CI cannot run this one. It reads the local
+    # keyring to decide whether a commit is signed, so there is no gate for the
+    # Makefile to be the single definition of — the rule this file states is
+    # about gates that exist on both sides, and this one exists on neither.
+    #
+    # git's %G? reports N for no signature and B for a bad one; both are
+    # refused. E is accepted: it means signed by a key absent from this
+    # machine's keyring, which is what GitHub's own web-flow commits look like.
+    #
+    # The range is "not reachable from any remote ref" rather than stdin's push
+    # refs, because lefthook consumes the hook's stdin to compute its own
+    # templates, and rather than @-push, whose braces collide with lefthook's
+    # {template} syntax.
+    - name: signatures
+      run: |
+        unsigned=
+        for commit in $(git rev-list HEAD --not --remotes); do
+          case "$(git log -1 --format=%G? "$commit")" in
+            N) unsigned="$unsigned $(git log -1 --format=%h "$commit") (unsigned)" ;;
+            B) unsigned="$unsigned $(git log -1 --format=%h "$commit") (BAD)" ;;
+          esac
+        done
+        if [ -n "$unsigned" ]; then
+          echo "refusing to push:$unsigned"
+          exit 1
+        fi
+      fail_text: "unsigned commits — sign a run of them with: git rebase --exec 'git commit --amend --no-edit -S' <base>"
+
 commit-msg:
   jobs:
     - name: subject length
