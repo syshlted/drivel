@@ -1,0 +1,58 @@
+# Publishes the project website to GitHub Pages.
+#
+# The site lives here rather than in a repo of its own because a GitHub project
+# site's URL path *is* the repository name, with no aliasing and no redirect:
+# https://syshlted.github.io/drivel/ can only ever be served by syshlted/drivel.
+# The former separate site repo published at /drivel-github-site/ for exactly
+# that reason.
+#
+# Only site/ is uploaded, so nothing else in the tree becomes a published URL.
+# There is no build step and Jekyll never runs, so no .nojekyll file is needed.
+#
+# Requires two settings on this repository, neither of which this file controls:
+# the repository must be public (Pages will not serve a private repo on the free
+# org plan), and Settings -> Pages -> Source must be "GitHub Actions".
+
+name: Pages
+
+on:
+  push:
+    branches: [master]
+    # The site is a small static tree that changes far less often than the code.
+    # Without this filter every commit to master would redeploy an identical
+    # site, which buys nothing and makes the deployment history useless as a
+    # record of when the site actually changed.
+    paths:
+      - "site/**"
+      - ".github/workflows/pages.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Let a running deployment finish rather than cancelling it: a cancelled deploy
+# can leave the site on an earlier commit with nothing saying which.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+      - name: Setup Pages
+        uses: actions/configure-pages@v6
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@v5
+        with:
+          path: ./site
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v5
