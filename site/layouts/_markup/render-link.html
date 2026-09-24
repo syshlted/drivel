@@ -1,0 +1,36 @@
+{{- /*
+  Link rewriting for the manual pages built by content/docs/_content.gotmpl.
+
+  docs/user/*.md link to each other the way files in a directory do --
+  [lazy mode](lazy-mode.md) -- because they are written to be read on GitHub.
+  Rendered as a website those become hrefs to a .md file that is not published,
+  so every cross-reference in the manual would 404. Two cases, and the second is
+  the one that is easy to forget: a sibling page becomes its published URL, and
+  anything reaching outside docs/user (../dev/building.md, drivel.1) has no
+  published counterpart at all and goes to the repository instead.
+
+  Outside the docs section nothing is rewritten.
+*/ -}}
+{{- $dest := .Destination -}}
+{{- $repo := "https://github.com/syshlted/drivel/blob/master/" -}}
+
+{{- if and (eq .Page.Section "docs") (not (urls.Parse $dest).IsAbs) (not (hasPrefix $dest "#")) -}}
+  {{- $anchor := "" -}}
+  {{- $path := $dest -}}
+  {{- if strings.Contains $dest "#" -}}
+    {{- $parts := split $dest "#" -}}
+    {{- $path = index $parts 0 -}}
+    {{- $anchor = printf "#%s" (index $parts 1) -}}
+  {{- end -}}
+
+  {{- if and $path (findRE `^[A-Za-z0-9._-]+\.md$` $path) -}}
+    {{- $base := path.BaseName $path -}}
+    {{- $slug := cond (eq $base "README") "overview" $base -}}
+    {{- $dest = printf "%s%s" (relURL (printf "docs/%s/" $slug)) $anchor -}}
+  {{- else if $path -}}
+    {{- /* path.Join cleans the ".." out; a blob URL containing one 404s. */ -}}
+    {{- $dest = printf "%s%s%s" $repo (path.Join "docs/user" $path) $anchor -}}
+  {{- end -}}
+{{- end -}}
+
+<a href="{{ $dest }}"{{ with .Title }} title="{{ . }}"{{ end }}{{ if (urls.Parse $dest).IsAbs }} target="_blank" rel="noopener"{{ end }}>{{ .Text | safeHTML }}</a>

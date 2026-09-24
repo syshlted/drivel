@@ -1,0 +1,96 @@
+# Hugo configuration for the Drivel website.
+#
+# The site is built from this directory but deliberately reads the user manual
+# from ../docs/user rather than keeping a copy: docs/user is the published
+# collection and the single source of truth for how to use Drivel, and a second
+# copy here would be a second thing to update and a first thing to forget. See
+# the mount below, and content/docs/_content.gotmpl for how those files become
+# pages without needing front matter added to them.
+
+baseURL = "https://syshlted.github.io/drivel/"
+title = "Drivel"
+locale = "en-us"
+
+# Hextra ships as a Hugo module, which is why this directory has a go.mod of its
+# own. It is a separate module from the Go program at the repository root, so Go
+# tooling there ignores it entirely -- `go build ./...` and the linters never see
+# it.
+[module]
+  [[module.imports]]
+    path = "github.com/imfing/hextra"
+
+  # The site's own content.
+  [[module.mounts]]
+    source = "content"
+    target = "content"
+  [[module.mounts]]
+    source = "assets"
+    target = "assets"
+  [[module.mounts]]
+    source = "static"
+    target = "static"
+
+  # The manual, mounted as *assets* rather than as content. Mounting it straight
+  # into content/docs would work, but those files carry no front matter -- they
+  # open with an H1, because they are written to be read on GitHub first -- and
+  # Hugo would give every one of them an empty title. The content adapter in
+  # content/docs/ reads them from here and lifts the title out of that H1, so
+  # docs/user/*.md stay exactly as they are.
+  [[module.mounts]]
+    source = "../docs/user"
+    target = "assets/manual"
+
+# No [outputs] override here on purpose. Hextra builds its search index from an
+# asset (assets/json/search-data.json) rather than from a JSON output format,
+# and it registers output formats of its own; declaring outputs.home here
+# replaced that config and asked Hugo for a JSON home page the theme has no
+# layout for.
+
+[markup]
+  [markup.highlight]
+    noClasses = false
+  [markup.goldmark.renderer]
+    unsafe = true
+  [markup.tableOfContents]
+    startLevel = 2
+    endLevel = 3
+
+[params]
+  description = "Drivel turns a folder on a storage provider into an ordinary directory on your machine."
+
+  [params.navbar]
+    displayTitle = true
+    displayLogo = false
+
+  [params.theme]
+    default = "system"
+    displayToggle = true
+
+  [params.footer]
+    enable = true
+    displayCopyright = false
+    displayPoweredBy = false
+
+  [params.editURL]
+    enable = false
+
+[menu]
+  [[menu.main]]
+    name = "Docs"
+    pageRef = "/docs"
+    weight = 1
+  [[menu.main]]
+    name = "Blog"
+    pageRef = "/blog"
+    weight = 2
+  [[menu.main]]
+    name = "Search"
+    weight = 8
+    [menu.main.params]
+      type = "search"
+  [[menu.main]]
+    name = "GitHub"
+    url = "https://github.com/syshlted/drivel"
+    weight = 9
+    [menu.main.params]
+      icon = "github"

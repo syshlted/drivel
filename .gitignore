@@ -21,3 +21,9 @@ token.json
 # and swept straight into a commit by `git add -A`. Settings under .claude are
 # deliberately not ignored — those are shareable project config.
 /.claude/worktrees/
+
+# Hugo build output for the website in site/.
+/site/public/
+/site/resources/
+/site/.hugo_build.lock
+/site/_vendor/

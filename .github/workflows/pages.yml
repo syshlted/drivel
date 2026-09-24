@@ -3,27 +3,26 @@
 # The site lives here rather than in a repo of its own because a GitHub project
 # site's URL path *is* the repository name, with no aliasing and no redirect:
 # https://syshlted.github.io/drivel/ can only ever be served by syshlted/drivel.
-# The former separate site repo published at /drivel-github-site/ for exactly
-# that reason.
 #
-# Only site/ is uploaded, so nothing else in the tree becomes a published URL.
-# There is no build step and Jekyll never runs, so no .nojekyll file is needed.
+# Only site/public -- Hugo's build output -- is uploaded, so nothing else in the
+# tree becomes a published URL.
 #
-# Requires two settings on this repository, neither of which this file controls:
-# the repository must be public (Pages will not serve a private repo on the free
-# org plan), and Settings -> Pages -> Source must be "GitHub Actions".
+# Requires two settings on this repository that this file cannot control: the
+# repository must be public (Pages will not serve a private repo on the free org
+# plan), and Settings -> Pages -> Source must be "GitHub Actions".
 
 name: Pages
 
 on:
   push:
     branches: [master]
-    # The site is a small static tree that changes far less often than the code.
-    # Without this filter every commit to master would redeploy an identical
-    # site, which buys nothing and makes the deployment history useless as a
-    # record of when the site actually changed.
+    # docs/user is in this list because the site renders it: hugo.toml mounts it
+    # and content/docs/_content.gotmpl turns it into the manual, so a doc edit
+    # changes the site even though nothing under site/ was touched. Leaving it
+    # out would publish a manual that silently lagged the repository.
     paths:
       - "site/**"
+      - "docs/user/**"
       - ".github/workflows/pages.yml"
   workflow_dispatch:
 
@@ -38,21 +37,60 @@ concurrency:
   group: pages
   cancel-in-progress: false
 
+defaults:
+  run:
+    shell: bash
+
 jobs:
   deploy:
     runs-on: ubuntu-latest
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
+    env:
+      # Pinned rather than "latest" for the same reason the Go tools in the
+      # Makefile are: a site that builds today should build the same way next
+      # month, and a theme is a template language whose behaviour changes
+      # between Hugo releases. Extended is required -- Hextra needs Sass.
+      HUGO_VERSION: 0.161.1
     steps:
       - name: Checkout
         uses: actions/checkout@v6
+
+      # Hextra is a Hugo module, which Hugo fetches with the Go tooling.
+      - name: Setup Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Install Hugo
+        run: |
+          curl -sSLO "https://github.com/gohugoio/hugo/releases/download/v${HUGO_VERSION}/hugo_extended_${HUGO_VERSION}_linux-amd64.tar.gz"
+          mkdir -p "${HOME}/.local/hugo"
+          tar -C "${HOME}/.local/hugo" -xf "hugo_extended_${HUGO_VERSION}_linux-amd64.tar.gz"
+          echo "${HOME}/.local/hugo" >> "${GITHUB_PATH}"
+
       - name: Setup Pages
+        id: pages
         uses: actions/configure-pages@v6
+
+      - name: Build
+        working-directory: site
+        # --baseURL comes from the Pages API rather than being hardcoded, so a
+        # change to the repository name or a custom domain does not silently
+        # leave every absolute URL on the site pointing at the old one.
+        run: |
+          hugo build \
+            --gc \
+            --minify \
+            --baseURL "${{ steps.pages.outputs.base_url }}/"
+
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v5
         with:
-          path: ./site
+          path: ./site/public
+
       - name: Deploy to GitHub Pages
         id: deployment
         uses: actions/deploy-pages@v5

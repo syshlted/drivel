@@ -1,0 +1,49 @@
+{{/*
+  Builds the docs section from ../docs/user, which hugo.toml mounts at
+  assets/manual. Those files are written to be read on GitHub first, so they
+  carry no front matter and open with an H1 instead; this lifts the title out of
+  that H1 so nothing has to be added to them. Taking the H1 rather than
+  humanising the filename is what makes "SFTP" and "fstab" come out with the
+  casing their authors chose.
+
+  A file with no H1 falls back to its filename, and an unlisted file still gets
+  a page -- it just sorts last, which is a new doc appearing at the bottom of
+  the nav rather than not appearing at all.
+*/}}
+
+{{ $order := dict
+    "README"             1
+    "quickstart"         2
+    "install"            3
+    "google-cloud-setup" 4
+    "sftp"               5
+    "configuration"      6
+    "lazy-mode"          7
+    "data-safety"        8
+    "fstab"              9
+    "platforms"          10
+    "troubleshooting"    11
+}}
+
+{{ range resources.Match "manual/*.md" }}
+  {{ $base := path.BaseName .Name }}
+  {{ $raw := .Content }}
+
+  {{ $title := $base }}
+  {{ with findRE `(?m)^#[ \t]+(.+)$` $raw 1 }}
+    {{ $title = replaceRE `(?m)^#[ \t]+[ \t]*` "" (index . 0) }}
+    {{/* An H1 may carry inline code -- "Lazy mode (`-lazy`)" -- and a <title>
+         renders the backticks literally. */}}
+    {{ $title = replaceRE "`" "" $title }}
+  {{ end }}
+
+  {{ $slug := cond (eq $base "README") "overview" $base }}
+
+  {{ $.AddPage (dict
+      "path"    $slug
+      "title"   $title
+      "weight"  (index $order $base | default 99)
+      "params"  (dict "sourceFile" (printf "docs/user/%s.md" $base))
+      "content" (dict "mediaType" "text/markdown" "value" $raw)
+  ) }}
+{{ end }}
