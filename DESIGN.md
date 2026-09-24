@@ -3432,6 +3432,79 @@ this whole group walks through, so it is a precondition rather than a note.
     supply-chain target with a maintainer's weekend behind it — and it must not be
     a precondition for the client being useful.
 
+    **The registry is two systems and only one of them is on the install path.**
+    Both `registry.terraform.io/browse/providers` and `search.opentofu.org` are the
+    *catalogue*: descriptions, download counts, publisher tiers, rendered
+    documentation, full-text search. Terraform serves it from an undocumented `/v2`
+    JSON:API; OpenTofu serves it from a Cloudflare Worker over a Postgres index
+    built by a scraper that extracts docs and schemas out of every published
+    repository. Neither is consulted by `terraform init`. The *install* protocol
+    beside it is two unauthenticated GETs returning cacheable JSON, and that
+    asymmetry is the whole lesson: the catalogue is a service with a database, an
+    ingestion pipeline and an abuse policy, and it is **optional**. A drivel
+    registry that starts with search has started with the half that cannot be a
+    file tree.
+
+    **What Terraform's protocol actually is, since the recommendation rests on its
+    size.** A discovery document at `https://HOST/.well-known/terraform.json` maps
+    `providers.v1` to a base path; `GET <base>/:namespace/:type/versions` returns
+    every version with the protocol versions and platforms it supports; and `GET
+    <base>/:namespace/:type/:version/download/:os/:arch` returns one package —
+    `filename`, `download_url`, `shasum`, `shasums_url`, `shasums_signature_url`
+    and the publisher's `signing_keys`. That is the entire surface. Nothing is
+    authenticated, nothing is a POST, and no response contains a byte of the
+    artifact: `download_url` points at GitHub releases or `releases.hashicorp.com`.
+    OpenTofu implements the same two endpoints by **pre-generating every possible
+    response** as a static object in a Cloudflare R2 bucket behind a CDN, with no
+    API server anywhere — the existence proof that this shape is a file tree.
+
+    **Four deliberate divergences, each paid for by something drivel does not
+    have.**
+
+    - *No discovery indirection; take a base URL from configuration.* Terraform
+      needs `.well-known` because a provider is *addressed* by hostname in the
+      configuration (`example.com/bar/baz`), so a hostname has to resolve to a
+      path. drivel's config names a bare `kind`, and a registry is an install-time
+      concern only, so the URL belongs to `drivel plugin install` and its config
+      section rather than to the thing being addressed. This is not an invention:
+      Terraform's own *network mirror* protocol drops discovery and takes a base
+      URL directly, for this reason.
+    - *Every path ends in `.json`.* Terraform's `…/download/linux/amd64` carries no
+      extension, so the server has to supply `Content-Type` out of band —
+      comfortable on R2, awkward on GitHub Pages, impossible with `python3 -m
+      http.server`. Suffixing makes *any* static file server a conforming registry,
+      which turns the `testdata` fixture into the same code path as production
+      rather than a simulation of it. The layout is then
+      `<base>/v1/providers/<namespace>/<name>/index.json` for the versions document
+      and `<base>/v1/providers/<namespace>/<name>/<version>/<os>_<arch>.json` for
+      one package.
+    - *The digest is of the executable, not of the archive*, and this is where the
+      analogy breaks in drivel's favour. A Terraform provider is a zip of a
+      directory, which is why they carry two hash schemes — `zh:` over the
+      distributed zip and `h1:`, a Go-modules dirhash over the extracted contents,
+      so a provider installed from an unpacked filesystem mirror can still be
+      verified. A drivel plugin is one file, so a single `sha256` of the executable
+      is simultaneously the download check and the value go-plugin's `SecureConfig`
+      verifies before exec. Two different numbers there make the pinning
+      decoration: the thing checked is not the thing run. Compression becomes a
+      transport detail, and a digest over the compressed artifact is at most a
+      convenience.
+    - *`protocol` is one number, and it is a filter rather than a display field.*
+      §2.10's versioning rule gives drivel a single `plugin.ProtocolVersion`, so the
+      versions document carries `"protocol": 1` where Terraform carries `["4.0",
+      "5.1"]`. "No version solver" still means selection takes the newest version
+      *whose protocol this host speaks*, not simply the newest. Skipping that makes
+      `install` succeed and the mount refuse its handshake at boot, which moves a
+      resolvable error to the least recoverable place there is.
+
+    **Take OpenTofu's one extension: every platform in one response.** Their
+    download document carries a `packages` map keyed `linux_amd64`, `darwin_arm64`,
+    … each with that platform's hashes and size. Terraform makes a client issue one
+    request per platform (`terraform providers lock -platform=…`) to record a lock
+    file that works on more than the machine that wrote it. drivel acquires the same
+    need the moment an install manifest is committed to a repository or baked into
+    an image for a fleet of mixed architectures, and it costs one field.
+
     **The central design tension is that M9 made the filename the kind.** §2.10's
     rule 4 is deliberate: the kind is the `drivel-provider-<kind>` filename and
     nothing the plugin says about itself. A registry needs a globally unique name,
@@ -3467,6 +3540,51 @@ this whole group walks through, so it is a precondition rather than a note.
     it exists to provide. Wherever drivel anchors that key, it must not be the
     registry.
 
+    **What their verification does, and why it is circular for everyone but
+    HashiCorp.** The client downloads the artifact, fetches `SHA256SUMS`, fetches
+    `SHA256SUMS.sig`, verifies that signature **with the public key the registry
+    handed it in the same response**, then checks the artifact against the
+    now-trusted sums file. For HashiCorp's own providers the key is pinned in the
+    Terraform binary and the chain is anchored outside the registry; for a
+    third-party provider the registry supplies both the signature and the key that
+    validates it, so compromising the registry compromises both halves. The
+    `trust_signature` field exists to break that circle and is in practice empty.
+    OpenTofu's anchor is that the publisher opened a GitHub issue from an account
+    with public membership of the organisation — worth recording as the *pattern*
+    (an anchor outside the registry) rather than as the mechanism.
+
+    **Their defence that works is downstream, and it is the one to copy.**
+    `.terraform.lock.hcl` records the hashes observed at first install, and every
+    later install is checked against the file in the user's repository — trust on
+    first use with a durable record, in a file a human reviews in a diff. drivel's
+    version is an **install manifest beside the binary** recording `acme/s3`, the
+    version, the source registry and the executable's `sha256`, re-checked before
+    every exec through `SecureConfig`. It needs no cryptography beyond a hash; it is
+    the same record the naming rule above needs in order to *name the incumbent* in
+    a collision refusal; and it can ship before any signature scheme exists, which
+    is what makes the signature question deferrable rather than blocking.
+
+    **If signatures come later, the registry may carry the signature and must never
+    carry the key.** The key is named in drivel's own configuration or compiled into
+    the binary, and the response carries a `signature_url` at most. Prefer
+    minisign/signify or `ssh-keygen -Y` over GPG: the payload is a detached
+    signature over thirty-two bytes, and GPG brings a keyring, key rotation and
+    revocation semantics that Terraform's registry has had to grow a whole surface
+    to administer.
+
+    **Digest pinning assumes a published version is immutable, so put that in the
+    protocol rather than discovering it.** OpenTofu needed a written immutability
+    policy and a `versions_blacklist.json` to hold the line against authors
+    retagging releases. A registry where `1.2.0` can change bytes turns every
+    recorded digest into a false alarm and trains users to delete the manifest,
+    which is the one outcome worse than never having written it.
+
+    **What operating a private one costs is the test of whether the shape is
+    right**: `aws s3 sync ./registry s3://bucket`, a GitHub Pages repository, or
+    `nginx` over a directory. That falls out of the base URL and the `.json`
+    suffixes for free, and it is the entire air-gapped story. Any later change to this protocol that breaks it is
+    wrong, whatever else it buys.
+
     **It depends on M23's one real decision in a way that could kill it.** M23
     recommends that embedded plugins *replace* the search path, with external ones
     behind an explicit flag. An installed plugin is an external plugin: it lands in
@@ -3480,7 +3598,7 @@ this whole group walks through, so it is a precondition rather than a note.
 
     **The licence question this entry carried is answered, and the answer came from
     relicensing rather than from resolving it.** Under AGPLv3 a plugin importing
-    `github.com/zishmusic/drivel/provider` plausibly had to be AGPL itself, while one
+    `github.com/syshlted/drivel/provider` plausibly had to be AGPL itself, while one
     speaking only protobuf was the §2.9.2 arms-length case — two routes to the same
     seam with different answers, which is intolerable for a registry that hosts what
     other people wrote. MPL-2.0 dissolves it: the copyleft reaches Drivel's own files
@@ -3493,7 +3611,10 @@ this whole group walks through, so it is a precondition rather than a note.
     **Unsettled, in the order that matters.** The M23 dependency, because it decides
     whether there is anything to install at all. Then the naming decision above,
     because it decides the config file's syntax and so becomes a breaking change if
-    deferred. Then the trust anchor. Then whether this protocol should also carry
+    deferred. Then the trust anchor, now narrowed rather than open: the install
+    manifest above is the recommendation and needs no decision to ship, so what is
+    left is only whether signatures are in scope at all and, if they are, where the
+    key lives. Then whether this protocol should also carry
     the CLI/completion manifest a host needs to describe a plugin's settings — and
     the answer is no: that manifest describes the plugin **you have installed**, has
     to work with no network, and is derived from the executable itself, so it

@@ -401,7 +401,23 @@ registry protocol is implementable by a static file tree over plain HTTPS, which
 what makes private and air-gapped ones work, so `drivel plugin install acme/s3` is
 testable against `testdata` long before anyone operates a server — and operating one
 is a supply-chain target with an abuse policy attached, not a coding task. It serves
-metadata and URLs, never bytes. Four things decide it and are in DESIGN.md §9/M24.
+metadata and URLs, never bytes. **The catalogue and the install protocol are two
+systems and only one is on the install path** — Terraform's `/browse/providers` and
+`search.opentofu.org` are search UIs over a database and a scraper (OpenTofu's is a
+Cloudflare Worker over Postgres), and `terraform init` never touches them; the
+install protocol beside them is two unauthenticated GETs returning cacheable JSON,
+which OpenTofu serves by pre-generating every possible response into
+an R2 bucket with **no API server at all**. Build that half — the catalogue is
+optional and is where the operating cost lives. **Four divergences from Terraform's
+version are decided**: no `.well-known` indirection, a base URL from config as
+Terraform's own *network mirror* protocol does, because drivel's config names a bare
+`kind` and never a hostname; every path ends in `.json`, so `python3 -m http.server`
+over `testdata` is a conforming registry; **the digest is of the executable**, not of
+an archive, because that is the number `SecureConfig` checks before exec and two
+different numbers make the pinning decoration; and `protocol` is one number used as a
+*filter* — selection takes the newest version whose protocol this host speaks, or
+`install` succeeds and the handshake fails at boot. Four more things decide the rest
+and are in DESIGN.md §9/M24.
 **M9 made the filename the kind**, so a namespaced registry name (`acme/s3`) and a
 bare local kind (`s3`) need an explicit mapping plus a collision *refused at install
 time naming both* — never a resolution rule, because first-on-the-path-wins is
@@ -410,7 +426,14 @@ version solver** — one provider per mount, no dependencies between plugins, so
 exact version or the newest, and record what you got. **Checksum pinning stops being
 optional** (go-plugin's `SecureConfig`), reversing M23's "moot" note, and the trust
 anchor must *not* be the registry itself — that is the one part of Terraform's design
-not to copy. And **it is a consumer of M23's external-plugin flag**: an installed
+not to copy, and it is circular for everyone but HashiCorp, whose key is pinned in
+the binary. What works over there is `.terraform.lock.hcl`; drivel's version is an
+**install manifest beside the binary** recording name, version, source registry and
+the executable's `sha256` — trust-on-first-use with a durable record, no cryptography
+beyond a hash, shippable before any signature scheme exists, and the same record a
+collision refusal needs in order to name the incumbent. If signatures land later the
+registry may carry the signature and never the key. And **it is a consumer of M23's
+external-plugin flag**: an installed
 plugin lives in the very search path M23 proposes to retire, so if embedded-only ever
 wins, M24 has no install target and is withdrawn rather than reconciled. **The
 licence question is answered and was dissolved rather than resolved**: under MPL-2.0
