@@ -10,10 +10,10 @@
 
 min_version: 1.10.0
 
-# Sourced by the generated hook scripts before lefthook runs. `make hooks` writes
-# it, pointing LEFTHOOK_BIN at the pinned binary in bin/. Without it the hook
-# searches PATH, node_modules, bundler, yarn... and when it finds nothing it
-# prints "Can't find lefthook in PATH" and exits 0 — a hook that silently passes.
+# Sourced by the generated hook scripts before lefthook runs. It is checked in,
+# not generated, and it exists to fail loudly: the hook's own search ends by
+# printing "Can't find lefthook in PATH" and exiting 0 — a hook that silently
+# passes. lefthook itself comes from the OS package manager; nothing builds it.
 #
 # The leading ./ is required, not cosmetic: sh's `.` builtin searches PATH when
 # its argument contains no slash, so a bare filename is never found in dash.

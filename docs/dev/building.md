@@ -170,10 +170,9 @@ Three things move together, and the Makefile enforces the first:
 3. **`make vuln`**, which is usually the reason to upgrade in the first place:
    most of what it reports is stdlib, and a toolchain bump clears it in one move.
 
-The one exception to (1) is `lefthook`, whose build toolchain is pinned
-separately (`LEFTHOOK_GOTOOLCHAIN`) because it does not compile on Go 1.27. That
-pin is safe precisely because lefthook never parses Go source — it only shells
-out to make targets. Drop it when a lefthook release builds on current Go.
+`lefthook` is not in `bin/` and is not one of these: it comes from the OS
+package manager (see [git hooks](#git-hooks)), so a toolchain bump has nothing to
+do with it.
 
 ## Lint
 
@@ -207,16 +206,21 @@ make lint-new MAIN_BRANCH=origin/master
 ## Git hooks
 
 ```sh
-make hooks     # once per clone, and again after bumping a tool version
+make hooks     # once per clone
 ```
 
-`make hooks` also writes `.lefthook-rc.sh` (gitignored), which points
-`LEFTHOOK_BIN` at the pinned binary in `bin/`. It is not optional: without it the
-generated hook searches PATH, `node_modules`, bundler and half a dozen other
-package managers, and when it finds none of them it prints "Can't find lefthook
-in PATH" and **exits 0** — a hook that silently passes.
+Installs [lefthook](https://lefthook.dev)'s hooks from
+[lefthook.yml](../../lefthook.yml). **lefthook itself comes from your OS package
+manager** — `make tools` does not build it, and `make hooks` fails with an
+install pointer rather than fetching one. It is a hook runner rather than a
+source-processing tool, so no gate depends on its version and there is nothing
+to keep in step with the Go toolchain.
 
-Installs [lefthook](https://lefthook.dev) from [lefthook.yml](../../lefthook.yml).
+[`.lefthook-rc.sh`](../../.lefthook-rc.sh) is checked in and sourced by the
+generated hook scripts, and it is not optional: lefthook's own search covers
+PATH, `node_modules`, bundler and half a dozen other package managers, and when
+it finds none of them it prints "Can't find lefthook in PATH" and **exits 0** —
+a hook that silently passes. The rc script makes that case a failure instead.
 Split by cost, deliberately: **pre-commit** stays under a few seconds
 (`fmt-check`, `vet`, `build`) because a hook slow enough to be annoying gets
 bypassed with `--no-verify`, and a hook everyone bypasses is worse than no hook —

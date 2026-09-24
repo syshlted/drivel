@@ -208,6 +208,6 @@ standard library, and a toolchain bump clears it in one move — see [Building �
 upgrading the Go toolchain](building.md#upgrading-the-go-toolchain).
 
 The tool binaries in `bin/` are stamped with the Go version that built them and
-rebuild automatically when the toolchain changes. `lefthook` is the one exception,
-pinned separately, and that pin is safe only because lefthook never parses Go
-source — it shells out to make targets.
+rebuild automatically when the toolchain changes. `lefthook` is not among them:
+it is a hook runner that only shells out to make targets, so it comes from the OS
+package manager and no gate depends on its version.

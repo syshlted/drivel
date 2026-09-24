@@ -10,7 +10,6 @@ BIN   := $(CURDIR)/bin
 # Pinned tool versions. Bump here; local hooks and CI follow automatically.
 GOLANGCI_LINT_VERSION ?= v2.13.2
 GOVULNCHECK_VERSION   ?= v1.7.0
-LEFTHOOK_VERSION      ?= v1.13.6
 
 # The plugin protocol's codegen (M9). All three are pure Go and install with `go
 # install`, so regenerating needs no protoc and no C++ toolchain — buf is the
@@ -21,15 +20,11 @@ BUF_VERSION                ?= v1.58.0
 PROTOC_GEN_GO_VERSION      ?= v1.36.11
 PROTOC_GEN_GO_GRPC_VERSION ?= v1.6.0
 
-# lefthook v1.13.6 does not compile under Go 1.27: its go-json-experiment
-# dependency aliases stdlib symbols that encoding/json/v2 renamed. Pinning the
-# toolchain that builds it is safe in a way it would not be for the linters —
-# lefthook only shells out to make targets, it never parses Go source. Remove
-# this pin once a lefthook release builds on the current toolchain.
-LEFTHOOK_GOTOOLCHAIN  ?= go1.26.1
-
 # Branch that lint-new measures "new" against.
 MAIN_BRANCH ?= master
+
+# The CI workflow, read by gates-check so the two lists can be compared.
+CI_WORKFLOW ?= .github/workflows/ci.yml
 
 # Install locations. SBINDIR is not under PREFIX by default: mount(8) looks for a
 # helper in /sbin and /usr/sbin only, so a helper in /usr/local/sbin is a helper
@@ -60,7 +55,6 @@ GOVERSION := $(shell go env GOVERSION)
 
 GOLANGCI_LINT := $(BIN)/golangci-lint-$(GOLANGCI_LINT_VERSION)-$(GOVERSION)
 GOVULNCHECK   := $(BIN)/govulncheck-$(GOVULNCHECK_VERSION)-$(GOVERSION)
-LEFTHOOK      := $(BIN)/lefthook-$(LEFTHOOK_VERSION)-$(LEFTHOOK_GOTOOLCHAIN)
 BUF           := $(BIN)/buf-$(BUF_VERSION)-$(GOVERSION)
 
 # buf runs the two generators as `protoc-gen-go` and `protoc-gen-go-grpc` from
@@ -348,13 +342,46 @@ vuln: $(GOVULNCHECK)
 tidy-check:
 	go mod tidy -diff
 
+# The file header promises that the hooks and CI invoke these targets rather
+# than restating the commands, so the two cannot drift. Nothing enforced the
+# other half of that: a gate added to one side and not the other drifts exactly
+# as badly as a restated command would, and silently — which is how
+# license-check came to run locally and never in CI.
+#
+# Both sides are read from their source of truth: CHECK_GATES below, and the
+# workflow's own `- run: make X` lines. A gate invoked from a multi-line run
+# block is invisible here; keep the one-line form.
+## gates-check: fail if `make check` and the CI workflow run different gates
+.PHONY: gates-check
+gates-check:
+	@ci="$$(grep -oE '^[[:space:]]*- run: make [a-z][a-z-]*' $(CI_WORKFLOW) | sed 's/.*make //' | sort -u)"; \
+	drift=; \
+	for g in $(CHECK_GATES); do \
+		printf '%s\n' "$$ci" | grep -qx "$$g" || drift="$$drift\n  $$g: in 'make check', never run by CI"; \
+	done; \
+	for g in $$ci; do \
+		case " $(CHECK_GATES) " in \
+		*" $$g "*) ;; \
+		*) drift="$$drift\n  $$g: run by CI, absent from 'make check'" ;; \
+		esac; \
+	done; \
+	if [ -n "$$drift" ]; then \
+		echo "make check and $(CI_WORKFLOW) disagree about the gates:"; \
+		printf '%b\n' "$$drift"; \
+		exit 1; \
+	fi
+
 # ----------------------------------------------------------------- aggregates
 
 #> make precommit                   # the fast gate, before committing
 #> make check                       # everything CI runs, in CI's order
+# In CI's order, and gates-check keeps that true.
+CHECK_GATES = tidy-check fmt-check vet build proto-check license-check gates-check \
+              lint test-full vuln
+
 ## check: everything CI runs, in CI's order
 .PHONY: check
-check: tidy-check fmt-check proto-check license-check lint test-full vuln
+check: $(CHECK_GATES)
 
 ## precommit: the fast gate the pre-commit hook runs
 .PHONY: precommit
@@ -366,13 +393,20 @@ precommit: fmt-check license-check lint build
 #> make clean tools                 # reinstall the tools after a version bump
 ## tools: install the pinned tool binaries into bin/
 .PHONY: tools
-tools: $(GOLANGCI_LINT) $(GOVULNCHECK) $(LEFTHOOK) $(BUF) $(PROTOC_GEN_GO) $(PROTOC_GEN_GO_GRPC)
+tools: $(GOLANGCI_LINT) $(GOVULNCHECK) $(BUF) $(PROTOC_GEN_GO) $(PROTOC_GEN_GO_GRPC)
 
-## hooks: install the git hooks (run once per clone, and after a version bump)
+# lefthook is the one tool this repo does not build: it is a hook runner rather
+# than a source-processing tool, so nothing about a gate depends on its version,
+# and an OS package is one fewer thing to keep in step with the toolchain.
+## hooks: install the git hooks (run once per clone)
 .PHONY: hooks
-hooks: $(LEFTHOOK)
-	@printf 'export LEFTHOOK_BIN=%s\n' '$(LEFTHOOK)' > .lefthook-rc.sh
-	$(LEFTHOOK) install
+hooks:
+	@command -v lefthook >/dev/null 2>&1 || { \
+		echo "lefthook not found on PATH — install it from your OS package manager"; \
+		echo "(https://lefthook.dev/installation/), then re-run: make hooks"; \
+		exit 1; \
+	}
+	lefthook install
 
 $(GOLANGCI_LINT):
 	@mkdir -p $(BIN)
@@ -383,11 +417,6 @@ $(GOVULNCHECK):
 	@mkdir -p $(BIN)
 	GOBIN=$(BIN) go install golang.org/x/vuln/cmd/govulncheck@$(GOVULNCHECK_VERSION)
 	@mv $(BIN)/govulncheck $@
-
-$(LEFTHOOK):
-	@mkdir -p $(BIN)
-	GOTOOLCHAIN=$(LEFTHOOK_GOTOOLCHAIN) GOBIN=$(BIN) go install github.com/evilmartians/lefthook@$(LEFTHOOK_VERSION)
-	@mv $(BIN)/lefthook $@
 
 $(BUF):
 	@mkdir -p $(BIN)
