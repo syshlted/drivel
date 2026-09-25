@@ -138,3 +138,38 @@ The animal has been at this long enough to have learned some things the hard way
   drawing has said the opposite of what the program does.
 - **The den is optional but excellent background**: a tidy, almost fussy stash of
   bones, all of them intact, none of them chewed.
+
+## The files
+
+`contrib/` holds the drawing as delivered: `Drivel_Logo_1.0.jpg` is the whole
+piece at 1408×768, `-Cropped_1.jpg` a portrait crop of it, and
+`-cropped_1.txt` a braille-art rendition of that crop. All three are JPEG or
+text on a white background, with no transparency anywhere.
+
+The website's copies are derived from the first of those and committed
+separately, because Hugo can resize an image but cannot cut a background out of
+one:
+
+- `site/assets/images/drivel-logo.png` — the whole piece with the backdrop
+  removed and the artwork's white keyline rebuilt at an even weight. **One file
+  serves both themes**: on a light page the keyline is invisible and the animal
+  is simply cut out, on a dark one the same keyline reads as the sticker edge
+  it was drawn as. It is an *asset* rather than a file under `static/` so that
+  `layouts/_shortcodes/hero-logo.html` can serve WebP at two widths instead of
+  a megabyte and a half of PNG.
+- `site/static/images/drivel-mark.png` — the middle head, square, for the
+  navbar, where it is shown at 28px. Static rather than an asset because
+  Hextra's navbar partial takes a URL and not a resource.
+
+Whoever regenerates these after a redraw should know that **removing the
+background is not a brightness threshold**, and that every part of the joke is
+what breaks if it is treated as one. The drool is pale, the teeth are white,
+and the ground shadow under the feet is a lavender wash — delete the light
+pixels and the animal stops drooling. What works instead is the backdrop's
+*connectivity* together with its hue: it is neutral or magenta-side, where
+every drool colour in the piece is blue, green or yellow. Two things do not
+follow from connectivity alone and have to be handled on their own: the
+backdrop trapped between two drips touches no edge of the frame, so it needs
+seeding separately, and the source is a JPEG, so a scattering of single pixels
+sit just off pure white and survive as flecks unless they are swept up
+afterwards.

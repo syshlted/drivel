@@ -2,6 +2,10 @@
 layout: hextra-home
 ---
 
+<div style="margin:0 0 2rem;">
+{{< hero-logo >}}
+</div>
+
 {{< hextra/hero-headline >}}
   Your remote storage,&nbsp;<br class="sm:hx-block hx-hidden" />as an ordinary folder
 {{< /hextra/hero-headline >}}

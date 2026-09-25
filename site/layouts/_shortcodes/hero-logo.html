@@ -1,0 +1,36 @@
+{{- /*
+  The mascot, at the top of the landing page.
+
+  The artwork is a 1282px PNG with an alpha channel, which is far too heavy to
+  serve as it stands, so it is an *asset* rather than a file under static/ and
+  Hugo resizes it here: one image at the width it is displayed and one at twice
+  that for a high-density screen, both WebP. The master stays lossless and the
+  page carries neither of its megabytes.
+
+  Styling is inline on purpose. Hextra ships a precompiled Tailwind sheet that
+  contains only the utilities its own templates use, so an `hx:`-prefixed class
+  invented here may simply not exist in the CSS -- silently, and only on the one
+  page nobody diffs.
+
+  @param {int} width Displayed width in px. Default 560.
+
+  @example {{< hero-logo >}}
+*/ -}}
+
+{{- $src := resources.Get "images/drivel-logo.png" -}}
+{{- if not $src -}}
+  {{- errorf "hero-logo: assets/images/drivel-logo.png not found" -}}
+{{- end -}}
+
+{{- $width := int (.Get "width" | default 480) -}}
+{{- $x1 := $src.Resize (printf "%dx webp q82" $width) -}}
+{{- $x2 := $src.Resize (printf "%dx webp q72" (mul $width 2)) -}}
+
+<img
+  src="{{ $x1.RelPermalink }}"
+  srcset="{{ $x1.RelPermalink }} 1x, {{ $x2.RelPermalink }} 2x"
+  width="{{ $x1.Width }}"
+  height="{{ $x1.Height }}"
+  alt="Drivel's mascot: a striped hyena carrying a crowd of heads on one body, every one of them drooling."
+  style="display:block;width:100%;max-width:{{ $width }}px;height:auto;"
+/>

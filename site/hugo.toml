@@ -60,7 +60,16 @@ locale = "en-us"
 
   [params.navbar]
     displayTitle = true
-    displayLogo = false
+    displayLogo = true
+
+    # One file for both themes: the PNG has an alpha channel and the artwork's
+    # own white keyline around the edge, so it reads as a cut-out on a light
+    # page and as a sticker on a dark one. Hextra falls back to `path` when no
+    # `dark` is given, so there is deliberately no second image to keep in step.
+    [params.navbar.logo]
+      path = "images/drivel-mark.png"
+      width = 28
+      height = 28
 
   [params.theme]
     default = "system"
