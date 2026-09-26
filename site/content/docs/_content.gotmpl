@@ -37,6 +37,20 @@
     {{ $title = replaceRE "`" "" $title }}
   {{ end }}
 
+  {{/* Hextra's docs layout prints the page title as an H1 of its own, so a
+       file that opens with one -- which every file here does, being written for
+       GitHub -- rendered its heading twice on the page and gave it two H1
+       elements. Drop the opening heading and keep the title lifted from it.
+
+       Anchored to the very start (\A) rather than matched anywhere, so this
+       removes the heading it took the title from and never some later one. A
+       file whose H1 is not the first thing in it keeps both, which is visible
+       and fixable, where silently eating a mid-document heading would not be. */}}
+  {{ $body := $raw }}
+  {{ with findRE `\A#[ \t]+[^\n]*\n?` $raw 1 }}
+    {{ $body = strings.TrimLeft "\n" (strings.TrimPrefix (index . 0) $raw) }}
+  {{ end }}
+
   {{ $slug := cond (eq $base "README") "overview" $base }}
 
   {{ $.AddPage (dict
@@ -44,6 +58,6 @@
       "title"   $title
       "weight"  (index $order $base | default 99)
       "params"  (dict "sourceFile" (printf "docs/user/%s.md" $base))
-      "content" (dict "mediaType" "text/markdown" "value" $raw)
+      "content" (dict "mediaType" "text/markdown" "value" $body)
   ) }}
 {{ end }}
