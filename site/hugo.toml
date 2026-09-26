@@ -58,6 +58,12 @@ locale = "en-us"
 [params]
   description = "Drivel turns a folder on a storage provider into an ordinary directory on your machine."
 
+  # og:image, for every page that does not set its own. The card is generated
+  # from the artwork by contrib/gen-site-images.go -- and it is the one image
+  # here that is a JPEG, because a link preview fetches it before anyone has
+  # decided to visit and PNG spends three quarters of a megabyte on a painting.
+  images = ["images/drivel-social.jpg"]
+
   [params.navbar]
     displayTitle = true
     displayLogo = true

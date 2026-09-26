@@ -1,0 +1,22 @@
+{{- /*
+  Overrides Hextra's favicons.html, which points at the icons the theme ships.
+  Those are Hextra's own mark, so without this the browser tab of a site about
+  Drivel shows somebody else's logo -- the one place a missing asset is visible
+  on every page and mentioned in none.
+
+  The icons themselves are generated from the artwork by
+  contrib/gen-site-images.go and committed under static/, which is where they
+  have to be: a browser asks for /favicon.ico on its own, without reading any of
+  these tags, so that one file cannot live in the asset pipeline.
+
+  Hextra's SVG line is deliberately gone rather than reproduced. The mascot is a
+  painting and there is no vector of it, so the only honest choices were a
+  raster wrapped in an <svg> or no SVG at all. The theme's favicon.js only swaps
+  the SVG when a favicon-dark.svg exists, and none does, so nothing else depends
+  on it.
+*/ -}}
+<link rel="icon shortcut" href="{{ "favicon.ico" | relURL }}" sizes="32x32" />
+<link rel="icon" href="{{ "favicon-16x16.png" | relURL }}" type="image/png" sizes="16x16" />
+<link rel="icon" href="{{ "favicon-32x32.png" | relURL }}" type="image/png" sizes="32x32" />
+<link rel="apple-touch-icon" href="{{ "apple-touch-icon.png" | relURL }}" sizes="180x180" />
+<link fetchpriority="low" href="{{ "site.webmanifest" | relURL }}" rel="manifest" />

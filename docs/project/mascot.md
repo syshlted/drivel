@@ -161,6 +161,37 @@ one:
   navbar, where it is shown at 28px. Static rather than an asset because
   Hextra's navbar partial takes a URL and not a resource.
 
+Everything *else* the site shows is derived from those two by
+`contrib/gen-site-images.go`, which is one command and no judgement:
+
+```sh
+go run contrib/gen-site-images.go
+```
+
+It cuts the tab and home-screen icons out of `drivel-logo.png` at one stated
+rectangle — the big central head, ears and grin whole — builds the 1200×630
+`og:image` card, decodes the braille rendition into the page backdrop, and
+inlines that backdrop into `site/assets/css/custom.css` as a data URI. Three
+things about it are worth knowing before changing any of them.
+
+**The crop is a constant in the source, not a search.** Which head, and how much
+air around it, is a composition decision; the ears are what keep the silhouette
+legible at 16px, which is the size this brief asks the drawing to survive.
+
+**The braille file is not converted, it is decoded.** Every U+28xx codepoint
+*is* a 2×4 grid of dots, so the 70×47 cells are a 140×188 one-bit bitmap
+exactly — no threshold, nothing to tune. The one thing that is not obvious is
+which way round it goes, and that was settled by measurement rather than taste:
+correlated against the source JPEG, a set dot sits at mean luminance 162 and a
+clear one at 64, so **the dots are the white paper and the animal is the gaps.**
+Painting the dots gives you a photographic negative that only looks right on a
+dark page.
+
+**It does not cut the backdrop out of the artwork, and should not learn to.**
+That is the judgement call described above, with all its exceptions;
+`drivel-logo.png` stays a committed hand-made master that this program only
+reads.
+
 Whoever regenerates these after a redraw should know that **removing the
 background is not a brightness threshold**, and that every part of the joke is
 what breaks if it is treated as one. The drool is pale, the teeth are white,
