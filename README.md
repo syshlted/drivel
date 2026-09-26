@@ -2,6 +2,14 @@
 
 **Your remote storage, as an ordinary folder.**
 
+> [!CAUTION]
+> **Drivel is a work in progress. Do not use it for anything you cannot afford
+> to lose.** It is unfinished and under-tested, and it **will probably lose
+> data** for somebody before it stops being either. Keep backups, make them
+> often, and check that you can restore from them.
+>
+> [What this means, and what has actually been run](docs/user/status.md)
+
 Drivel turns a folder on a storage provider into an ordinary directory on
 your machine. Open, edit and save files with the tools you already use — Drivel
 proxies every operation to a real local directory and syncs it with the provider

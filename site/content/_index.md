@@ -20,6 +20,15 @@ layout: hextra-home
 {{< hextra/hero-button text="Get started" link="docs/quickstart" >}}
 </div>
 
+> [!CAUTION]
+> **Drivel is a work in progress. Do not use it for anything you cannot afford
+> to lose.** It is unfinished and under-tested, and it **will probably lose
+> data** for somebody before it stops being either. Keep backups, make them
+> often, and check that you can restore from them.
+>
+> [Project status](docs/status/) — why, what has actually been run, and the
+> sharp edges that are known and not yet fixed.
+
 {{< hextra/feature-grid >}}
   {{< hextra/feature-card
     title="Instant reads"

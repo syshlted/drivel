@@ -26,12 +26,17 @@
 
   --drivel-backdrop-ink: #2f2a24;
   --drivel-backdrop-opacity: 0.05;
+
+  --drivel-warn: #9f1239;
+  --drivel-warn-ink: #ffffff;
 }
 
 html.dark,
 body.dark {
   --drivel-backdrop-ink: #efe7d9;
   --drivel-backdrop-opacity: 0.06;
+
+  --drivel-warn: #f43f5e;
 }
 
 /*
@@ -86,4 +91,35 @@ body::before {
   body::before {
     display: none;
   }
+}
+
+/*
+ * The work-in-progress warning.
+ *
+ * A strip that layouts/_partials/banner.html puts at the top of every page. It
+ * is deliberately not dismissible: a reader who has closed the warning and then
+ * loses a directory has been told nothing.
+ *
+ * There is no block variant here on purpose. The pages that open with the
+ * warning write it as a markdown alert -- `> [!CAUTION]` -- which GitHub and
+ * Hextra both style already, and which therefore works in the manual whether it
+ * is read here or in the repository.
+ */
+.drivel-warning {
+  background: var(--drivel-warn);
+  color: var(--drivel-warn-ink);
+  padding: 0.7rem 1.25rem;
+  text-align: center;
+  font-size: 0.875rem;
+  line-height: 1.55;
+}
+
+.drivel-warning a {
+  color: var(--drivel-warn-ink);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.drivel-warning strong {
+  font-weight: 700;
 }

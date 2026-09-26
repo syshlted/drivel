@@ -6,13 +6,24 @@ provider that syncs in the background. Reads never touch the network. Uploads an
 downloads happen off to the side. Two backends ship today: **Google Drive** and
 **SFTP** — any server you have an SSH account on.
 
+> [!CAUTION]
+> **Drivel is a work in progress. Do not use it for anything you cannot afford
+> to lose.** It is unfinished and under-tested, and it **will probably lose
+> data** for somebody before it stops being either. Keep backups, make them
+> often, and check that you can restore from them.
+>
+> [Project status](status.md) is the whole statement: why, what has actually
+> been run, and the sharp edges that are known and not yet fixed.
+
 Start here:
 
-1. **[Quickstart](quickstart.md)** — install, log in, mount. About ten minutes,
+1. **[Project status](status.md)** — read this before you point Drivel at
+   anything you care about.
+2. **[Quickstart](quickstart.md)** — install, log in, mount. About ten minutes,
    most of it waiting on Google.
-2. **[Installing](install.md)** — the longer version: building from source, the
+3. **[Installing](install.md)** — the longer version: building from source, the
    FUSE helper, shell completions, the man page, and how to uninstall.
-3. **Credentials for your backend** — Drivel ships none of its own. For Google
+4. **Credentials for your backend** — Drivel ships none of its own. For Google
    Drive you create your own OAuth client, which is one-time and free:
    **[Google Cloud setup](google-cloud-setup.md)**. For **[SFTP](sftp.md)** you
    already have them — it is your SSH key.
@@ -26,7 +37,8 @@ Then, as you need them:
 - **[Lazy mode](lazy-mode.md)** — make a whole remote tree visible without downloading
   it, and the filesystem requirement that makes that safe.
 - **[Data safety](data-safety.md)** — what happens when two machines edit the same
-  file, when Drivel will delete something, and when it refuses to.
+  file, when Drivel will delete something, and when it refuses to. The rules;
+  [project status](status.md) is how much they have been exercised.
 - **[Troubleshooting](troubleshooting.md)** — the errors you are most likely to
   hit, and what each one means.
 - **[Platform support](platforms.md)** — Linux, macOS, FreeBSD; what is verified

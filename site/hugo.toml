@@ -64,6 +64,17 @@ locale = "en-us"
   # decided to visit and PNG spends three quarters of a megabyte on a painting.
   images = ["images/drivel-social.jpg"]
 
+  # The work-in-progress warning, rendered at the top of every page by
+  # layouts/_partials/banner.html. This is the site's only copy of these words;
+  # the full statement is docs/user/status.md, which the link points at.
+  #
+  # Deleting this block removes the warning from the whole site, which is what
+  # should happen on the day it stops being true -- and not before.
+  [params.banner]
+    message = "**Work in progress — do not trust Drivel with your only copy.** It is unfinished, under-tested, and **may lose data**. Keep backups you have checked."
+    link = "docs/status/"
+    linkText = "What this means →"
+
   [params.navbar]
     displayTitle = true
     displayLogo = true

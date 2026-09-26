@@ -13,16 +13,17 @@
 
 {{ $order := dict
     "README"             1
-    "quickstart"         2
-    "install"            3
-    "google-cloud-setup" 4
-    "sftp"               5
-    "configuration"      6
-    "lazy-mode"          7
-    "data-safety"        8
-    "fstab"              9
-    "platforms"          10
-    "troubleshooting"    11
+    "status"             2
+    "quickstart"         3
+    "install"            4
+    "google-cloud-setup" 5
+    "sftp"               6
+    "configuration"      7
+    "lazy-mode"          8
+    "data-safety"        9
+    "fstab"              10
+    "platforms"          11
+    "troubleshooting"    12
 }}
 
 {{ range resources.Match "manual/*.md" }}

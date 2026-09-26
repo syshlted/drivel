@@ -3,12 +3,34 @@
 What has changed in Drivel, in plain terms. The long-form reasoning behind each
 decision lives in the repo's design notes; this file is the summary.
 
+> [!CAUTION]
+> **Drivel is a work in progress and may lose data.** Do not use it for anything
+> you cannot afford to lose. See [project status](docs/user/status.md).
+
 There are **no tagged releases yet**. Everything below is on the master branch.
 Install with `go install github.com/syshlted/drivel/cmd/drivel@latest`
 **plus at least one backend** (`…/cmd/drivel-provider-gdrive@latest`), or build
 from source with `make build`.
 
 ## Unreleased
+
+### A work-in-progress warning, said out loud — 2026-09-26
+
+Drivel now says on every page of its website, at the top of its README, in the
+man page and in a manual page of its own that **it is unfinished, under-tested,
+and will probably lose data for somebody** — and that you should keep backups you
+have actually restored from.
+
+Nothing about the software changed. What changed is that the documentation was
+describing a finished program: it explained the deletion guards and the conflict
+policy accurately and in detail, and never once said how little of that had been
+run against a real service by anybody who did not write it. A reader was left to
+infer maturity from the confidence of the prose, which is exactly the inference
+the manifesto's sixth commitment exists to prevent.
+
+[Project status](docs/user/status.md) is the single place that statement lives.
+It also names what *has* been exercised and what has not, and the sharp edges
+that are documented rather than fixed.
 
 ### Relicensed to the Mozilla Public License 2.0 — 2026-09-21
 

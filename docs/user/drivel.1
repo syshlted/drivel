@@ -80,6 +80,20 @@ drivel \- cloud-backed FUSE interceptor filesystem
 .RB [ -o
 .IR options ]
 .SH DESCRIPTION
+.B "WORK IN PROGRESS."
+Drivel is unfinished and under-tested, and it
+.B "will probably lose data"
+for somebody before it stops being either. Do not use it for anything you
+cannot afford to lose; keep backups, make them often, and check that you can
+restore from them. The full statement \(em why, what has actually been run
+against a real service, and the sharp edges that are known and not yet fixed
+\(em is at
+.UR https://syshlted.github.io/drivel/docs/status/
+.UE ,
+or in
+.I docs/user/status.md
+in the source tree.
+.PP
 .B drivel
 mounts a local directory as a loopback FUSE filesystem that acts as an
 .IR interceptor :

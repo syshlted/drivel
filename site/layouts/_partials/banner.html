@@ -1,0 +1,32 @@
+{{- /*
+  The work-in-progress warning, at the top of every page.
+
+  This overrides Hextra's banner.html, and the reason is its close button.
+  Hextra's banner is an announcement -- a release, a conference -- so dismissing
+  it is the right behaviour and it stays dismissed. This one says the software
+  may lose your files, which is not an announcement and is not something a
+  reader should be able to turn off on the page where they learn how to mount
+  it. Everything else about the placement is the theme's: baseof.html renders
+  this partial above the navbar on every page, which is exactly where it belongs.
+
+  The words live in hugo.toml so there is one copy of them on the site, and the
+  strip is deliberately only a pointer -- docs/status is the page that explains.
+
+  The link is built here rather than written as markdown in the message, because
+  layouts/_markup/render-link.html rewrites relative links only inside the docs
+  section. A markdown link in the message would therefore resolve on the manual
+  pages and break on the home page, which is the half nobody checks.
+
+  No role="alert": that is a live region, and it would interrupt a screen reader
+  on every page load of the site. The warning is permanent, not an event.
+*/ -}}
+{{- with site.Params.banner -}}
+  {{- with .message -}}
+    <div class="drivel-warning">
+      {{ $.RenderString . }}
+      {{- with $.Site.Params.banner.link }}
+        <a href="{{ relURL . }}">{{ $.Site.Params.banner.linkText | default "Read this first" }}</a>
+      {{- end }}
+    </div>
+  {{- end -}}
+{{- end -}}
