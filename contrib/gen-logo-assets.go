@@ -68,6 +68,25 @@ const (
 	cropH = 643.0 / 768.0
 )
 
+// cutoutTolerance is how far a pixel may sit from the master's paper colour and
+// still be treated as background.
+//
+// It is the middle of a plateau, not a taste: the flood fill takes 32.3% of the
+// frame anywhere from 12 to 45, 36.7% from 60 to 120, and starts eating the
+// drawing at 150. The step between those two plateaus is the soft ground shadow
+// under the feet, which has to go -- the drawing is a sticker, and a sticker
+// does not carry the floor it was photographed on.
+const cutoutTolerance = 80.0
+
+// cutoutWidth is what the cut-out is written at. The site's largest use of it is
+// the 1200x630 social card, which lays the whole animal down at about 1100px, so
+// this is roughly double what anything asks for. The full 7680 master would be
+// forty megabytes of PNG to serve a 480px hero.
+const cutoutWidth = 1920
+
+// keylineRadius is the white sticker edge, as a fraction of the cut-out width.
+const keylineRadius = 1.0 / 160.0
+
 // scaledSizes are the 16:9 copies. The masters are 1.833:1 -- both 1.0 and 1.1
 // arrived that way -- so none of these is a plain scale: the artwork is fitted
 // to the width and the leftover height is padded in the artwork's own
@@ -150,7 +169,16 @@ func main() {
 		}
 	}
 
-	// 4. The backdrop, at the crop's aspect ratio rather than the braille
+	// 4. The cut-out: the animal with its paper removed, which is what the
+	//    website shows. See cutout.
+	cut := cutout(src, ground)
+	cutPath := filepath.Join(root, "contrib", fmt.Sprintf("Drivel_Logo_%s-Cutout.png", *version))
+	if err := writePNG(cutPath, cut); err != nil {
+		die(err)
+	}
+	report(root, cutPath, cut.Bounds().Dx(), cut.Bounds().Dy())
+
+	// 5. The backdrop, at the crop's aspect ratio rather than the braille
 	//    grid's -- they differ by under a percent, and the instruction was the
 	//    crop's.
 	//
@@ -167,6 +195,147 @@ func main() {
 		die(err)
 	}
 	report(root, backPath, bw, bh)
+}
+
+// cutout removes the master's paper and gives the animal a white sticker edge.
+//
+// The fill runs at the master's full resolution and the result is scaled down
+// afterwards, which is the whole reason the edges come out soft: filling at the
+// output size would give a hard binary alpha and a jagged silhouette, while
+// downsampling a full-resolution mask averages it into a proper anti-aliased
+// one.
+//
+// Only pixels reachable from the frame's border are removed. That connectivity
+// is what makes this safe on a drawing whose teeth are near-white and whose
+// drool is paler than its paper: both are sealed inside the ink outlines, so no
+// fill starting outside can reach them.
+//
+// A pass to catch background pockets the border cannot reach -- there are a
+// handful, trapped between heads -- was written, measured and removed. At any
+// tolerance loose enough to find them it also took drool drips, the puddles
+// under them and a highlight out of one eye, because a pale drip enclosed by
+// outlines is indistinguishable from a trapped pocket by colour and shape
+// alike. The pockets that remain are the paper's own colour, so they are
+// invisible on a light page and read as part of the sticker edge on a dark one.
+// Losing the drool would not be either: see docs/project/mascot.md, which
+// predicted this exact failure before it was tried.
+func cutout(src *image.NRGBA, ground color.NRGBA) *image.NRGBA {
+	b := src.Bounds()
+	w, h := b.Dx(), b.Dy()
+	near := func(i int) bool {
+		p := src.Pix[i*4:]
+		dr := float64(p[0]) - float64(ground.R)
+		dg := float64(p[1]) - float64(ground.G)
+		db := float64(p[2]) - float64(ground.B)
+		return math.Sqrt(dr*dr+dg*dg+db*db) <= cutoutTolerance
+	}
+
+	mark := make([]bool, w*h)
+	stack := make([]int, 0, w*h/4)
+	push := func(x, y int) {
+		i := y*w + x
+		if !mark[i] && near(i) {
+			mark[i] = true
+			stack = append(stack, i)
+		}
+	}
+	for x := 0; x < w; x++ {
+		push(x, 0)
+		push(x, h-1)
+	}
+	for y := 0; y < h; y++ {
+		push(0, y)
+		push(w-1, y)
+	}
+	for len(stack) > 0 {
+		i := stack[len(stack)-1]
+		stack = stack[:len(stack)-1]
+		x, y := i%w, i/w
+		if x > 0 {
+			push(x-1, y)
+		}
+		if x < w-1 {
+			push(x+1, y)
+		}
+		if y > 0 {
+			push(x, y-1)
+		}
+		if y < h-1 {
+			push(x, y+1)
+		}
+	}
+
+	full := image.NewNRGBA(b)
+	copy(full.Pix, src.Pix)
+	for i, m := range mark {
+		if m {
+			full.Pix[i*4+3] = 0
+		}
+	}
+
+	out := resize(full, cutoutWidth, int(math.Round(float64(cutoutWidth)*float64(h)/float64(w))))
+	return keyline(out, int(math.Round(keylineRadius*float64(cutoutWidth))))
+}
+
+// keyline paints a white border of radius r underneath the cut-out.
+//
+// One file then serves both themes: on a light page the border is invisible and
+// the animal is simply cut out, on a dark one the same border reads as the
+// sticker edge the drawing is styled as. The 1.0 artwork carried one of these in
+// the paint; 1.1 does not, so it is rebuilt here at an even weight.
+//
+// The distance transform is two chamfer passes rather than a circular dilation,
+// which at this radius would be a thousand times the work for the same shape.
+func keyline(src *image.NRGBA, r int) *image.NRGBA {
+	b := src.Bounds()
+	w, h := b.Dx(), b.Dy()
+	const far = 1 << 28
+	// Integer chamfer weights: 3 orthogonal, 4 diagonal, approximating 1:sqrt2.
+	d := make([]int32, w*h)
+	for i := range d {
+		if src.Pix[i*4+3] > 0 {
+			d[i] = 0
+		} else {
+			d[i] = far
+		}
+	}
+	at := func(x, y int) int32 {
+		if x < 0 || y < 0 || x >= w || y >= h {
+			return far
+		}
+		return d[y*w+x]
+	}
+	relax := func(x, y int, cands ...int32) {
+		i := y*w + x
+		for _, c := range cands {
+			if c < d[i] {
+				d[i] = c
+			}
+		}
+	}
+	for y := 0; y < h; y++ {
+		for x := 0; x < w; x++ {
+			relax(x, y, at(x-1, y)+3, at(x, y-1)+3, at(x-1, y-1)+4, at(x+1, y-1)+4)
+		}
+	}
+	for y := h - 1; y >= 0; y-- {
+		for x := w - 1; x >= 0; x-- {
+			relax(x, y, at(x+1, y)+3, at(x, y+1)+3, at(x+1, y+1)+4, at(x-1, y+1)+4)
+		}
+	}
+
+	out := image.NewNRGBA(b)
+	limit := int32(r * 3)
+	for i := range d {
+		if d[i] <= limit {
+			out.Pix[i*4] = 0xff
+			out.Pix[i*4+1] = 0xff
+			out.Pix[i*4+2] = 0xff
+			out.Pix[i*4+3] = 0xff
+		}
+	}
+	draw.Draw(out, b, src, b.Min, draw.Over)
+	return out
 }
 
 // cropRect turns the stored proportions into pixels for this master.

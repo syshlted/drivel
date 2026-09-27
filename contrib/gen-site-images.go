@@ -26,6 +26,7 @@ package main
 
 import (
 	"bytes"
+	"flag"
 	"fmt"
 	"image"
 	"image/color"
@@ -37,14 +38,20 @@ import (
 	"path/filepath"
 )
 
-// markCrop is the square of drivel-logo.png that the icons are cut from: the
-// big central head -- the Drive head, the only one that has ever been fed --
-// with its ears and its grin whole and the head centred in the frame.
+// The square of the cut-out that the icons are cut from: the big central head
+// -- the Drive head, the only one that has ever been fed -- with its ears and
+// its grin whole and the head centred in the frame.
 //
-// It is stated here as numbers rather than found by an algorithm because it is
-// a composition decision. The ears are what make the silhouette legible at
-// 16px, which is the size the mascot brief asks the drawing to survive.
-var markCrop = image.Rect(617, 22, 617+420, 22+420)
+// Fractions rather than pixels, so the crop survives the cut-out being written
+// at a different size; and stated rather than searched for, because which head
+// and how much air around it is a composition decision. The ears are what make
+// the silhouette legible at 16px, which is the size the mascot brief asks the
+// drawing to survive.
+const (
+	markX    = 935.0 / 1920.0
+	markY    = 20.0 / 1047.0
+	markSize = 540.0 / 1920.0
+)
 
 // iconGround is what the icons that may not be transparent are flattened onto.
 //
@@ -55,16 +62,28 @@ var markCrop = image.Rect(617, 22, 617+420, 22+420)
 var iconGround = color.NRGBA{R: 0x17, G: 0x16, B: 0x1b, A: 0xff}
 
 func main() {
+	version := flag.String("version", "1.1", "artwork version: reads contrib/Drivel_Logo_<V>-Cutout.png")
+	flag.Parse()
+
 	root, err := repoRoot()
 	if err != nil {
 		die(err)
 	}
 
-	master, err := loadPNG(filepath.Join(root, "site/assets/images/drivel-logo.png"))
+	// The cut-out contrib/gen-logo-assets.go writes. The version is named here
+	// and once more in site/hugo.toml, which mounts the same file as the site's
+	// hero image -- the two places to change after a redraw.
+	master, err := loadPNG(filepath.Join(root, "contrib",
+		fmt.Sprintf("Drivel_Logo_%s-Cutout.png", *version)))
 	if err != nil {
 		die(err)
 	}
-	mark := resize(master, markCrop, 512, 512)
+	b := master.Bounds()
+	side := int(math.Round(markSize * float64(b.Dx())))
+	crop := image.Rect(0, 0, side, side).Add(image.Pt(
+		b.Min.X+int(math.Round(markX*float64(b.Dx()))),
+		b.Min.Y+int(math.Round(markY*float64(b.Dy())))))
+	mark := resize(master, crop, 512, 512)
 
 	type job struct {
 		path  string
@@ -75,6 +94,11 @@ func main() {
 		// and every one of them composites the icon itself.
 		{"site/static/favicon-16x16.png", resize(mark, mark.Bounds(), 16, 16)},
 		{"site/static/favicon-32x32.png", resize(mark, mark.Bounds(), 32, 32)},
+
+		// The navbar mark. Hextra's navbar partial takes a URL rather than a
+		// resource, so this one has to be a static file; it is shown at 28px,
+		// and written at 96 so a 3x display has pixels to use.
+		{"site/static/images/drivel-mark.png", resize(mark, mark.Bounds(), 96, 96)},
 
 		// Home-screen icons are flattened; see iconGround.
 		{"site/static/apple-touch-icon.png", flatten(resize(mark, mark.Bounds(), 180, 180))},

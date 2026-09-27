@@ -176,12 +176,22 @@ theme's points at Hextra's own mark, and `banner.html`, because the theme's is
 dismissible and this one is the data-loss warning.
 
 Two `//go:build ignore` generators make every image the site serves, both run
-with `go run` and neither wired into `make`. **`contrib/gen-logo-assets.go`
-derives everything from the artwork master** — the crop, its braille rendition,
-the 16:9 scaled set, and the two-colour page backdrop; its crop rectangle and
-braille threshold were *recovered* from the 1.0 artefacts rather than chosen,
-and `-verify` is what asserts that. **`contrib/gen-site-images.go` cuts the
-icons** out of the site's hand-made cut-out master. See `docs/project/mascot.md`.
+with `go run` and neither wired into `make`; **`site/` holds no artwork master
+of its own.** `contrib/gen-logo-assets.go` derives everything from the official
+artwork — the crop, its braille rendition, the 16:9 scaled set, the two-colour
+page backdrop, and the background-removed cut-out the site uses as its hero.
+`contrib/gen-site-images.go` cuts the icons out of that cut-out. Its crop
+rectangle and braille threshold were *recovered* from the 1.0 artefacts rather
+than chosen, and `-verify` asserts that (it needs the 1.0 files, which are no
+longer in the tree, so it now reports that it cannot run).
+
+**Background removal is connectivity, never a brightness threshold**, and the
+trap is specific: a pass to catch background pockets the border fill cannot
+reach was written, measured and deleted because at any tolerance loose enough
+to find them it also ate drool drips, puddles and an eye highlight. The
+surviving pockets are the paper's colour and cost nothing visible. Don't
+reintroduce it. The artwork version is named in `site/hugo.toml` and in
+`gen-site-images.go` — both, after a redraw. See `docs/project/mascot.md`.
 
 The backdrop is **mounted from `contrib/`, not copied into `site/`**, and its
 URL reaches the stylesheet through `_partials/custom/head-end.html` — because

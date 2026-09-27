@@ -194,61 +194,62 @@ would be about thirty lines, and the wrong thirty: the committed art is the
 reference for what this art looks like, and matching it means matching that
 program's choices rather than making new ones and calling them the same.
 
-The website's copies are derived from the first of those and committed
-separately, because Hugo can resize an image but cannot cut a background out of
-one:
+## What the website shows
 
-- `site/assets/images/drivel-logo.png` — the whole piece with the backdrop
-  removed and the artwork's white keyline rebuilt at an even weight. **One file
-  serves both themes**: on a light page the keyline is invisible and the animal
-  is simply cut out, on a dark one the same keyline reads as the sticker edge
-  it was drawn as. It is an *asset* rather than a file under `static/` so that
-  `layouts/_shortcodes/hero-logo.html` can serve WebP at two widths instead of
-  a megabyte and a half of PNG.
-- `site/static/images/drivel-mark.png` — the middle head, square, for the
-  navbar, where it is shown at 28px. Static rather than an asset because
-  Hextra's navbar partial takes a URL and not a resource.
+Nothing under `site/` is hand-made any more. The hero image and the navbar mark
+were both committed binaries with no record of how they had been produced; both
+are now generated, and `site/` holds no artwork masters at all.
 
-Everything *else* the site shows is derived from those two by
-`contrib/gen-site-images.go`, which is one command and no judgement:
+`gen-logo-assets.go` writes the **cut-out** — the animal with its paper removed
+and a white sticker edge rebuilt at an even weight. One file serves both themes:
+on a light page the edge is invisible and the animal is simply cut out, on a
+dark one it reads as the sticker the drawing is styled as. The site *mounts*
+it as its hero image rather than keeping a copy, so there is one file.
 
-```sh
-go run contrib/gen-site-images.go
-```
+`gen-site-images.go` then cuts the icons out of that: the tab icons, the
+`favicon.ico` a browser asks for unprompted, the home-screen icons, the navbar
+mark, and the 1200×630 `og:image` card.
 
-It cuts the tab and home-screen icons out of `drivel-logo.png` at one stated
-rectangle — the big central head, ears and grin whole — builds the 1200×630
-`og:image` card, decodes the braille rendition into the page backdrop, and
-inlines that backdrop into `site/assets/css/custom.css` as a data URI. Three
-things about it are worth knowing before changing any of them.
+### Removing the background
 
-**The crop is a constant in the source, not a search.** Which head, and how much
-air around it, is a composition decision; the ears are what keep the silhouette
-legible at 16px, which is the size this brief asks the drawing to survive.
+This file used to warn that **removing the background is not a brightness
+threshold**, and that every part of the joke breaks if it is treated as one.
+That warning was right, and writing the cut-out proved it twice.
 
-**The braille file is not converted, it is decoded.** Every U+28xx codepoint
-*is* a 2×4 grid of dots, so the 70×47 cells are a 140×188 one-bit bitmap
-exactly — no threshold, nothing to tune. The one thing that is not obvious is
-which way round it goes, and that was settled by measurement rather than taste:
-correlated against the source JPEG, a set dot sits at mean luminance 162 and a
-clear one at 64, so **the dots are the white paper and the animal is the gaps.**
-Painting the dots gives you a photographic negative that only looks right on a
-dark page.
+What works is **connectivity**: only pixels reachable from the border of the
+frame are removed. The teeth are near-white and the drool is paler than the
+paper, but both are sealed inside ink outlines, so no fill starting outside can
+reach them. The tolerance is the middle of a measured plateau rather than a
+taste — the fill takes 32.3% of the frame anywhere from 12 to 45, 36.7% from 60
+to 120, and starts eating the drawing at 150. The step between those plateaus is
+the soft ground shadow under the feet, which has to go: this is a sticker, and a
+sticker does not carry the floor it was photographed on.
 
-**It does not cut the backdrop out of the artwork, and should not learn to.**
-That is the judgement call described above, with all its exceptions;
-`drivel-logo.png` stays a committed hand-made master that this program only
-reads.
+The fill runs at the master's full 7680px and the result is scaled down
+afterwards. That ordering is what makes the edges soft — filling at the output
+size gives a hard binary alpha and a jagged silhouette, while downsampling a
+full-resolution mask averages it into a proper anti-aliased one.
 
-Whoever regenerates these after a redraw should know that **removing the
-background is not a brightness threshold**, and that every part of the joke is
-what breaks if it is treated as one. The drool is pale, the teeth are white,
-and the ground shadow under the feet is a lavender wash — delete the light
-pixels and the animal stops drooling. What works instead is the backdrop's
-*connectivity* together with its hue: it is neutral or magenta-side, where
-every drool colour in the piece is blue, green or yellow. Two things do not
-follow from connectivity alone and have to be handled on their own: the
-backdrop trapped between two drips touches no edge of the frame, so it needs
-seeding separately, and the source is a JPEG, so a scattering of single pixels
-sit just off pure white and survive as flecks unless they are swept up
-afterwards.
+**The pocket pass was written, measured and deleted, and that is the part worth
+remembering.** A handful of background regions are trapped between heads where
+the border fill cannot reach them, exactly as this file predicted. Every
+tolerance loose enough to find them also took drool drips, the puddles under
+them, and a highlight out of one eye — because a pale drip sealed by outlines
+is indistinguishable from a trapped pocket by colour, by shape and by size.
+Rendering the removed pixels in red over the artwork is what showed it; the
+counts alone looked reasonable. The pockets that survive are the paper's own
+colour, so they are invisible on a light page and read as part of the sticker
+edge on a dark one. That is a far cheaper defect than an animal that has
+stopped drooling.
+
+The hue test this file used to recommend — neutral backdrop against blue, green
+and yellow drool — was not needed in the end, because the plateau is wide enough
+that colour never has to be consulted. Keep it in mind if a future redraw puts
+the paper closer to the drool.
+
+### After a redraw
+
+The artwork version is named in two places: `site/hugo.toml`, which mounts the
+cut-out and the backdrop, and `gen-site-images.go`, which cuts the icons from
+the cut-out. Change both, run the two generators, and look at the result —
+`-verify` guards the recovered constants, not the composition.
