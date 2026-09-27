@@ -20,7 +20,7 @@
    * simply invalid and dropped, which costs the backdrop and nothing else. */
 
   --drivel-backdrop-ink: #2f2a24;
-  --drivel-backdrop-opacity: 0.05;
+  --drivel-backdrop-opacity: 0.11;
 
   --drivel-warn: #9f1239;
   --drivel-warn-ink: #ffffff;
@@ -29,7 +29,7 @@
 html.dark,
 body.dark {
   --drivel-backdrop-ink: #efe7d9;
-  --drivel-backdrop-opacity: 0.06;
+  --drivel-backdrop-opacity: 0.13;
 
   --drivel-warn: #f43f5e;
 }
@@ -59,6 +59,11 @@ body.dark {
  * `fixed` rather than `absolute` so the layer can never lengthen the page: an
  * absolutely positioned element this tall contributes to the scrollable area,
  * which on a short page is a screenful of nothing below the footer.
+ *
+ * The opacity is higher than it looks like it should be because the mask is
+ * drawn as separated dots rather than as filled cells, so it covers about 26%
+ * of the frame where a solid decode covered 57%. Same apparent weight, a
+ * quarter of the ink.
  *
  * There is no `image-rendering` hint, and that is the point of the mask being
  * 7680px wide. The bitmap under it holds 140 columns, so at page width it was

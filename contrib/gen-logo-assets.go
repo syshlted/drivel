@@ -423,30 +423,51 @@ func brailleRows(path string) ([][]rune, error) {
 	return rows, nil
 }
 
+// dotRadius is each braille dot's radius, as a fraction of the dot pitch.
+//
+// It is what makes this look like braille rather than like a low-resolution
+// bitmap, and it was arrived at by getting it wrong first. Filling the whole
+// dot cell -- which is the obvious decode, and faithful to the bits -- welds
+// neighbouring dots into solid regions, and at a page width where one dot is
+// ten pixels the result is a field of blocks with no trace of the medium left
+// in it. A terminal draws braille as separated round dots, and that gap is the
+// entire visual signature.
+//
+// Raising the *resolution* instead does not fix it and makes it worse: at 280
+// columns the dots fall below a pixel or two and blur into a smooth grey, which
+// reads as a faint photograph rather than as braille. The character of the art
+// lives in the coarseness, so the fix is to keep 70 columns and restore the
+// gaps.
+const dotRadius = 0.38
+
 // brailleBitmap turns the braille art into a two-colour image of the given size.
 //
 // Every U+28xx codepoint *is* a 2x4 grid of dots, so the character grid carries
-// a bitmap exactly -- no threshold here, nothing to choose. Which way round it
-// goes was measured rather than guessed: correlated against the source image a
-// set dot sits at mean luminance 162 and a clear one at 64, so the dots are the
-// white paper the animal was drawn on and **the drawing is the dots that are
-// clear**. Painting the dots gives a photographic negative.
+// the drawing exactly -- no threshold here, nothing to choose. Which way round
+// it goes was measured rather than guessed: correlated against the source image
+// a set dot sits at mean luminance 162 and a clear one at 64, so the dots are
+// the white paper the animal was drawn on and **the drawing is the dots that
+// are clear**. Painting the set dots gives a photographic negative.
 //
 // The palette is transparent then opaque black, which makes this a 1-bit PNG
 // and, more usefully, a stencil: the site paints it through a CSS mask so the
 // ink can follow the theme, which an image with a painted ground could not do.
-// Scaling is nearest-neighbour because anything else invents a third colour.
+//
+// Two colours means the dot edges cannot be anti-aliased here. They do not need
+// to be: the page scales this down by roughly five, and the downscale is where
+// the smoothing happens. That is also why the image is generated so much larger
+// than the grid it carries.
 func brailleBitmap(rows [][]rune, w, h int) *image.Paletted {
 	gw, gh := len(rows[0])*2, len(rows)*4
 	// Bit i of U+28xx lights the dot at this offset in the cell. The order is
 	// braille's (dots 1-6, then the two eight-dot extras), not raster order.
 	offsets := [8][2]int{{0, 0}, {0, 1}, {0, 2}, {1, 0}, {1, 1}, {1, 2}, {0, 3}, {1, 3}}
-	dot := make([]bool, gw*gh)
+	paper := make([]bool, gw*gh)
 	for cy, row := range rows {
 		for cx, r := range row {
 			for i, d := range offsets {
 				if (r-0x2800)&(1<<i) != 0 {
-					dot[(cy*4+d[1])*gw+cx*2+d[0]] = true
+					paper[(cy*4+d[1])*gw+cx*2+d[0]] = true
 				}
 			}
 		}
@@ -454,10 +475,28 @@ func brailleBitmap(rows [][]rune, w, h int) *image.Paletted {
 
 	img := image.NewPaletted(image.Rect(0, 0, w, h),
 		color.Palette{color.NRGBA{}, color.NRGBA{A: 0xff}})
+	r2 := dotRadius * dotRadius
 	for y := 0; y < h; y++ {
-		sy := y * gh / h
+		// Dot-grid coordinates of this pixel's centre. Kept in floating point
+		// rather than stepped in integers because the grid does not divide the
+		// output evenly, and rounding it would give dots of two different sizes.
+		fy := (float64(y) + 0.5) * float64(gh) / float64(h)
+		gy := int(fy)
+		if gy >= gh {
+			gy = gh - 1
+		}
+		dy := fy - float64(gy) - 0.5
 		for x := 0; x < w; x++ {
-			if !dot[sy*gw+x*gw/w] {
+			fx := (float64(x) + 0.5) * float64(gw) / float64(w)
+			gx := int(fx)
+			if gx >= gw {
+				gx = gw - 1
+			}
+			if paper[gy*gw+gx] {
+				continue
+			}
+			dx := fx - float64(gx) - 0.5
+			if dx*dx+dy*dy <= r2 {
 				img.SetColorIndex(x, y, 1)
 			}
 		}
