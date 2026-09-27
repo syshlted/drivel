@@ -141,10 +141,56 @@ The animal has been at this long enough to have learned some things the hard way
 
 ## The files
 
-`contrib/` holds the drawing as delivered: `Drivel_Logo_1.0.jpg` is the whole
-piece at 1408×768, `-Cropped_1.jpg` a portrait crop of it, and
-`-cropped_1.txt` a braille-art rendition of that crop. All three are JPEG or
-text on a white background, with no transparency anywhere.
+`contrib/` holds the drawing as delivered, and everything derived from it.
+
+**`Drivel_Logo_1.1-Official.png` is the master** — 7680×4189, fully opaque, the
+animal on its own pale ground. Version 1.1 is the redraw that fixed the
+erratum this file opens with: the animal is **striped** in it, where 1.0 was
+spotted.
+
+The 1.0 set is still here: `Drivel_Logo_1.0.jpg` at 1408×768, `-Cropped_1.jpg`,
+and `-cropped_1.txt`. All three are JPEG or text on a white background with no
+transparency anywhere, and all three were made by hand with no record of how.
+
+Everything derived from the master is now made by **`contrib/gen-logo-assets.go`**,
+which is one command and no judgement:
+
+```sh
+go install github.com/TheZoraiz/ascii-image-converter@latest   # once
+go run contrib/gen-logo-assets.go
+```
+
+It writes the portrait crop (`-Cropped_1.png`), the braille rendition of that
+crop (`-Cropped_1.txt`), that rendition as a two-colour image 7680px wide
+(`-Braille.png`, which the website mounts as its page backdrop), and
+`contrib/scaled/` — the master fitted to seven 16:9 sizes from 4K UHD down to
+320×180.
+
+Three things about it are worth knowing.
+
+**Its parameters were recovered, not chosen.** Nothing about how the 1.0 files
+were made had been written down, so the crop was found by matching the crop
+against the master (a plain 1:1 cut at RMS 0.61/255, which is what proves it
+was never scaled), and the braille settings by sweeping until the output
+matched the committed file *byte for byte* — `-b -W 70 --threshold 99`, where
+the tool's own default is 128. `go run contrib/gen-logo-assets.go -verify`
+re-runs both checks against the 1.0 artefacts; run it after touching any of
+those constants. It needs the 1.0 master to be present, so it is a flag rather
+than a test.
+
+**The crop travels as proportions**, which is the only way "the same section"
+survives the master arriving at 7680×4189 instead of 1408×768.
+
+**The scaled copies are letterboxed, not cropped.** Both masters are 1.833:1
+and none of the requested sizes is, so the artwork is fitted to the width and
+the leftover height padded in the ground colour sampled from the master's own
+border — seamless, because the drawing does not reach its own edges. Cropping
+to fill would take 3% off each side, and the outermost heads live there.
+
+**It does not shell out for the braille by accident.** Reimplementing that step
+would be about thirty lines, and the wrong thirty: the committed art is the
+reference for what this art looks like, and matching it means matching that
+program's choices rather than making new ones and calling them the same.
 
 The website's copies are derived from the first of those and committed
 separately, because Hugo can resize an image but cannot cut a background out of
