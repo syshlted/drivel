@@ -5,9 +5,7 @@
 
 //go:build ignore
 
-// Command gen-site-images derives every image the website serves from the two
-// sources in this directory, so that a redraw is one command rather than a
-// puzzle.
+// Command gen-site-images cuts the website's icons out of the artwork.
 //
 //	go run contrib/gen-site-images.go
 //
@@ -17,15 +15,17 @@
 // byte-identical PNG output across Go releases, which is a promise the image
 // encoder has never made.
 //
-// The one thing it does *not* do is cut the backdrop out of the artwork. That
+// The page backdrop is not here: it is derived from the artwork master rather
+// than from the site's cut-out copy, so contrib/gen-logo-assets.go owns it.
+//
+// The one thing this does *not* do is cut the backdrop out of the artwork. That
 // is a judgement call with a lot of exceptions in it (see docs/project/
-// mascot.md, "whoever regenerates these"), so site/assets/images/drivel-logo.png
-// is a committed hand-made master and this program only ever reads it.
+// mascot.md), so site/assets/images/drivel-logo.png is a committed hand-made
+// master and this program only ever reads it.
 package main
 
 import (
 	"bytes"
-	"encoding/base64"
 	"fmt"
 	"image"
 	"image/color"
@@ -35,7 +35,6 @@ import (
 	"math"
 	"os"
 	"path/filepath"
-	"strings"
 )
 
 // markCrop is the square of drivel-logo.png that the icons are cut from: the
@@ -67,26 +66,11 @@ func main() {
 	}
 	mark := resize(master, markCrop, 512, 512)
 
-	// The backdrop: the braille rendition decoded back into the bitmap it
-	// always was. See brailleBitmap for why this is lossless.
-	backdrop, err := brailleBitmap(filepath.Join(root, "contrib/Drivel_Logo_1.0-cropped_1.txt"))
-	if err != nil {
-		die(err)
-	}
-
-	// The backdrop is inlined into the stylesheet rather than linked, so the
-	// stylesheet is an output of this program too -- see inlineBackdrop.
-	if err := inlineBackdrop(filepath.Join(root, "site/assets/css/custom.css"), backdrop); err != nil {
-		die(err)
-	}
-
 	type job struct {
 		path  string
 		image image.Image
 	}
 	jobs := []job{
-		{"site/assets/images/drivel-backdrop.png", backdrop},
-
 		// Tab icons keep their transparency: a browser tab is not one colour,
 		// and every one of them composites the icon itself.
 		{"site/static/favicon-16x16.png", resize(mark, mark.Bounds(), 16, 16)},
@@ -126,107 +110,6 @@ func main() {
 		die(err)
 	}
 	fmt.Printf("  %-46s 1200x630\n", "site/static/images/drivel-social.jpg")
-}
-
-// brailleBitmap decodes the braille-art rendition back into a two-colour image.
-//
-// This is a decode and not a conversion: every U+28xx codepoint *is* a 2x4 grid
-// of dots, so 70 columns by 47 rows carry a 140x188 bitmap exactly, with no
-// thresholding and nothing to choose. The only decision is which way round it
-// goes, and that is not a guess either -- correlating the dots against the
-// source JPEG puts a set dot at mean luminance 162 and an unset one at 64, so
-// the dots are the white background the animal was drawn on and **the drawing
-// is the dots that are clear**.
-//
-// The result's palette is transparent and opaque black, in that order, which
-// makes it a 1-bit PNG of about two kilobytes and -- more usefully -- a stencil.
-// The site uses it as a CSS mask so the ink can follow the theme, which a
-// two-colour image with a *painted* ground could not do.
-func brailleBitmap(path string) (*image.Paletted, error) {
-	raw, err := os.ReadFile(path)
-	if err != nil {
-		return nil, err
-	}
-	var rows [][]rune
-	for _, line := range strings.Split(string(raw), "\n") {
-		if line = strings.TrimRight(line, "\r"); line != "" {
-			rows = append(rows, []rune(line))
-		}
-	}
-	if len(rows) == 0 {
-		return nil, fmt.Errorf("%s: no braille rows", path)
-	}
-	width := len(rows[0])
-	for i, r := range rows {
-		if len(r) != width {
-			return nil, fmt.Errorf("%s: row %d is %d cells, row 0 is %d", path, i+1, len(r), width)
-		}
-	}
-
-	// Bit i of U+28xx lights the dot at this offset within the cell. The order
-	// is the braille one (1,2,3,4,5,6 then the two eight-dot extras), not
-	// raster order, which is the only thing about this encoding that surprises.
-	dots := [8][2]int{{0, 0}, {0, 1}, {0, 2}, {1, 0}, {1, 1}, {1, 2}, {0, 3}, {1, 3}}
-
-	img := image.NewPaletted(
-		image.Rect(0, 0, width*2, len(rows)*4),
-		color.Palette{color.NRGBA{}, color.NRGBA{A: 0xff}},
-	)
-	// Start every pixel as ink and clear the dots that are set.
-	for i := range img.Pix {
-		img.Pix[i] = 1
-	}
-	for cy, row := range rows {
-		for cx, r := range row {
-			if r < 0x2800 || r > 0x28ff {
-				return nil, fmt.Errorf("%s: row %d cell %d is %q, not a braille pattern", path, cy+1, cx+1, r)
-			}
-			for i, d := range dots {
-				if (r-0x2800)&(1<<i) != 0 {
-					img.SetColorIndex(cx*2+d[0], cy*4+d[1], 0)
-				}
-			}
-		}
-	}
-	return img, nil
-}
-
-// inlineBackdrop rewrites the one generated line in the stylesheet: the backdrop
-// bitmap as a data URI.
-//
-// The stylesheet says why it is inlined. What matters here is that inlining
-// creates a second copy of the image, and a second copy is a thing that drifts
-// -- so the copy is written by the same program that writes the PNG, into a
-// region marked off for it, and a stylesheet missing those markers is an error
-// rather than a file quietly left alone.
-func inlineBackdrop(path string, img image.Image) error {
-	css, err := os.ReadFile(path)
-	if err != nil {
-		return err
-	}
-	const (
-		open  = "/* drivel-backdrop: generated by contrib/gen-site-images.go -- do not edit */"
-		close = "/* end drivel-backdrop */"
-	)
-	i := bytes.Index(css, []byte(open))
-	j := bytes.Index(css, []byte(close))
-	if i < 0 || j < i {
-		return fmt.Errorf("%s: no generated region -- expected %q ... %q", path, open, close)
-	}
-
-	var enc bytes.Buffer
-	if err := (&png.Encoder{CompressionLevel: png.BestCompression}).Encode(&enc, img); err != nil {
-		return err
-	}
-	rule := fmt.Sprintf("%s\n  --drivel-backdrop: url(\"data:image/png;base64,%s\");\n  ",
-		open, base64.StdEncoding.EncodeToString(enc.Bytes()))
-
-	out := append(append(append([]byte{}, css[:i]...), rule...), css[j:]...)
-	if err := os.WriteFile(path, out, 0o644); err != nil {
-		return err
-	}
-	fmt.Printf("  %-46s %d bytes inlined\n", "site/assets/css/custom.css (backdrop)", enc.Len())
-	return nil
 }
 
 // resize samples src's sub-rectangle r into a w by h image with a separable

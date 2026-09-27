@@ -148,9 +148,9 @@ animal on its own pale ground. Version 1.1 is the redraw that fixed the
 erratum this file opens with: the animal is **striped** in it, where 1.0 was
 spotted.
 
-The 1.0 set is still here: `Drivel_Logo_1.0.jpg` at 1408×768, `-Cropped_1.jpg`,
-and `-cropped_1.txt`. All three are JPEG or text on a white background with no
-transparency anywhere, and all three were made by hand with no record of how.
+The 1.0 set — `Drivel_Logo_1.0.jpg` at 1408×768 and its two companions — was
+removed once 1.1 replaced it. It is in the history if it is ever wanted, which
+is where the `-verify` check below points when it finds the files gone.
 
 Everything derived from the master is now made by **`contrib/gen-logo-assets.go`**,
 which is one command and no judgement:
@@ -175,8 +175,10 @@ was never scaled), and the braille settings by sweeping until the output
 matched the committed file *byte for byte* — `-b -W 70 --threshold 99`, where
 the tool's own default is 128. `go run contrib/gen-logo-assets.go -verify`
 re-runs both checks against the 1.0 artefacts; run it after touching any of
-those constants. It needs the 1.0 master to be present, so it is a flag rather
-than a test.
+those constants. It needs the 1.0 artwork, which is no longer in the tree, so it
+is a flag rather than a test and it now reports that it cannot run unless those
+files are checked out of the history first. The constants it guards have not
+changed since it last passed.
 
 **The crop travels as proportions**, which is the only way "the same section"
 survives the master arriving at 7680×4189 instead of 1408×768.

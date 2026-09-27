@@ -421,8 +421,20 @@ func resize(src *image.NRGBA, w, h int) *image.NRGBA {
 // when changing any of those constants.
 func verify10(root string, cols int) error {
 	master := filepath.Join(root, "contrib", "Drivel_Logo_1.0.jpg")
-	if _, err := os.Stat(master); err != nil {
-		return fmt.Errorf("the 1.0 master is gone, so this check cannot run: %w", err)
+	// All three, up front, with one message. The 1.0 artwork was removed from
+	// the tree once 1.1 replaced it, so the ordinary outcome of running this is
+	// now that it cannot run -- which should say so plainly and name the way
+	// back, rather than failing halfway through on whichever file it reached.
+	for _, p := range []string{master,
+		filepath.Join(root, "contrib", "Drivel_Logo_1.0-Cropped_1.jpg"),
+		filepath.Join(root, "contrib", "Drivel_Logo_1.0-cropped_1.txt"),
+	} {
+		if _, err := os.Stat(p); err != nil {
+			return fmt.Errorf("%s is not in the tree, so this check cannot run.\n"+
+				"The 1.0 artwork was removed when 1.1 replaced it; recover it with\n"+
+				"\tgit checkout <commit-before-its-removal> -- contrib/Drivel_Logo_1.0*",
+				rel(root, p))
+		}
 	}
 	f, err := os.Open(master)
 	if err != nil {

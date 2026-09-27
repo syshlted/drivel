@@ -30,6 +30,15 @@ locale = "en-us"
     source = "static"
     target = "static"
 
+  # The page backdrop: the braille art as a two-colour image, mounted from
+  # contrib/ rather than copied in beside it. Hugo will mount a single file,
+  # so the site reads the artefact contrib/gen-logo-assets.go writes and there
+  # is no second copy to fall out of step -- the same arrangement, and the same
+  # reason, as the manual below.
+  [[module.mounts]]
+    source = "../contrib/Drivel_Logo_1.1-Braille.png"
+    target = "assets/images/drivel-backdrop.png"
+
   # The manual, mounted as *assets* rather than as content. Mounting it straight
   # into content/docs would work, but those files carry no front matter -- they
   # open with an H1, because they are written to be read on GitHub first -- and
