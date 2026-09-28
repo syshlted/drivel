@@ -24,6 +24,8 @@
 
   --drivel-warn: #9f1239;
   --drivel-warn-ink: #ffffff;
+
+  --drivel-kicker-ink: #8a7d6c;
 }
 
 html.dark,
@@ -32,6 +34,8 @@ body.dark {
   --drivel-backdrop-opacity: 0.13;
 
   --drivel-warn: #f43f5e;
+
+  --drivel-kicker-ink: #a99a85;
 }
 
 /*
@@ -125,4 +129,24 @@ body::before {
 
 .drivel-warning strong {
   font-weight: 700;
+}
+
+/*
+ * The tagline, above the hero headline.
+ *
+ * Monospaced because the thing being described is a filesystem and a command,
+ * and because the page it sits on is backed by terminal art -- the typeface is
+ * the only part of the line that says so.
+ *
+ * Its casing is left exactly as written rather than forced to uppercase: the
+ * words are a joke with proper nouns in it, and `text-transform` would flatten
+ * the difference between "The Unpopular Kids" and shouting.
+ */
+.drivel-kicker {
+  margin: 0 0 0.35rem;
+  text-align: center;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+  font-size: 0.82rem;
+  letter-spacing: 0.12em;
+  color: var(--drivel-kicker-ink);
 }

@@ -6,6 +6,8 @@ layout: hextra-home
 {{< hero-logo >}}
 </div>
 
+<p class="drivel-kicker">Cloud Sync for The Unpopular Kids!</p>
+
 {{< hextra/hero-headline >}}
   Your remote storage,&nbsp;<br class="sm:hx-block hx-hidden" />as an ordinary folder
 {{< /hextra/hero-headline >}}
@@ -61,6 +63,10 @@ layout: hextra-home
   {{< hextra/feature-card
     title="Pluggable backends"
     subtitle="The remote side is a narrow path-addressed interface rather than a Drive-shaped one. Each backend runs in its own process."
+  >}}
+  {{< hextra/feature-card
+    title="The unpopular kids"
+    subtitle="Linux is home. FreeBSD is tested on its own hardware, where it found a bug no amount of green CI had. macOS compiles and has never been run — and the docs say which is which rather than showing three logos. Windows is a decided non-goal."
   >}}
   {{< hextra/feature-card
     title="Free and open"

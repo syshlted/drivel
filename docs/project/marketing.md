@@ -8,7 +8,7 @@ disagree, [the README](../../README.md) and [docs/user/](../user/) are right and
 this file needs updating.
 
 One subject to keep out of all of it: **where data goes, and what is or is not
-collected.** No "nothing phones home" — Drivel's entire job is talking to a cloud
+collected.** No "nothing phones home" — Drivel's entire job is talking to a remote
 provider, so to a careful reader the phrase contradicts the product and to a
 careless one it promises an offline tool. But no narrower version either: a
 promise about traffic or telemetry is a promise about every dependency in the
@@ -33,7 +33,8 @@ is not, and neither is implying there are others already.
 
 ## Tagline options
 
-- **Your cloud storage, as an ordinary folder.**
+- **Cloud Sync for The Unpopular Kids!** — what the website leads with.
+- **Your remote storage, as an ordinary folder.**
 - **Mount your storage. Own your credentials. Sync in the background.**
 - **A cloud drive without the write-through latency.**
 
@@ -41,9 +42,36 @@ For a channel that is specifically Drive users, *"Your Drive, as a folder"* is
 fair game — but never in copy that says what Drivel **is**. Drive is the backend
 that ships, not the product.
 
+### A tagline may lean where the users are; the descriptive copy may not
+
+These two rules look like they contradict each other, and the first line above
+is where they meet, so it is worth writing down which is doing what.
+
+**"Cloud Sync" is a bet on who is reading.** Cloud storage is what almost
+everyone arrives wanting, Drive is the backend with the change feed and all of
+the mileage, and a tagline that hedged into "remote storage provider" would be
+accurate and say nothing. So the site leads with it.
+
+**The hero paragraph below still says "storage provider", and must.** That is
+what the program is: the sync engine, the FUSE layer, hydration, the delete
+guards and the reconcile sweep are **79% of the non-test code and have never
+heard of a cloud**; Drive-specific code is about 15%, and three of twenty-three
+mount flags. Most of the roadmap — a deduplicating local store, a plain
+directory, SMB, WebDAV — is not a cloud service at all, and SFTP already is not
+one. Keep the registers apart and both stay true. Collapse them and the tagline
+starts dating the product.
+
+**"The Unpopular Kids" are the platforms, not the reader.** Everything with FUSE
+that is not Windows: Linux, FreeBSD, macOS. It needs somewhere to land or it
+reads as self-deprecation about the users, which is the opposite of the intent —
+so the site's feature grid spells out which of the three is tested, which only
+compiles, and that Windows was declined on purpose. Said plainly it is a flex
+about who the project builds for. Left unexplained it is a shrug, and a shrug
+sits badly beside a banner warning about data loss.
+
 ## Hero paragraph
 
-**Drivel turns a folder on a cloud storage provider into an ordinary directory on
+**Drivel turns a folder on a storage provider into an ordinary directory on
 your machine.** Open, edit, and save files with the tools you already use — Drivel
 intercepts every operation, keeps a real local copy as the source of truth, and
 syncs changes with the provider in the background, in both directions. Reads and lookups are
@@ -67,15 +95,17 @@ mutation becomes a change event handled off the FUSE path — debounced per path
 dispatched through a path-hashed worker pool, and retried with backoff on
 transient provider errors. Inbound, a poll loop follows Drive's `changes.list`
 cursor feed and applies remote edits locally, with echo/loop suppression so a
-change you just made doesn't ricochet back and overwrite itself. All Drive
-traffic runs over HTTP/3 (QUIC) with automatic HTTP/2 fallback. The cloud backend
-sits behind a small path-addressed interface, so Drive is the first provider, not
-the only possible one.
+change you just made doesn't ricochet back and overwrite itself. SFTP has no
+feed of any kind, so there the enumeration sweep *is* the inbound path. All Drive
+traffic runs over HTTP/3 (QUIC) with automatic HTTP/2 fallback. The remote side
+sits behind a small path-addressed interface, and each backend runs in its own
+process, so Drive is the first provider rather than the only possible one.
 
 ## Feature bullets
 
-- **Bidirectional background sync** — edit locally or in the cloud, both
-  converge. Google Drive is the backend that ships today.
+- **Bidirectional background sync** — edit locally or remotely, both converge.
+  Two backends ship today: Google Drive, and SFTP to any server you have an SSH
+  account on.
 - **Instant reads** — filesystem operations never block on the network.
 - **Lazy mode** — a whole remote tree visible as zero-byte placeholders, content
   fetched on first read. A store larger than the disk becomes usable.
@@ -87,8 +117,8 @@ the only possible one.
   other before any of them opens.
 - **In-place mode (Linux)** — mount a directory onto itself; files just stay put
   when Drivel exits, with no separate cache directory.
-- **Pluggable backends** — the cloud side is a narrow path-addressed interface
-  rather than a Drive-shaped one.
+- **Pluggable backends** — the remote side is a narrow path-addressed interface
+  rather than a Drive-shaped one, and each backend runs in its own process.
 - **Bring your own credentials** — Drivel ships none of its own; you supply the
   credentials for the backend you point it at.
 - **HTTP/3 transport** with HTTP/2 fallback.
@@ -100,6 +130,6 @@ the only possible one.
 
 ## One-liner for a repo description
 
-> A Go FUSE filesystem that mounts cloud storage as a local directory and syncs
-> it bidirectionally in the background — Google Drive today, behind a pluggable
-> provider interface. Bring your own credentials. HTTP/3.
+> A Go FUSE filesystem that mounts remote storage as a local directory and syncs
+> it bidirectionally in the background — Google Drive and SFTP today, behind a
+> pluggable provider interface. Bring your own credentials. HTTP/3.
