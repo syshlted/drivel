@@ -162,8 +162,9 @@ type RangeGetter interface {
 ```
 
 `length <= 0` means "to end of object", and the returned reader covers at most the
-requested extent starting at `off`. This is what M5b's per-block faulting uses. It
-is genuinely optional: M5's whole-file hydration works through plain `Get`, so
+requested extent starting at `off`. Per-block faulting would use it, if that is
+ever built — the hydration schema was designed to accommodate it, though it is
+not a scheduled milestone. It is genuinely optional: M5's whole-file hydration works through plain `Get`, so
 omitting it costs efficiency on large files, not features.
 
 Don't emulate it by fetching the whole object and discarding the prefix — that is

@@ -23,11 +23,19 @@ provider. First (and currently only) provider: **Google Drive**.
 
 **Non-goals (v1)**
 - Deduplication / content-defined chunking / GPU. (v2+)
-- Multi-provider abstraction beyond a thin interface. (Drive-only now, but don't
-  hard-code Drive into the FS layer.)
+- Multi-provider abstraction beyond a thin interface. Drive was the only backend
+  when this was written; the instruction that came with it — don't hard-code
+  Drive into the FS layer — is the one that mattered.
 - Conflict *resolution* UI. v1 uses a deterministic policy (last-writer-wins by
   mtime, with conflict copies) and logs conflicts.
 - Real-time collaborative editing semantics.
+
+**This section is v1's scope, kept as it was written.** Read it as the aim, not
+as the current state: v2 has since built most of what the second non-goal ruled
+out. Two backends ship and neither is hard-coded anywhere above the seam (§2.5),
+each runs in its own process (§2.10), and one process serves several accounts at
+once (§2.8). The thin interface is why that cost no change to the FS layer,
+which is the part this section got right.
 
 ---
 
@@ -1076,7 +1084,7 @@ are both lossy and racy.
 2. **M2 — Transport + Drive auth + one-shot push.** `internal/transport` HTTP/3→HTTP/2
    client (§2.6), OAuth folded on top, upload a file on close. ✅
 3. **M3 — Pull loop.** `changes.list` cursor loop (`internal/syncengine.Downloader`) →
-   underlying dir, with §4 echo suppression and adaptive cadence (§3.4). Engine-level
+   underlying dir, with §4 echo suppression and adaptive cadence (§3.5). Engine-level
    state (cursor + echo records) persisted in `internal/state` (bbolt). ✅ The
    provider-internal path↔ID index stays in-memory (self-rebuilding, §2.5); its bbolt
    persistence lands in M7.
@@ -1101,8 +1109,10 @@ are both lossy and racy.
    its content is faulted in on first use. `internal/hydrate` owns the model;
    `provider.RangeGetter` (implemented by `gdrive` via an HTTP `Range` header) and
    the per-file present-ranges bitmap are defined in full, though M5 itself only
-   ever stores the all-or-nothing cases. That is deliberate: M5b (per-block
-   faulting) and M6 (dirty ranges) inherit the schema rather than migrating it.
+   ever stores the all-or-nothing cases. That is deliberate: **per-block faulting**
+   — which has never been scheduled and is deliberately not given a milestone
+   number here — and M6 (dirty ranges) inherit the schema rather than migrating
+   it.
 
    Three decisions carry the correctness:
 
@@ -1790,14 +1800,10 @@ are both lossy and racy.
    So capability detection moved into the seam. `provider.Capability` is a bit per
    optional interface, a store may implement `provider.Declarer` to say which it
    offers, and callers ask through `provider.AsChangeSource` and its four
-   siblings. There are six call sites in the tree and they all changed. The rule
-   that makes it safe is a one-line invariant:
-
-   > **A declaration narrows and can never widen.** `provider.Capabilities`
-   > returns the intersection of what the value's method set can do and what it
-   > declares, so a store cannot talk its way into a capability it has no method
-   > for. The worst a wrong declaration can do is cost a feature; it can never
-   > produce a call into a method that is not there.
+   siblings. There are six call sites in the tree and they all changed. What
+   makes it safe is the one-line invariant §2.5 states — **a declaration narrows
+   and can never widen** — which is recorded there, with the seam it governs,
+   rather than a second time here.
 
    In-process backends are unaffected: `gdrive` and `sftp` implement exactly what
    they can honour, which is already an exact answer, and neither implements
