@@ -152,6 +152,10 @@ versions fail too.
 
 ## Website
 
+**`docs/dev/website.md` is the contributor-facing version of this section** —
+the published one, kept to the standard of the two collections. What follows is
+the short form; when they disagree, that file is right.
+
 `site/` is a Hugo site (theme: Hextra, pulled as a Hugo *module*, so `site/` has
 a `go.mod` of its own that the root module never sees), published to
 `syshlted.github.io/drivel/` by `.github/workflows/pages.yml`, which pins

@@ -2,9 +2,11 @@
 
 Drivel is a Go FUSE filesystem that mounts a local directory as an
 **interceptor**: every operation is proxied to a backing directory (the source of
-truth) and asynchronously, bidirectionally synced with a cloud provider. Google
-Drive is the first provider, via the Drive API's `changes.list` cursor feed — not
-webhooks, not the Workspace Events API.
+truth) and asynchronously, bidirectionally synced with a storage provider. **Two
+backends ship**: Google Drive, driven by the Drive API's `changes.list` cursor
+feed — not webhooks, not the Workspace Events API — and SFTP, which has no change
+feed of any kind and is therefore polled by the enumeration sweep. Each backend
+runs in its own process.
 
 ## Reading order
 
@@ -21,6 +23,10 @@ to touch anything outside your own package.
 
 **Just want it to build?** [Building](building.md) and [Testing](testing.md).
 
+**Changing the website?** [The website](website.md). It renders `docs/user/` by
+mounting it, so editing the manual changes the site without anyone touching
+`site/`.
+
 | | |
 | --- | --- |
 | [Architecture](architecture.md) | Runtime components, package dependency graph, and what the seams enforce. |
@@ -33,6 +39,7 @@ to touch anything outside your own package.
 | [Writing a provider](new-provider.md) | `provider.Store` and its optional interfaces, with a checklist. |
 | [Glossary](glossary.md) | Echo, baseline, sweep, placeholder, seam, generation. |
 | [Multi-client test plan](multiclient-test-plan.md) | The fleet-convergence campaign and its rig. |
+| [The website](website.md) | How `syshlted.github.io/drivel` is built, why it mounts `docs/user/` instead of copying it, and what generates its images. |
 
 ## The two documents that are not here
 
@@ -69,4 +76,6 @@ for reasoning, not for interface documentation.
 | `internal/state` | Engine-level bbolt state: cursor, echo records, sweep marks. |
 | `internal/pathindex` | Provider-private bbolt path↔ID cache. |
 | `internal/hydrate` | Lazy hydration: placeholders, the xattr marker, fault-in on first I/O. |
+| `internal/completion` | Leaf, pure: renders the bash and zsh completion stubs and answers `drivel __complete`. |
 | `internal/testenv` | Test-only: turns a silently-skipped kernel facility into a failure in CI. |
+| `contrib/` | Not a package — two `//go:build ignore` generators that derive the artwork and the website's images. See [the website](website.md). |

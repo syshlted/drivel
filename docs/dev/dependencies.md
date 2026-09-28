@@ -187,6 +187,40 @@ The corresponding rule: **the config file is only ever appended to, never
 re-serialized.** Any encoder round trip drops every comment, which would defeat
 the reason TOML was chosen.
 
+## Not Go modules, and not in `go.mod`
+
+Two things the project depends on that `go mod graph` will never show, because
+neither is imported by any package that ships.
+
+### Hugo and Hextra — the website
+
+`site/` is a Hugo site with a **`go.mod` of its own**, pulling
+[Hextra](https://github.com/imfing/hextra) as a Hugo module. It is a separate
+module from the program: `go build ./...`, `go test ./...` and the linters never
+see it, and `make` has no site target. The Hugo version is pinned in
+`.github/workflows/pages.yml` and building with a different one is not
+trustworthy. See [the website](website.md).
+
+The theme is a dependency in the sense that matters — an upgrade can change how
+every page renders — but it costs the program nothing, which is why it lives
+behind a module boundary instead of in the root `go.mod`.
+
+### `ascii-image-converter` — the braille artwork
+
+`contrib/gen-logo-assets.go` shells out to
+[it](https://github.com/TheZoraiz/ascii-image-converter) rather than
+reimplementing threshold-and-pack-dots, which would be about thirty lines.
+
+The reason is not effort. The committed braille art is the reference for what
+that art *looks like*, and matching it means matching that program's choices
+rather than making new ones and calling them the same — which is checkable:
+`go run contrib/gen-logo-assets.go -verify` reproduces the previous artwork's
+braille byte for byte. A reimplementation would have been a second opinion
+wearing the same filename.
+
+It is needed only when the artwork is redrawn, so it is not installed by
+`make`, and nothing in CI or the test suite invokes it.
+
 ## What is deliberately absent
 
 | Not used | Why |

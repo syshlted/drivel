@@ -139,6 +139,7 @@ flowchart TD
     sftpcmd["cmd/drivel-provider-sftp"]
     pathindex["internal/pathindex<br/>bbolt path↔ID cache"]
     gauth["internal/gauth<br/>OAuth login + token I/O"]
+    completion["internal/completion<br/>completion protocol (leaf, pure)"]
     transport["internal/transport<br/>HTTP/3 → HTTP/2"]
 
     main --> app
@@ -148,6 +149,7 @@ flowchart TD
     main --> gdconf
     main --> syncengine
     main --> gauth
+    main --> completion
 
     pluginpkg --> provider
     pluginpkg --> rangespkg

@@ -7,6 +7,19 @@ This is a *source* for copy, not a description of the product: when the two
 disagree, [the README](../../README.md) and [docs/user/](../user/) are right and
 this file needs updating.
 
+One subject that may **not** be left out, unlike everything below: **Drivel is
+a work in progress and may lose data.** Every page of the website says so, the
+README opens with it, and the man page's description begins with it — so copy
+that sells the product without it is not merely incomplete, it contradicts the
+thing it is advertising. None of the paragraphs here are approved for a context
+that hides it. [status.md](../user/status.md) is the single source; a blurb
+needs a clause, not a copy of the page.
+
+This is the "no vaporware" rule pointed at the present rather than the roadmap.
+Claiming a feature that does not exist and omitting that the ones that do are
+under-tested are the same failure, and the second is easier to commit by
+accident.
+
 One subject to keep out of all of it: **where data goes, and what is or is not
 collected.** No "nothing phones home" — Drivel's entire job is talking to a remote
 provider, so to a careful reader the phrase contradicts the product and to a

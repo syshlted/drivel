@@ -157,6 +157,37 @@ alternative (a compatible range) fails silently, with an almost-compatible plugi
 answering most calls correctly and losing a sentinel error somewhere in the
 middle.
 
+## Validating the mermaid diagrams
+
+`docs/dev/` carries fourteen mermaid diagrams, and the rule is that they are
+**checked by parsing them, not by eye** — a diagram with a syntax error renders
+as an error box on the website and as nothing at all on GitHub, and neither is
+visible in a diff.
+
+There is no `make` target for it, deliberately: the parser is JavaScript, and
+wiring npm into the gates would put a second toolchain in front of every commit
+to buy a check that matters only when a diagram changes. Run it when you touch
+one:
+
+```sh
+mkdir -p /tmp/mmd && cd /tmp/mmd && npm install mermaid jsdom
+```
+
+```js
+// check.mjs — extract every ```mermaid block from docs/ and parse it
+import { JSDOM } from 'jsdom';
+const dom = new JSDOM('<!doctype html><html><body></body></html>');
+global.window = dom.window; global.document = dom.window.document;
+Object.defineProperty(global, 'navigator',
+  { value: dom.window.navigator, configurable: true });
+const mermaid = (await import('mermaid')).default;
+await mermaid.parse(yourDiagramSource);   // throws on a syntax error
+```
+
+The DOM shim is not optional: mermaid sanitises through DOMPurify, which fails
+with `DOMPurify.addHook is not a function` in a bare Node process — an error
+about the harness, not about the diagram, and easy to mistake for one.
+
 ## Upgrading the Go toolchain
 
 Three things move together, and the Makefile enforces the first:
