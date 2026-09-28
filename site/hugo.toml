@@ -74,7 +74,15 @@ locale = "en-us"
     endLevel = 3
 
 [params]
-  description = "Drivel turns a folder on a storage provider into an ordinary directory on your machine."
+  # The site's tagline: the line that represents Drivel where the site is not
+  # being read -- a search result, a link preview, a browser's bookmark. It
+  # leads with the tagline and then says what the program is, because a snippet
+  # that is only a joke tells a stranger nothing and one that is only a
+  # description is indistinguishable from every other sync tool.
+  #
+  # It is the site-wide fallback, so every page without a description of its own
+  # uses it; the manual pages have their own, taken from their opening lines.
+  description = "Cloud Sync for The Unpopular Kids! Drivel turns a folder on a storage provider into an ordinary directory on your machine."
 
   # og:image, for every page that does not set its own. The card is generated
   # from the artwork by contrib/gen-site-images.go -- and it is the one image
