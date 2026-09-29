@@ -40,8 +40,10 @@ func Zsh(a App) ([]byte, error) {
 	p("#   fpath=(~/.zsh/completions $fpath)")
 	p("#   autoload -Uz compinit && compinit")
 	p("#")
-	p("# The eval form works too, but only *after* compinit has run, because this")
-	p("# is an autoloaded function file rather than a script:")
+	p("# The eval form works too, but only *after* compinit has run, because that is")
+	p("# what defines compdef, which is how this file registers itself when it is not")
+	p("# being autoloaded:")
+	p("#   autoload -Uz compinit && compinit")
 	p("#   eval \"$(%s completion zsh)\"", a.Name)
 	p("")
 	p("_%s() {", a.Name)
@@ -97,7 +99,25 @@ func Zsh(a App) ([]byte, error) {
 		p("}")
 	}
 	p("")
-	p(`_%s "$@"`, a.Name)
+	// How this file is reached decides what the last line must do, and it cannot
+	// be told at render time. Autoloaded from $fpath the whole file *is* the body
+	// of _NAME, so it has to end by calling the function it just defined;
+	// eval'd or sourced, nothing has registered the function with the completion
+	// system and calling it runs _arguments outside a completion widget, which
+	// fails with "can only be called from completion function". $funcstack is what
+	// distinguishes them: it names _NAME only in the autoload case.
+	p("if [[ $funcstack[1] == _%s ]]; then", a.Name)
+	p(`    _%s "$@"`, a.Name)
+	p("elif (( $+functions[compdef] )); then")
+	p("    compdef _%s %s", a.Name, a.Name)
+	p("else")
+	p(`    print -u2 -- '_%s: run compinit before eval "$(%s completion zsh)"'`, a.Name, a.Name)
+	// false and not `return 1`: this is most often eval'd from .zshrc, where a
+	// return inside an eval returns from the sourced file and silently abandons
+	// the rest of someone's shell configuration. A non-zero status is worth
+	// reporting; taking the rest of .zshrc with it is not.
+	p("    false")
+	p("fi")
 	return []byte(b.String()), nil
 }
 

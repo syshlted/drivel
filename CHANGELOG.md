@@ -14,6 +14,28 @@ from source with `make build`.
 
 ## Unreleased
 
+### zsh completions work from `eval` — 2026-09-29
+
+**`eval "$(drivel completion zsh)"` failed with
+`_arguments:comparguments:327: can only be called from completion function`, and
+completion did not work.** Dropping the quotes silenced the error but still left
+completion dead, because without them the whole script collapses onto one line
+that zsh reads as a comment. Only the documented route — writing the script to a
+file named `_drivel` on your `$fpath` — ever worked.
+
+The generated script now ends by asking how it was reached: autoloaded from
+`$fpath` it calls itself, as that form requires, and sourced or `eval`'d it
+registers itself with `compdef` instead of running the completion machinery
+outside a completion widget. Both routes work, and the file route is unchanged.
+
+The one rule is ordering, and it was already documented: the `eval` has to come
+after `autoload -Uz compinit && compinit`, which is what defines `compdef`.
+Placed earlier it now prints one line saying so and leaves the rest of your
+`~/.zshrc` running. The reason given for that rule was wrong, though — it is not
+that `_drivel` is an autoloaded function file, it is that the script needs
+`compdef` to register itself — so `install.md` and the man page say it correctly
+now.
+
 ### Windows: two caveats tested, one of them withdrawn — 2026-09-29
 
 Drivel was run on Windows 11 for the first time, under WSL2. Nothing about the

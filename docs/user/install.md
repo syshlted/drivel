@@ -145,7 +145,9 @@ drivel completion zsh
 To try it in the shell you are in right now:
 
 ```sh
-eval "$(drivel completion bash)"
+eval "$(drivel completion bash)"                    # bash
+autoload -Uz compinit && compinit                   # zsh: once, if you have not
+eval "$(drivel completion zsh)"                     # zsh
 ```
 
 That works, but it runs Drivel every time a shell starts. For a permanent install,
@@ -164,9 +166,10 @@ drivel completion zsh > ~/.zsh/completions/_drivel
 autoload -Uz compinit && compinit
 ```
 
-For zsh the file is the better route rather than merely the tidier one: `_drivel`
-is an autoloaded function file, so the `eval` form only works if it comes *after*
-`compinit` in your `~/.zshrc`.
+For zsh the file is the better route rather than merely the tidier one, and the
+`eval` form has one ordering rule: it must come *after* `compinit` in your
+`~/.zshrc`, because `compinit` is what defines the `compdef` the script uses to
+register itself. Put it earlier and it prints a line saying so and does nothing.
 
 The script is **generated from Drivel's own flag definitions** at the moment you
 run the command, so it knows every flag your binary does — including which take a

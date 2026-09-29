@@ -186,6 +186,7 @@ To enable completion in the current shell:
 .IP
 .EX
 eval "$(drivel completion bash)"
+eval "$(drivel completion zsh)"
 .EE
 .IP
 That runs
@@ -199,13 +200,18 @@ for zsh, a file named
 .I _drivel
 in a directory on
 .IR $fpath .
-For zsh the file is the better route rather than merely the tidier one:
-.I _drivel
-is an autoloaded function file, so the
+For zsh the file is the better route rather than merely the tidier one, and the
 .B eval
-form works only after
+form must come after
 .B compinit
-has run.
+in
+.IR ~/.zshrc ,
+because
+.B compinit
+is what defines the
+.B compdef
+the script uses to register itself. Placed earlier it reports that and does
+nothing.
 .TP
 .B help
 Print top-level usage and exit. The flag spellings

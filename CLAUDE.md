@@ -1354,14 +1354,37 @@ carry it.
    different things across subcommands, because bash completes a value from the
    previous word alone and cannot tell which subcommand it is in.
 
+5. **The zsh renderer is driven, not just parsed.** `TestZshCompletes` runs a
+   real zsh through `zsh/zpty` — a completion function only runs inside a
+   completion widget, a widget only runs under ZLE, and ZLE needs a tty, so zsh
+   cannot be handed `COMP_WORDS` the way bash can. Both install forms are
+   exercised because the last line behaves differently in each, and the harness
+   asserts `$_comps[prog]` first: with nothing registered every completion below
+   falls back to filenames and the case "passes" for the wrong reason. No sleeps
+   are needed — ZLE handles keys in order, so the TAB has been processed by the
+   time the dump widget runs. `TestZshEvalFormIsSilent` covers the same bug
+   without a terminal, so it still guards where zpty is unavailable. Both were
+   confirmed to fail against the unguarded tail.
+
 `make install` generates at install time by running the binary it just built,
 which means **cross-compiling and then installing needs an emulator or a second
 native build**. That is the trade, and it is the same one every other Go CLI makes.
 
 The `eval "$(drivel completion bash)"` form is documented but is deliberately not
 the only advice: it runs drivel at every shell start, and for zsh it works only
-*after* `compinit`, since `_drivel` is an autoloaded function file rather than a
-script. Writing the file is what the man page and `install.md` lead with.
+*after* `compinit`, which is what defines `compdef`. Writing the file is what the
+man page and `install.md` lead with.
+
+**The zsh script's last line has to do two different things and cannot know which
+at render time**, so it branches on `$funcstack[1]`: autoloaded from `$fpath` the
+whole file *is* the body of `_drivel`, so it must end by calling the function it
+just defined; `eval`'d or sourced, nothing has registered it and calling it runs
+`_arguments` outside a completion widget — `can only be called from completion
+function`, which is what an unguarded call shipped for two weeks. The else arm
+ends in `false` and **not `return 1`**: a `return` inside an `eval` in `.zshrc`
+returns from the *sourced file*, silently abandoning the rest of someone's shell
+configuration. Neither half of this is visible to `zsh -n`, which is why the zsh
+renderer is now tested by completing with it (see rule 5).
 
 The renderers are tested by **running** the output — bash sources the rendered
 script and answers a real completion; zsh parses it. An assertion that

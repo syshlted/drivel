@@ -6,6 +6,7 @@
 package completion
 
 import (
+	"errors"
 	"os/exec"
 	"strings"
 	"testing"
@@ -150,5 +151,140 @@ func TestZshEscapesDescriptions(t *testing.T) {
 	}
 	if b, err := exec.Command(zsh, "-n", f).CombinedOutput(); err != nil { //nolint:gosec // G204: a file this test just wrote
 		t.Errorf("zsh cannot parse the generated file: %v\n%s", err, b)
+	}
+}
+
+// zshHarness drives a real zsh through a pseudo-terminal. A completion function
+// only runs inside a completion widget, a widget only runs under ZLE, and ZLE
+// needs a tty — so unlike bash, zsh cannot be handed COMP_WORDS and asked for an
+// answer. zsh/zpty supplies the terminal; the _dump widget reports the line
+// buffer through a file, because reading it off the screen would mean parsing
+// terminal escapes.
+//
+// No sleep between the TAB and the ^X: ZLE handles keys in order, so completion
+// has finished by the time the dump widget runs.
+//
+// Arguments: the completion file, the install form (fpath or eval), a scratch
+// file, then one input per completion to try. Prints the registered function
+// name, then the resulting line buffer for each input.
+const zshHarness = `
+zmodload zsh/zpty || exit 3
+file=$1 mode=$2 out=$3; shift 3
+dir=${file:h}; name=${${file:t}#_}
+: > $out
+zpty Z "zsh -f" || exit 3
+w() { zpty -w Z "$1" }
+await() { local i; for i in {1..200}; do [[ $(wc -l < $out) -ge $1 ]] && return 0; sleep 0.1; done; return 1 }
+w 'PS1="%% "'
+w 'setopt nonomatch; unsetopt beep; zstyle ":completion:*" menu no'
+w "_dump() { print -r -- \"\$BUFFER\" >> $out; BUFFER=''; CURSOR=0 }"
+w 'zle -N _dump; bindkey "^X" _dump'
+[[ $mode == fpath ]] && w "fpath=($dir \$fpath)"
+w 'autoload -Uz compinit && compinit -u -d /dev/null'
+[[ $mode == eval ]] && w "eval \"\$(cat $file)\""
+w "print -r -- \"registered=\${_comps[$name]}\" >> $out"
+await 1 || { print -r -- "the harness shell never answered"; zpty -d Z; exit 4 }
+n=1
+for in; do
+	zpty -w -n Z "$in"$'\t\C-x'
+	(( n++ ))
+	await $n || { print -r -- "TIMEOUT completing: $in"; break }
+done
+zpty -d Z
+cat $out
+`
+
+// The zsh half of TestBashCompletes: the generated script is checked by
+// completing with it, not by reading it. Both install forms are exercised
+// because the last line of the file has to do a different thing in each, and
+// getting that wrong is invisible to a syntax check — eval'd, the old unguarded
+// call to _prog ran _arguments outside a completion widget, which failed with
+// "can only be called from completion function" and left nothing registered.
+func TestZshCompletes(t *testing.T) {
+	zsh, err := exec.LookPath("zsh")
+	if err != nil {
+		t.Skip("zsh not installed")
+	}
+	script, err := Zsh(sample())
+	if err != nil {
+		t.Fatalf("Zsh: %v", err)
+	}
+	dir := t.TempDir()
+	file := dir + "/_prog"
+	if err := writeFile(file, script); err != nil {
+		t.Fatal(err)
+	}
+	harness := dir + "/harness.zsh"
+	if err := writeFile(harness, []byte(zshHarness)); err != nil {
+		t.Fatal(err)
+	}
+
+	cases := []struct{ in, want string }{
+		// The command slot, and the leading flag that means the default command.
+		{"prog se", "prog setup"},
+		{"prog -lo", "prog -loud"},
+		// A subcommand's own flags, and an enum's values.
+		{"prog setup -f", "prog setup -from="},
+		{"prog go -mode=sl", "prog go -mode=slow"},
+	}
+	for _, mode := range []string{"fpath", "eval"} {
+		t.Run(mode, func(t *testing.T) {
+			args := []string{harness, file, mode, dir + "/out." + mode}
+			for _, c := range cases {
+				args = append(args, c.in)
+			}
+			out, err := exec.Command(zsh, append([]string{"-f"}, args...)...).CombinedOutput() //nolint:gosec // G204: a harness this test just wrote
+			if err != nil {
+				var ee *exec.ExitError
+				if errors.As(err, &ee) && ee.ExitCode() == 3 {
+					t.Skip("zsh/zpty unavailable")
+				}
+				t.Fatalf("running the harness: %v\n%s", err, out)
+			}
+			lines := strings.Split(strings.TrimRight(string(out), "\n"), "\n")
+			if len(lines) != len(cases)+1 {
+				t.Fatalf("harness produced %d lines, want %d:\n%s", len(lines), len(cases)+1, out)
+			}
+			// Half the bug: with nothing registered, every completion below would
+			// fall back to filenames and quietly "pass" for the wrong reason.
+			if lines[0] != "registered=_prog" {
+				t.Fatalf("the %s form left %q registered; want _prog\n%s", mode, lines[0], out)
+			}
+			for i, c := range cases {
+				if got := strings.TrimSpace(lines[i+1]); got != c.want {
+					t.Errorf("completing %q gave %q; want %q", c.in, got, c.want)
+				}
+			}
+		})
+	}
+}
+
+// The reported failure, isolated from the completion machinery: the eval form
+// must define and register the function and print nothing at all. It is a
+// separate test because it needs no terminal, so it still guards this if zpty
+// is unavailable wherever the suite runs.
+func TestZshEvalFormIsSilent(t *testing.T) {
+	zsh, err := exec.LookPath("zsh")
+	if err != nil {
+		t.Skip("zsh not installed")
+	}
+	script, err := Zsh(sample())
+	if err != nil {
+		t.Fatalf("Zsh: %v", err)
+	}
+	file := t.TempDir() + "/_prog"
+	if err := writeFile(file, script); err != nil {
+		t.Fatal(err)
+	}
+	prog := `autoload -Uz compinit && compinit -u -d /dev/null
+eval "$(cat ` + file + `)" || exit 1
+[[ $_comps[prog] == _prog ]] || { print -r -- "not registered: [$_comps[prog]]"; exit 1 }
+`
+	out, err := exec.Command(zsh, "-f", "-c", prog).CombinedOutput() //nolint:gosec // G204: a script this test just rendered
+	if err != nil {
+		t.Fatalf("eval'ing the generated script: %v\n%s", err, out)
+	}
+	if len(out) != 0 {
+		t.Errorf("eval'ing the generated script printed %q; want nothing", out)
 	}
 }
