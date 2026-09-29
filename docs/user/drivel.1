@@ -208,7 +208,15 @@ form works only after
 has run.
 .TP
 .B help
-Print top-level usage.
+Print top-level usage and exit. The flag spellings
+.BR -h ,
+.B -help
+and
+.B --help
+do the same when they are the first argument; after a subcommand they belong to
+that subcommand, so
+.B "drivel mount -h"
+lists the mount options.
 .SH MOUNT OPTIONS
 .TP
 .BI -config " file"

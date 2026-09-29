@@ -40,12 +40,7 @@ func main() {
 		return
 	}
 
-	cmd := ""
-	// Accept a leading subcommand; anything starting with '-' means the default
-	// (mount) command with flags, preserving `drivel -mount ... -data ...`.
-	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
-		cmd, args = args[0], args[1:]
-	}
+	cmd, args := parseCommand(args)
 	// The subcommands return their errors instead of calling log.Fatal, so the
 	// defers they set up — unmounting, closing the state DBs, draining the sync
 	// engine — actually run before the process exits.
@@ -60,13 +55,37 @@ func main() {
 		failHelper(runMountHelper(args))
 	case "completion":
 		fail(runCompletion(args))
-	case "help", "-h", "--help":
+	case "help":
 		usage(os.Stdout)
 	default:
 		fmt.Fprintf(os.Stderr, "unknown command %q\n\n", cmd)
 		usage(os.Stderr)
 		os.Exit(2)
 	}
+}
+
+// parseCommand splits argv into a subcommand and the arguments belonging to it.
+// A leading word that is not a flag is the subcommand; anything else means the
+// default (mount) command with flags, preserving `drivel -mount ... -data ...`.
+//
+// The help spellings are why this is a function rather than the inline condition
+// it used to be. They begin with '-', so the old test handed them to mount, whose
+// flag set answered a question about the program with "Usage of mount:" and a
+// dump of mount's flags. All three that `flag` itself accepts are listed, because
+// the one left out is the one a user types. `drivel mount -h` is unaffected: the
+// subcommand is taken first, and -h reaches mount's flag set as before.
+func parseCommand(args []string) (string, []string) {
+	if len(args) == 0 {
+		return "", nil
+	}
+	switch args[0] {
+	case "-h", "-help", "--help":
+		return "help", args[1:]
+	}
+	if strings.HasPrefix(args[0], "-") {
+		return "", args
+	}
+	return args[0], args[1:]
 }
 
 // failHelper reports a mount-helper failure the way mount(8) expects: the

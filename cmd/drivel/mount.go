@@ -87,7 +87,7 @@ type mountCLI struct {
 // removes the pointer-and-copy block that used to sit between the definitions
 // and specFlags, where a flag could be defined and then never carried.
 func mountFlagSet(c *mountCLI) *flag.FlagSet {
-	fset := flag.NewFlagSet("mount", flag.ExitOnError)
+	fset := flag.NewFlagSet("drivel mount", flag.ExitOnError)
 	fset.StringVar(&c.configPath, "config", "", "TOML config file describing one or more mounts; defaults to $XDG_CONFIG_HOME/drivel/config.toml when no mount flags are given")
 	fset.StringVar(&c.mountpoint, "mount", "", "path to mount the filesystem (required unless -config is used)")
 	fset.StringVar(&c.dataDir, "data", "", "backing directory (source of truth). If omitted, in-place mode uses the mount dir as its own backing (Linux only)")

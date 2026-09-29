@@ -40,7 +40,7 @@ type loginCLI struct {
 // completion generator walks this set, so there is one description of these
 // flags rather than one in the program and one in a shell script.
 func loginFlagSet(c *loginCLI) *flag.FlagSet {
-	fs := flag.NewFlagSet("login", flag.ExitOnError)
+	fs := flag.NewFlagSet("drivel login", flag.ExitOnError)
 	fs.StringVar(&c.account, "account", "", "name this login as an account: store its files under $XDG_CONFIG_HOME/drivel/NAME and add [account.NAME] to the config file")
 	fs.StringVar(&c.configPath, "config", "", "config file to add the account to (default: $XDG_CONFIG_HOME/drivel/config.toml)")
 	fs.StringVar(&c.credPath, "credentials", "credentials.json", "path to read/write the OAuth client secret JSON")

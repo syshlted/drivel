@@ -39,6 +39,20 @@ written down where they matter: mounting at boot has not been exercised, and it 
 not yet known whether pending uploads finish flushing if systemd stops a unit whose
 mount is wedged.
 
+### `drivel --help` answers the question you asked — 2026-09-29
+
+`drivel --help`, `drivel -h` and `drivel -help` printed the mount command's flag
+list under the heading `Usage of mount:`. Only the bare word `drivel help`
+reached the real top-level usage — the one that names the subcommands and says
+where to go next. The flag spellings were recognised in the dispatch but could
+never be reached, because anything beginning with a dash was handed to `mount`
+before the check ran.
+
+All four spellings now print the same top-level usage. A help flag *after* a
+subcommand is unchanged and still belongs to it, so `drivel mount -h` lists the
+mount options — which now head their list with `Usage of drivel mount:` rather
+than naming the subcommand as though it were the program.
+
 ### A work-in-progress warning, said out loud — 2026-09-26
 
 Drivel now says on every page of its website, at the top of its README, in the
