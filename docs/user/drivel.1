@@ -1049,13 +1049,16 @@ untested and prefer the default eager mode.
 If the marker cannot be written there is no record that a file is a placeholder at
 all, and an unfetched file is indistinguishable from an empty one. This covers a
 .I -data
-directory on
-.I /mnt/c
-or another drvfs mount under WSL2, on exFAT or FAT, and on a FreeBSD
+directory on exFAT or FAT, and on a FreeBSD
 .I tmpfs
 (UFS and ZFS carry extended attributes;
 .I tmpfs
-does not).
+does not). Windows drives under WSL2 depend on the Windows filesystem rather than
+on WSL: over NTFS the attributes are carried and the marker survives a
+.BR "wsl --shutdown" ,
+over exFAT they are not. Prefer the Linux filesystem inside WSL regardless, since
+NTFS is case-insensitive and two names differing only in case collide into one
+local path.
 .B drivel
 warns at startup, naming the directory: the fix is eager mode or a different
 .IR -data ,

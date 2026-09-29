@@ -663,9 +663,10 @@ Three invariants; breaking any of them loses user data.
    marker means no placeholder record at all**, immediately — not "after the DB is
    lost", which is what these notes wrongly said until M10. The practical
    consequence is invariant 2's: on a backing filesystem with no user xattrs
-   (drvfs under WSL2, exFAT, a tmpfs `/tmp` on FreeBSD) `-lazy` is unsafe and the
-   mount warns; the mitigation is eager mode or a different `-data`, never "keep
-   the state DB".
+   (exFAT/FAT, a tmpfs `/tmp` on FreeBSD) `-lazy` is unsafe and the mount warns;
+   the mitigation is eager mode or a different `-data`, never "keep the state
+   DB". **The test is the filesystem, not the platform** — see "Platform support"
+   for why WSL2's drvfs was wrongly on this list.
 2. **Never push a placeholder.** `syncengine.Placeholders` gates every content
    upload. A placeholder holds zero bytes at full apparent size, so uploading it
    replaces the remote file with nothing. The guard fails **safe**: unsure ⇒ report
@@ -1304,9 +1305,18 @@ options exactly as `-config` does, and **derives that set from
 fstab mount's working directory is `/`, where the flag path's `drivel-state.db`
 would mean `/drivel-state.db`.
 
-**Untested: systemd.** The daemon stays in the generated `.mount` unit's cgroup
-and no systemd host was available. `mount`, `mount -a` (`-T`) and `umount` are all
-verified for real. Don't promote it to "works under systemd" without a run.
+**systemd: verified 2026-09-29**, on WSL2's Debian (systemd as PID 1), together
+with `mount`, `mount -a` (`-T`) and `umount`, which were already verified for real.
+`systemd-fstab-generator` turns an `fuse.drivel` line into
+`/run/systemd/generator/<esc>.mount`; `systemctl start` mounts it, `findmnt`
+reports `fuse.drivel` (rule 1, from the other side), `systemctl stop` unmounts
+cleanly — and **the daemon is in the unit's cgroup**, which is what this note
+feared and could not check: `CGroup: /system.slice/mnt-<x>.mount └─ /sbin/
+mount.fuse.drivel …`. Reached directly from a shell it lands in `/init.scope`
+instead. **Two things are still unrun**, so don't widen this to "M16 is done":
+mounting at boot (the run used `noauto`, so `local-fs.target` ordering is
+untested), and whether M8's bounded drain completes when systemd kills the
+cgroup on stop — that second one is the one that could lose a write.
 
 ## Shell completions
 
@@ -1414,13 +1424,23 @@ the mount layer has to accommodate:
    `hydrate.XattrName`, never the literal.
 
    **Where the backing filesystem has no user xattrs, `-lazy` is unsafe, full stop**
-   — drvfs under WSL2, exFAT/FAT, a tmpfs `/tmp` on FreeBSD. `setxattr` fails,
-   `CreatePlaceholder` continues unmarked, and there is then no placeholder record at
-   all, because **`IsPlaceholder` reads the marker and nothing else**. The state DB
-   does *not* stand in: its hydration entries cache present ranges (`Hydrator.Ranges`,
-   which nothing outside tests reads) and no path has ever consulted them for
+   — exFAT/FAT, a tmpfs `/tmp` on FreeBSD. `setxattr` fails, `CreatePlaceholder`
+   continues unmarked, and there is then no placeholder record at all, because
+   **`IsPlaceholder` reads the marker and nothing else**. The state DB does *not*
+   stand in: its hydration entries cache present ranges (`Hydrator.Ranges`, which
+   nothing outside tests reads) and no path has ever consulted them for
    placeholder-ness. Docs said otherwise until M10 — "don't delete the state DB" was
    never the mitigation; "don't run `-lazy` there" is.
+
+   **WSL2's drvfs was on that list until 2026-09-29 and should not have been**, and
+   the correction is worth more than the entry was: the thing that decides is the
+   **underlying Windows filesystem**, not the drvfs layer. `/mnt/c` mounts as 9p
+   with `aname=drvfs` and maps Linux user xattrs onto NTFS extended attributes, so
+   the marker **set, read back, listed, survived `sync`, and survived a full
+   `wsl --shutdown`** — measured, not assumed. The same mount over exFAT would still
+   fail, which is exactly the point. Do not put drvfs back on the list; put the
+   *filesystem* on it. `/mnt/c` is still a poor `-data` for an unrelated and
+   stronger reason — NTFS is case-insensitive, which is rule 3 below.
 3. **A case-insensitive backing filesystem is a correctness surface**, and macOS
    defaults to one (APFS and HFS+). Drive is case-sensitive, so `Foo.txt` and
    `foo.txt` collide into one local path — the MC-30 sibling problem arriving by a

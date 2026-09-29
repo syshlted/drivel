@@ -43,7 +43,7 @@ Where this bites:
 
 | | |
 | --- | --- |
-| **WSL2** | `/mnt/c` and other Windows drives are drvfs and carry no Linux extended attributes. Keep `-data` on the Linux filesystem inside WSL. |
+| **Windows drives under WSL2** | Depends on the Windows filesystem, not on WSL. Over NTFS the attributes work — drivel's marker was verified to survive a full `wsl --shutdown`. Over exFAT or FAT they do not. Keeping `-data` on the Linux filesystem inside WSL is still the better choice, because NTFS is case-insensitive and `Foo.txt` and `foo.txt` would collide into one local path. |
 | **exFAT, FAT** | No extended attributes anywhere. |
 | **FreeBSD tmpfs** | UFS and ZFS carry them; tmpfs does not, so a tmpfs `/tmp` is not a usable `-data`. |
 | **macOS non-APFS volumes** | On exFAT, FAT and some network volumes macOS *emulates* attributes in hidden `._name` companion files — which would put the marker in a file inside the synced tree. Drivel detects that and treats it as having none. Keep `-data` on APFS or HFS+. |

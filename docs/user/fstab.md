@@ -180,11 +180,17 @@ The daemon's own log is not in the journal — see `logfile=` below; only the
 helper's startup failures reach `mount`, and through it systemd.
 
 The helper forks a daemon that outlives it, and that daemon stays in the
-generated `.mount` unit's cgroup. **This has not been verified on a systemd host**
-— the container this was developed in has no systemd. If the daemon turns out to
-be killed when `ExecMount` finishes, the answer is `x-systemd.automount` as
-above, or a `drivel@.service` with `x-systemd.requires=`. Please report what you
-see.
+generated `.mount` unit's cgroup. This was verified on a systemd host in
+September 2026: `systemctl start` brings the mount up, `findmnt` reports it as
+`fuse.drivel`, the daemon is listed under the unit's own cgroup, and
+`systemctl stop` unmounts it cleanly.
+
+Two things are still untested. Mounting **at boot** has not been exercised — the
+check used `noauto` — so if a boot mount misbehaves, `nofail` and
+`x-systemd.automount` above are the first things to reach for. And it is not yet
+known whether drivel finishes flushing pending uploads if systemd kills the unit's
+cgroup rather than unmounting first, which is what happens when a unit is stopped
+while the mount is wedged. Please report what you see.
 
 ## When it does not come up
 

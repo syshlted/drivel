@@ -612,7 +612,7 @@ a user discovers.
 
    **What replaces the old platform caveat is a filesystem one, and it is worse than
    the caveat it replaces.** Where the backing store cannot hold the attribute —
-   drvfs under WSL2, exFAT or FAT, a tmpfs `/tmp` on FreeBSD — `setxattr` fails,
+   exFAT or FAT, a tmpfs `/tmp` on FreeBSD — `setxattr` fails,
    `CreatePlaceholder` continues without a marker, and there is then **no placeholder
    record at all**: `Hydrator.IsPlaceholder` reads the marker and nothing else, so an
    un-fetched placeholder is an ordinary empty file to every guard in the tree and
@@ -764,12 +764,29 @@ The seam costs nothing to keep clean — the cross-compile above proves it stays
 for free — so this is a decision not to build a frontend, not a decision to let the
 option close.
 
-**WSL2 caveat, and it is the M5 one again:** files under `/mnt/c` are drvfs, which
-does not carry Linux user xattrs. A `-lazy` mount whose `-data` lives there gets no
-placeholder marker at all — which since M10 is a *filesystem* failure rather than a
-platform one, and the more dangerous of the two because the kernel is Linux and
-everything looks supported. Keep the backing directory on the ext4 filesystem inside
-the WSL2 VHD.
+**WSL2: measured on 2026-09-29, and it corrects what this section used to say.**
+drivel's ordinary `linux/amd64` build runs unmodified — WSL 2.7.14, kernel
+`6.18.33.2-microsoft-standard-WSL2`, the full suite green under `-race` with
+`DRIVEL_REQUIRE_TESTENV=all` and **nothing skipped**, so `/dev/fuse` and the M5
+marker both genuinely worked, `internal/vfs` included. One test fails there and the
+product is innocent: `TestScopedSweepRecoversConcurrencyAfterThrottling` wants all
+eight listings in flight inside a 3 ms window, and nested-virt sleep overshoot
+measures 1.59 ms mean / 3.62 ms worst against the host's 156 µs — the jitter is the
+size of the window. It passes without `-race` in the same VM, and with `-race` on
+the host even at `GOMAXPROCS=4`.
+
+This section previously said `/mnt/c` is drvfs and "does not carry Linux user
+xattrs", making it the M5 catastrophe. **That is wrong, and the reason it was wrong
+is instructive:** drvfs is a transport, not a filesystem. `/mnt/c` mounts as 9p with
+`aname=drvfs` and maps user xattrs onto NTFS extended attributes, so the marker set,
+read back, listed, survived `sync` and survived a full `wsl --shutdown`. The thing
+that decides is the **Windows filesystem underneath** — the same mount over exFAT
+would still fail, and that is the form the caveat should have taken all along.
+
+Keep `-data` on the ext4 filesystem inside the WSL2 VHD anyway, for a different and
+better reason: NTFS is case-insensitive, so `Foo.txt` and `foo.txt` collide into one
+local path. That is §2.5 / MC-30 arriving by the route this document already flags
+for APFS, and unlike the xattr question it has no mitigation.
 
 ### 2.10 Plugin loading — backends in their own process (M9)
 
@@ -1974,8 +1991,9 @@ are both lossy and racy.
    own platform.** What remains is a live run per platform and the two FUSE-T
    questions below, so M10 is not closed. Writing them also settled a question this
    entry had been asking the wrong way round: the danger was never "off Linux", it
-   was "a backing filesystem that cannot hold the marker", which includes drvfs
-   under WSL2 and a tmpfs `/tmp` on FreeBSD, on kernels that are otherwise fine. And
+   was "a backing filesystem that cannot hold the marker", which includes exFAT/FAT
+   and a tmpfs `/tmp` on FreeBSD, on kernels that are otherwise fine — but *not*
+   WSL2's drvfs, which was measured carrying the marker on 2026-09-29 (§2.9). And
    it corrected a claim these documents had repeated for three milestones — that
    losing `drivel-state.db` was what turned a placeholder into an empty file.
    `IsPlaceholder` reads the marker and nothing else; the DB's hydration entries
@@ -2831,12 +2849,25 @@ are both lossy and racy.
     with `/` as its working directory, where `drivel-state.db` means
     `/drivel-state.db`.
 
-    **Not verified: systemd.** The daemon stays in the generated `.mount` unit's
-    cgroup, and the container this was developed in has no systemd to find out what
-    happens when `ExecMount` finishes. `mount`, `mount -a` and `umount` are all
-    exercised for real. If the daemon does turn out to be killed, the answer is
-    `x-systemd.automount` or a `drivel@.service` with `x-systemd.requires=` — a
-    docs change, not a redesign.
+    **Verified on systemd, 2026-09-29**, on WSL2's Debian, which runs systemd as
+    PID 1 — the container this was developed in has none, which is what left this
+    open. `systemd-fstab-generator` turned an `fuse.drivel` line into
+    `/run/systemd/generator/<escaped>.mount`; `systemctl start` mounted it,
+    `findmnt` reported the type as `fuse.drivel`, and `systemctl stop` unmounted
+    cleanly. The daemon **does** stay in the generated unit's cgroup —
+    `CGroup: /system.slice/mnt-<x>.mount └─ /sbin/mount.fuse.drivel …` — and it is
+    *not* killed when `ExecMount` finishes, so the fallbacks this entry reserved
+    (`x-systemd.automount`, a `drivel@.service` with `x-systemd.requires=`) are not
+    needed. Reached directly from a shell the daemon lands in `/init.scope` instead.
+    `mount`, `mount -a` and `umount` were already exercised for real.
+
+    **Two things remain unrun, and the second is the one with teeth.** Mounting at
+    boot was not tested — the run used `noauto`, so the `local-fs.target` ordering
+    is still only reasoned about. And nothing yet establishes whether M8's bounded
+    drain completes when systemd tears the cgroup down on `stop`: an ordinary
+    `systemctl stop` unmounts first, which is the graceful path, but a unit killed
+    with a wedged mount underneath it would not, and that is a lost write rather
+    than a slow shutdown.
 
     Linux only, and by mechanism rather than by omission: the helper protocol, the
     `/sbin/mount.<type>` lookup, the privilege drop and the re-exec handshake are all
@@ -3931,8 +3962,8 @@ keep the attributes in a file that lives *in the backing store*, so they are sto
 and synced like any other content, and serve `getxattr`/`setxattr`/`listxattr`/
 `removexattr` at the FUSE layer out of that. Two things fall out of it that a
 passthrough cannot do. A backing filesystem that cannot store `user.*` attributes
-at all — exFAT, an SMB share, a `/mnt/c` drvfs path under WSL2, most network mounts
-— would still present working xattrs at the mountpoint. And because the store is
+at all — exFAT, an SMB share, most network mounts — would still present working
+xattrs at the mountpoint. And because the store is
 just a file in the tree, the attributes travel: set one here, see it on the other
 machine after a sync, which is §10's "POSIX metadata over Drive" arriving through
 the data plane rather than through provider-specific metadata.

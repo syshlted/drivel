@@ -14,6 +14,31 @@ from source with `make build`.
 
 ## Unreleased
 
+### Windows: two caveats tested, one of them withdrawn — 2026-09-29
+
+Drivel was run on Windows 11 for the first time, under WSL2. Nothing about the
+software changed; two things the documentation had been *saying* changed, because
+they were finally checked instead of reasoned about.
+
+**Lazy mode on Windows drives is not the hazard we described.** The manual said a
+`-data` directory on `/mnt/c` could not hold drivel's placeholder marker, and that
+`-lazy` was therefore unsafe there. That was wrong. What decides is the Windows
+filesystem underneath, not WSL: over NTFS the marker is stored, reads back, and
+survives a full `wsl --shutdown`; over exFAT it still is not. The guidance to keep
+`-data` on the Linux filesystem inside WSL stands, but for a different and better
+reason — NTFS is case-insensitive, so `Foo.txt` and `foo.txt` collide into one
+local path, and unlike the attribute question that has no workaround.
+
+**Mounting from `/etc/fstab` under systemd now has a real result behind it.** The
+fstab documentation carried a warning that the systemd path had never been run,
+because the machine drivel was developed on has no systemd. It has now been run:
+systemd generates the mount unit, `systemctl start` brings the filesystem up,
+`systemctl stop` unmounts it cleanly, and the background process stays inside the
+unit — it is not killed the moment the mount finishes. Two gaps remain and are
+written down where they matter: mounting at boot has not been exercised, and it is
+not yet known whether pending uploads finish flushing if systemd stops a unit whose
+mount is wedged.
+
 ### A work-in-progress warning, said out loud — 2026-09-26
 
 Drivel now says on every page of its website, at the top of its README, in the
