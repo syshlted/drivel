@@ -106,8 +106,10 @@ go run ./cmd/drivel completion bash
 That is what makes a downloaded single binary able to install its own completion,
 with no repository, no Makefile and no Go toolchain behind it — which is also why
 the renderer is no longer behind a build tag. `make install` runs the binary it
-just built rather than copying a checked-in file, so cross-compiling and then
-installing needs an emulator or a second native build.
+just built rather than copying a checked-in file, placing the two scripts under
+`$PREFIX/share/bash-completion/completions` and `$PREFIX/share/zsh/site-functions`;
+cross-compiling and then installing therefore needs an emulator or a second
+native build.
 
 The renderers are in `internal/completion`; the flag→completion table is
 `completionHints` in [cmd/drivel/completions.go](../../cmd/drivel/completions.go).
@@ -127,11 +129,6 @@ That leaf package exists for this: since M9 the Drive backend is a separate
 executable, and `gdconf` is how the `drivel` binary keeps the vocabulary of the
 `-drive-*` flags without linking the Drive SDK.
 
-The generated files are committed because whoever installs from a tarball or a
-distro package has no Go toolchain to run the generator with; `make install`
-places them under `$PREFIX/share/bash-completion/completions` and
-`$PREFIX/share/zsh/site-functions`.
-
 ## The plugin protocol is generated too
 
 Backends run in their own process (M9) and speak gRPC, so `plugin/internal/pb` is
@@ -145,8 +142,9 @@ make proto-check  # what `make check` runs: fails if the committed output is sta
 The toolchain installs itself into `bin/` on first use and is pinned in the
 Makefile. It is **pure Go** — `buf` is the compiler as well as the driver — so
 there is no `protoc` and no C++ anywhere in the build, which is the same
-constraint that keeps cgo out. The generated files are committed, for the reason
-the completions are: a tarball build has no protobuf toolchain.
+constraint that keeps cgo out. The generated files are committed, because a
+tarball build has no protobuf toolchain — and unlike the completions above, there
+is nothing the finished binary could render them from.
 
 Changing the protocol is a compatibility decision. Adding a field does not bump
 `plugin.ProtocolVersion`, because protobuf is already compatible in both
