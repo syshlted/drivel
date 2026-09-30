@@ -60,6 +60,15 @@ body.dark {
  * backdrop. And it is anchored to the *top*, because that end of the drawing is
  * the crowd of heads and the other is legs.
  *
+ * The page, not the viewport: the layer is capped at Hextra's own
+ * `--hextra-max-page-width` and centred, so the art stays behind the column the
+ * content occupies instead of stretching across a wide monitor and leaving the
+ * animal several times the size of the text beside it. Reading the theme's
+ * variable rather than restating 80rem means a theme that changes its measure
+ * takes the backdrop with it; the fallback covers it being renamed. Centring is
+ * `inset: 0` plus `margin-inline: auto` rather than a translate, because a
+ * transform would give this layer a stacking context of its own for no reason.
+ *
  * `fixed` rather than `absolute` so the layer can never lengthen the page: an
  * absolutely positioned element this tall contributes to the scrollable area,
  * which on a short page is a screenful of nothing below the footer.
@@ -73,13 +82,15 @@ body.dark {
  * 7680px wide. The bitmap under it holds 140 columns, so at page width it was
  * previously scaled *up* tenfold and needed `pixelated` to keep its edges --
  * a hint whose application to mask images is not something to rely on. Blown up
- * once, in advance and losslessly, it is scaled *down* by about five instead,
+ * once, in advance and losslessly, it is scaled *down* by six or more instead,
  * which every renderer does smoothly and correctly without being asked.
  */
 body::before {
   content: "";
   position: fixed;
   inset: 0;
+  width: min(100%, var(--hextra-max-page-width, 80rem));
+  margin-inline: auto;
   z-index: -1;
   pointer-events: none;
   background-color: var(--drivel-backdrop-ink);
