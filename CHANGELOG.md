@@ -14,6 +14,17 @@ from source with `make build`.
 
 ## Unreleased
 
+### A config-file mount no longer fails on its first run — 2026-09-30
+
+**A mount described in the config file failed the first time you ran it**, with
+`open state db …: no such file or directory`. The sync-state database defaults
+under `$XDG_STATE_HOME/drivel/NAME/`, and nothing created that directory — bbolt
+creates the database file, but not the path to it. Only the config-file route was
+affected: `drivel mount` with flags defaults the database to the directory you
+are standing in, and an fstab mount already created it for itself. Drivel now
+creates it wherever the mount came from, mode `0700`, because the echo records
+inside name every path that has ever synced.
+
 ### zsh completions work from `eval` — 2026-09-29
 
 **`eval "$(drivel completion zsh)"` failed with

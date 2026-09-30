@@ -21,7 +21,6 @@ import (
 	"os/exec"
 	"os/signal"
 	"os/user"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -146,16 +145,6 @@ func serveHelperMount(h *helperArgs, c *helperOptions, ready func()) error {
 		return err
 	}
 	spec.Ready = ready
-
-	// The state DB defaults under $XDG_STATE_HOME, which on a first boot does not
-	// exist yet. bbolt will not create the directory for it, and "no such file or
-	// directory" on the very first mount is a poor introduction. 0700 because the
-	// echo records name every path that has ever synced.
-	if spec.StateDB != "" {
-		if err := os.MkdirAll(filepath.Dir(spec.StateDB), 0o700); err != nil {
-			return fmt.Errorf("creating the state directory: %w", err)
-		}
-	}
 
 	reg, err := newRegistry()
 	if err != nil {

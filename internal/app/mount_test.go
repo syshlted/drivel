@@ -393,3 +393,32 @@ func TestWorkerPoolsDefaultWhenUnset(t *testing.T) {
 		t.Errorf("hydrator fetch limit = %d; want %d", got, hydrate.DefaultWorkers)
 	}
 }
+
+// The state DB's directory has to be created before bbolt is handed the path:
+// bbolt creates the file, not the path to it. The config path defaults the DB
+// under $XDG_STATE_HOME/drivel/NAME, a directory nothing else creates, so
+// without this the first mount of a new config file fails with "no such file or
+// directory" — a first-run failure for every user who graduates to a config
+// file. The flag path hid it by defaulting to a name in the working directory.
+func TestOpenCreatesTheStateDirectory(t *testing.T) {
+	spec := baseSpec(t)
+	spec.Provider = "fake"
+	// Two levels deep and absent, as $XDG_STATE_HOME/drivel/NAME is on a first run.
+	stateDir := filepath.Join(t.TempDir(), "state", "drivel", "work")
+	spec.StateDB = filepath.Join(stateDir, "state.db")
+
+	m, err := Open(t.Context(), spec, registryWith(t, "fake", newFakeStore()))
+	if err != nil {
+		t.Fatalf("Open with a missing state directory: %v", err)
+	}
+	defer m.Close() //nolint:errcheck // best effort in cleanup
+
+	fi, err := os.Stat(stateDir)
+	if err != nil {
+		t.Fatalf("state directory was not created: %v", err)
+	}
+	// 0700: the echo records name every path that has ever synced.
+	if perm := fi.Mode().Perm(); perm != 0o700 {
+		t.Errorf("state directory mode = %04o; want 0700", perm)
+	}
+}

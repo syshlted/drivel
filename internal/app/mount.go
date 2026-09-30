@@ -262,6 +262,18 @@ func Open(ctx context.Context, spec MountSpec, reg *provider.Registry) (*Mount, 
 
 		// Engine-level sync state (cursor + echo records) lives in a control-plane
 		// DB outside the backing tree so it isn't itself synced to the provider.
+		//
+		// Its directory is created here rather than left to bbolt, which creates
+		// the file and not the path to it. The config path defaults the DB under
+		// $XDG_STATE_HOME, which on a first run does not exist yet, so without
+		// this the very first mount of a new config fails with "no such file or
+		// directory". 0700 because the echo records name every path that has
+		// ever synced.
+		if dir := filepath.Dir(spec.StateDB); dir != "" {
+			if err := os.MkdirAll(dir, 0o700); err != nil {
+				return nil, fmt.Errorf("creating the state directory: %w", err)
+			}
+		}
 		st, err := state.Open(spec.StateDB)
 		if err != nil {
 			return nil, fmt.Errorf("open state db: %w", err)
