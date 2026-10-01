@@ -42,23 +42,25 @@ and captures the result — either automatically, via a loopback server on port
 credentials and a token under `~/.config/drivel/personal/`, and appends an
 `[account.personal]` block to `~/.config/drivel/config.toml`.
 
-It also prints a `[[mount]]` block to go with it. Add that to the config file:
+It also adds a `[[mount]]` block to go with it:
 
 ```toml
 [[mount]]
 account = "personal"
-path    = "~/drive-personal"              # where the folder appears
-data    = "~/.cache/drivel/personal"      # where the files really live
+path    = "~/drive-personal"                       # where the folder appears
+data    = "~/.local/share/drivel/mounts/personal"  # where the files really live
 
 [mount.provider]
-root = "root"                             # "root" is the whole of My Drive
+root = "root"                                      # "root" is the whole of My Drive
 ```
 
-`path` and `data` are yours to change — the printed block just names them after
-the account. Then:
+`data` is written out in full, so it lands where `$XDG_DATA_HOME` says it should
+and stays there if you later change that. Both paths are yours to change — the
+block just names them after the account, so open the file and edit it if
+somewhere else suits you better. Then:
 
 ```sh
-mkdir -p ~/drive-personal ~/.cache/drivel/personal
+mkdir -p ~/drive-personal ~/.local/share/drivel/mounts/personal
 drivel mount
 ```
 
@@ -83,11 +85,11 @@ what it does before you point it at real data.
 ## What just happened
 
 `~/drive` is a FUSE mount. Every operation on it is proxied to the backing
-directory (`~/.cache/drivel/personal`), which holds the real files and is the
-source of truth. Mutations become events on a queue that a sync engine drains in
-the background, so no filesystem operation ever waits on the network. In the other
-direction a poll loop follows Drive's change feed and applies remote edits to the
-backing directory.
+directory (`~/.local/share/drivel/mounts/personal`), which holds the real files
+and is the source of truth. Mutations become events on a queue that a sync
+engine drains in the background, so no filesystem operation ever waits on the
+network. In the other direction a poll loop follows Drive's change feed and
+applies remote edits to the backing directory.
 
 ## Next
 

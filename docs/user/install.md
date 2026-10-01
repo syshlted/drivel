@@ -212,8 +212,14 @@ sudo make uninstall                       # if you installed with `sudo make ins
 rm "$(command -v drivel)"                 # if you installed with `go install`
 rm ~/go/bin/drivel-provider-*             # ...and the backends it installed beside it
 
-rm -rf ~/.config/drivel ~/.local/state/drivel ~/.local/share/drivel
+rm -rf ~/.config/drivel ~/.local/state/drivel ~/.local/share/drivel/plugins
 ```
+
+> [!CAUTION]
+> **Do not `rm -rf ~/.local/share/drivel`.** A mount `drivel login` set up backs
+> onto `~/.local/share/drivel/mounts/NAME`, and that directory holds your files,
+> not a copy of them — see [Getting your data out](#getting-your-data-out) below.
+> The line above deletes the plugin directory only.
 
 `make uninstall` takes the backends, the man page, the `mount(8)` helper symlinks
 and the shell completions with it; `rm "$(command -v drivel)"` removes only the
@@ -235,8 +241,8 @@ Two things to know before you walk away:
 - **In [lazy mode](lazy-mode.md), placeholders are not files yet.** A file that
   has never been read is a zero-byte hole marked with an extended attribute; its
   content is still only in Drive. Before uninstalling, either read everything you
-  want to keep (`find ~/.cache/drivel/personal -type f -exec cat {} + >/dev/null`)
-  or fetch it from Drive directly.
+  want to keep (`find ~/.local/share/drivel/mounts/personal -type f -exec cat {} +
+  >/dev/null`) or fetch it from Drive directly.
 - **In-place mode has no separate directory** — the mounted directory *is* the
   backing store, and the files simply stay in it when Drivel exits.
 

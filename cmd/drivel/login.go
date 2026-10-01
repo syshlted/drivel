@@ -138,14 +138,18 @@ func runLogin(args []string) error {
 	return recordAccount(c.configPath, c.account, c.credPath, c.tokenPath, scope, driveRoot)
 }
 
-// recordAccount adds the account to the config file and shows the mount block to
-// go with it.
+// recordAccount adds the account to the config file, and a mount to go with it.
 //
 // It appends and never rewrites: the config file is hand-edited and commented,
 // and a round trip through a TOML encoder would drop every comment in it. An
-// account that already exists is therefore printed rather than replaced — the
-// credentials on disk have been refreshed either way, which is the part that
-// actually needed doing.
+// entry that already exists is therefore printed rather than replaced — for the
+// account, the credentials on disk have been refreshed either way, which is the
+// part that actually needed doing.
+//
+// The two halves are reported independently because they fail independently: a
+// re-login against an existing account should still be able to add a mount the
+// user deleted, and a mountpoint somebody else claimed should not make a fresh
+// account look unwritten.
 func recordAccount(configPath, name, credPath, tokenPath, scope, driveRoot string) error {
 	if configPath == "" {
 		p, err := config.DefaultPath()
@@ -172,9 +176,32 @@ func recordAccount(configPath, name, credPath, tokenPath, scope, driveRoot strin
 		fmt.Printf("\nAdded [account.%s] to %s\n", name, configPath)
 	}
 
-	mount := fmt.Sprintf("[[mount]]\naccount = %q\npath    = \"~/drive-%s\"\ndata    = \"~/.cache/drivel/%s\"\n\n[mount.provider]\nroot = %q\n",
-		name, name, name, driveRoot)
-	fmt.Printf("\nAdd a mount for it:\n\n%s\nThen run: drivel mount\n\n", indent(mount))
+	// Under $XDG_DATA_HOME and not $XDG_CACHE_HOME: the backing store is the
+	// source of truth for these files, not a copy of them. See config.DataDir.
+	data, err := config.DataDir(name)
+	if err != nil {
+		return err
+	}
+	mount := config.MountEntry{
+		Account:  name,
+		Path:     fmt.Sprintf("~/drive-%s", name),
+		Data:     data,
+		Provider: []config.Setting{{Key: "root", Value: driveRoot}},
+	}
+	switch err := config.AppendMount(configPath, mount); {
+	case errors.Is(err, config.ErrMountExists):
+		// Someone has already described this mountpoint — by hand, or by running
+		// login twice. Two [[mount]] entries over one directory is a config file
+		// app.Validate refuses at startup, so show the block instead of writing it.
+		fmt.Printf("\n%s already describes a mount at %s. If anything below differs, change it by hand:\n\n%s\n",
+			configPath, mount.Path, indent(config.MountBlock(mount)))
+	case err != nil:
+		return err
+	default:
+		fmt.Printf("Added a mount at %s to %s\n", mount.Path, configPath)
+	}
+
+	fmt.Printf("\nThen run: drivel mount\n\n")
 	return nil
 }
 

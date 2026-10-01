@@ -30,18 +30,29 @@ token       = "/home/you/.config/drivel/personal/token.json"
 [[mount]]
 account = "personal"
 path    = "~/drive"
-data    = "~/.cache/drivel/personal"
+data    = "~/.local/share/drivel/mounts/personal"
 lazy    = true
 
 [mount.provider]
 root = "root"                    # or a folder ID, to mount one subtree
 ```
 
-`drivel login -account NAME` appends the `[account.NAME]` block for you and prints
-a matching `[[mount]]` to paste in. **Drivel only ever appends to this file** — it
-is never re-serialized, so your comments and layout survive. If an account already
-exists, `login` prints the new values for you to reconcile by hand rather than
-overwriting them.
+`drivel login -account NAME` writes both blocks for you: the `[account.NAME]`
+table, and a `[[mount]]` at `~/drive-NAME` to go with it, backed by
+`$XDG_DATA_HOME/drivel/mounts/NAME`. Edit them afterwards — the mount it writes
+is a starting point, not a guess at what you wanted.
+
+The backing store goes under your **data** directory and not your cache
+directory, because it holds your files rather than a copy of them: in eager mode
+it is the only local copy, and even under `lazy = true` it holds anything not
+yet uploaded and every [conflict copy](data-safety.md). Nothing prunes it, and
+nothing should.
+
+**Drivel only ever appends to this file** — it is never re-serialized, so your
+comments and layout survive. The flip side is that it can only ever *add*:
+changing or removing an entry is yours to do by hand. So if the account already
+exists, or something already claims that mountpoint, `login` prints the block it
+would have written and leaves the file alone.
 
 An unrecognised key is an **error**, not a silent no-op: `lazzy = true` doing
 nothing is the same failure as a flag that stopped being read. The free-form
@@ -232,7 +243,7 @@ drivel login -account NAME
 
 | Flag | Default | What it does |
 | --- | --- | --- |
-| `-account NAME` | — | Scope this login: files under `~/.config/drivel/NAME`, and an `[account.NAME]` block appended to the config. |
+| `-account NAME` | — | Scope this login: files under `~/.config/drivel/NAME`, and an `[account.NAME]` block plus a matching `[[mount]]` appended to the config. |
 | `-config FILE` | `~/.config/drivel/config.toml` | Which config file to append to. |
 | `-credentials FILE` | `credentials.json` | Where to read/write the OAuth client secret JSON. |
 | `-token FILE` | `token.json` | Where to write the token. |

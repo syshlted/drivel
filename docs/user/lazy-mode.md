@@ -1,7 +1,8 @@
 # Lazy mode (`-lazy`)
 
 ```sh
-drivel mount -mount ~/drive -data ~/.cache/drivel -lazy      # or lazy = true
+# or lazy = true in the config file
+drivel mount -mount ~/drive -data ~/.local/share/drivel/mounts/drive -lazy
 ```
 
 Off by default. Without it, Drivel is *eager*: the backing directory holds real

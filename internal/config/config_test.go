@@ -389,6 +389,7 @@ func TestValidName(t *testing.T) {
 func TestDefaultPathsFollowXDG(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", "/xdg/config")
 	t.Setenv("XDG_STATE_HOME", "/xdg/state")
+	t.Setenv("XDG_DATA_HOME", "/xdg/data")
 
 	p, err := DefaultPath()
 	if err != nil || p != filepath.Join("/xdg/config", AppName, "config.toml") {
@@ -402,9 +403,36 @@ func TestDefaultPathsFollowXDG(t *testing.T) {
 	if err != nil || s != filepath.Join("/xdg/state", AppName, "personal") {
 		t.Errorf("StateDir() = %q, %v", s, err)
 	}
+	// Data, not cache: the backing store is the source of truth for the user's
+	// files, and $XDG_CACHE_HOME advertises itself as safe to delete.
+	d, err := DataDir("personal")
+	if err != nil || d != filepath.Join("/xdg/data", AppName, "mounts", "personal") {
+		t.Errorf("DataDir() = %q, %v", d, err)
+	}
 	// A name that escapes its directory must never reach a path join.
-	if _, err := StateDir("../elsewhere"); err == nil {
-		t.Error("StateDir accepted a traversing name")
+	for _, fn := range []struct {
+		name string
+		f    func(string) (string, error)
+	}{{"StateDir", StateDir}, {"DataDir", DataDir}, {"AccountDir", AccountDir}} {
+		if _, err := fn.f("../elsewhere"); err == nil {
+			t.Errorf("%s accepted a traversing name", fn.name)
+		}
+	}
+}
+
+// The XDG fallbacks are what most users actually get, so they are asserted
+// rather than assumed. ~/.local/share for the backing store, never ~/.cache.
+func TestDataDirFallsBackToLocalShare(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_DATA_HOME", "")
+
+	d, err := DataDir("personal")
+	if err != nil {
+		t.Fatalf("DataDir: %v", err)
+	}
+	if want := filepath.Join(home, ".local", "share", AppName, "mounts", "personal"); d != want {
+		t.Errorf("DataDir() = %q; want %q", d, want)
 	}
 }
 
@@ -473,5 +501,19 @@ func TestWorkerPoolOfZeroIsRefused(t *testing.T) {
 				t.Errorf("error %q does not name %s", err, key)
 			}
 		}
+	}
+}
+
+// A backing store must never be able to land on the plugin search path.
+// $XDG_DATA_HOME/drivel/plugins is where backends are looked for, and nothing
+// stops an account being called "plugins".
+func TestDataDirCannotCollideWithThePluginPath(t *testing.T) {
+	t.Setenv("XDG_DATA_HOME", "/xdg/data")
+	d, err := DataDir("plugins")
+	if err != nil {
+		t.Fatalf("DataDir: %v", err)
+	}
+	if d == filepath.Join("/xdg/data", AppName, "plugins") {
+		t.Errorf("DataDir(%q) = %q, which is the plugin search path", "plugins", d)
 	}
 }

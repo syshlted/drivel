@@ -14,6 +14,31 @@ from source with `make build`.
 
 ## Unreleased
 
+### `login` writes the mount block, and the backing store leaves the cache — 2026-09-30
+
+**`drivel login -account NAME` now adds the `[[mount]]` to your config file**
+instead of printing it for you to paste. It writes a mount at `~/drive-NAME`,
+with the Drive folder you logged in for — a starting point to edit, not a guess
+at what you wanted. Nothing else changed about how the file is treated: Drivel
+still only ever appends to it, so your comments and layout survive, and if
+something already claims that mountpoint the block is printed for you to
+reconcile by hand rather than written.
+
+**The backing store it suggests moved out of the cache directory**, from
+`~/.cache/drivel/NAME` to `$XDG_DATA_HOME/drivel/mounts/NAME` (by default
+`~/.local/share/drivel/mounts/NAME`). The backing directory holds your files
+rather than a copy of them — in eager mode it is the only local copy, and even
+in lazy mode it holds anything not yet uploaded and every conflict copy — while
+`~/.cache` advertises itself as safe to delete at any time. The documentation
+examples moved with it. **Existing mounts are unaffected**: nothing rewrites a
+config file you already have, and a `data =` you have already got keeps working
+exactly as before. The `mounts/` component is there so that an account named
+`plugins` cannot back a mount onto the plugin search path.
+
+If you want to move an existing mount, unmount it, move the directory, and
+update `data =` to match — the state database tracks paths inside the backing
+store, not the path to it.
+
 ### A config-file mount no longer fails on its first run — 2026-09-30
 
 **A mount described in the config file failed the first time you ran it**, with

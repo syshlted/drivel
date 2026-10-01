@@ -36,7 +36,7 @@ root        = "/srv/share"
 [[mount]]
 account        = "server"
 path           = "~/share"
-data           = "~/.cache/drivel/server"
+data           = "~/.local/share/drivel/mounts/server"
 sweep-interval = "5m"          # see "How changes reach you" — the default is wrong here
 ```
 

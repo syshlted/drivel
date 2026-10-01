@@ -81,6 +81,36 @@ func StateDir(name string) (string, error) {
 	return filepath.Join(base, AppName, name), nil
 }
 
+// DataDir is where a mount's backing store goes when nothing else names one:
+// $XDG_DATA_HOME/drivel/mounts/NAME, falling back under ~/.local/share.
+//
+// Data and emphatically not cache, even though under -lazy the backing store
+// looks like one. It is the source of truth for the user's files: in eager mode
+// it holds the only local copy, and in lazy mode it still holds every write that
+// has not been pushed yet and every §6 conflict copy, which exist nowhere else
+// by policy. $XDG_CACHE_HOME means "safe to delete at any time", and a cleaner
+// acting on that would be deleting the user's files.
+//
+// Under mounts/ rather than directly under drivel/, which is what StateDir does
+// with its own base, because this one has a sibling: plugins are searched for in
+// $XDG_DATA_HOME/drivel/plugins, so an account named "plugins" would otherwise
+// back a mount onto the plugin search path. A subdirectory rules that out by
+// construction instead of by a check nobody would think to keep in step.
+func DataDir(name string) (string, error) {
+	if err := ValidName(name); err != nil {
+		return "", err
+	}
+	base := os.Getenv("XDG_DATA_HOME")
+	if base == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", fmt.Errorf("locating the home directory: %w", err)
+		}
+		base = filepath.Join(home, ".local", "share")
+	}
+	return filepath.Join(base, AppName, "mounts", name), nil
+}
+
 func configHome() (string, error) {
 	if base := os.Getenv("XDG_CONFIG_HOME"); base != "" {
 		return filepath.Join(base, AppName), nil
