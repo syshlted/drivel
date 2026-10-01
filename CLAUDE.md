@@ -433,26 +433,95 @@ the out-of-band one primary; that is the shape to copy when it lands.
 before that number went to special files; if you meet a stray M15 in an old
 branch or note meaning the mount helper, this is it.
 
-**M23** embedded plugins & in-memory launch — the host binary carries its backends
-and execs them from a sealed `memfd` without ever writing them to a filesystem,
-eventually as a self-executing zip appended to the binary. Unscheduled, not
-started, and **it is a supply-chain milestone rather than an isolation one**: it
-retires the whole discovery surface (`DRIVEL_PLUGIN_PATH`, the five-directory
-search path, shadowed kinds, and `safeToRun`'s check-then-exec race, which cannot
-be closed while a plugin is named by a path), and it changes nothing about what a
-plugin may do once running — that lever is Landlock/seccomp and is a different
-piece of work. It supersedes M9's "pinned digest per kind" note. Both mechanisms
-are prototyped on Linux (`memfd_create` + all four seals + `ExtraFiles` +
-`/proc/self/fd/3`; `archive/zip` reads a prefixed archive natively and reports a
-clean error when there is no payload). Three things decide the design and are in
-DESIGN.md §9/M23: **FreeBSD's `shm_open(SHM_ANON)` + `fexecve` is unverified** and
-macOS has no equivalent at all, so "never touches disk" is per platform and the
-macOS path is extract-and-unlink; the build graph **inverts** (plugins first, host
-second, ~49 MB per GOOS/GOARCH measured) and a wrong-arch payload must be refused
-by name rather than failing at `exec`; and the one real decision is whether
-embedded plugins **replace** the search path or precede it, which is what decides
-whether out-of-tree backends — the reason `provider` is public — remain possible.
-`embed.FS` is simpler and must be rejected deliberately, not by default.
+**M23** bundled backends & re-exec launch — the host binary carries its backends'
+*code* and launches one by re-executing itself as `drivel plugin-serve <kind>`.
+Unscheduled, not started, and **it is a supply-chain milestone rather than an
+isolation one**: it retires the whole discovery surface (`DRIVEL_PLUGIN_PATH`, the
+five-directory search path, shadowed kinds, and `safeToRun`'s check-then-exec race,
+which cannot be closed while a plugin is named by a path), and it changes nothing
+about what a plugin may do once running — that lever is Landlock/seccomp and is a
+different piece of work. It supersedes M9's "pinned digest per kind" note **for a
+bundled backend only**; an external plugin is still a file reached by a path, so
+pinning stays live there and merges with M24's signing question.
+
+**Re-exec replaced an earlier memfd+zip design on 2026-10-01, and the record of
+that design is kept in DESIGN.md as a working fallback** (`memfd_create` + all four
+seals + `ExtraFiles` + `/proc/self/fd/3`; `archive/zip` reads a prefixed archive
+natively). Re-exec won on five axes and four are not about size: **30.7 MB for one
+link unit against 48.8 MB for host-plus-zip and 72.6 MB for three files** (measured,
+because the runtime, gRPC, protobuf and `plugin`/`provider` link once instead of
+three times); **one implementation on every platform** where the zip needed three,
+which dissolves FreeBSD's unverified `shm_open(SHM_ANON)`+`fexecve` and macOS's
+weaker extract-and-unlink path; no `vm.memfd_noexec` sysctl trap; **the build graph
+no longer inverts** and a wrong-arch payload is impossible rather than needing to be
+refused by name; and the embed-versus-zip question dissolves because there is no
+payload. The pattern is M16's — argv0 dispatch, a hidden subcommand, a re-exec of
+`/proc/self/exe` — applied a second time, not a new one.
+
+Four things are decided. **gRPC is retained and behavioural equivalence is the
+requirement**: a bundled backend reaches the host through the same socket,
+handshake and generated protocol, so the launch mechanism is the only difference
+between the two paths. go-plugin's `net/rpc` protocol would work unmodified and is
+rejected — no streaming, while `Put`/`Get` are streams and a 50 GB copy arrives as
+one `OpCreate` plus one `OpWrite` — and `net/rpc` is frozen. **The bundled binary is
+the default build**, so a fresh checkout is usable the moment it compiles; the
+separate `cmd/drivel-provider-*` targets stay, because they are how an out-of-tree
+backend is built and because `plugin/testdata/drivel-provider-fake` is a real
+on-disk executable, so the suite must keep exercising both launch paths or the
+external one rots. **§2.9's cross-compile proof survives** — it is a claim about the
+tree, not a link set, and both providers plus `plugin` build clean for
+`windows/amd64` where only go-fuse fails — but the *inference* that nothing above
+the seam imports a provider stops being readable off the host binary, so M23 owes an
+import-graph test asserting it directly. **`govulncheck` reporting shifts** from
+`drivel-provider-gdrive` to `drivel` for a Drive SDK advisory; same risk, accepted.
+
+Two consequences are easy to get wrong. **M9 rule 4 needs rewording, not
+violating** — there is no filename to be the kind, so the kind is the argument the
+*host* passed, which is still not anything the plugin says about itself; prefer one
+`plugin-serve <kind>` subcommand over one per kind. And **the hidden subcommand
+stays out of `usage()`, `help` and the completions**, deliberately rather than by
+accident, the way `completionApp` already refuses a flag with no hint entry; direct
+invocation is already inert because `MagicCookieKey` is `DRIVEL_PLUGIN`.
+
+**An external plugin proves what produced it with a pinned Ed25519 signature —
+not OpenPGP, not a CA** (decided 2026-10-01; M24 inherits it). The signature covers
+a `(kind, version, sha256)` manifest whose digest is the number `SecureConfig`
+already checks, so it adds provenance to an existing integrity check. What decides
+the format is that verification happens **offline at mount startup**, which removes
+OCSP, CRL fetching and shelling out to `gpg(1)` before any comparison: OpenPGP fails
+on the *verifying* side (`x/crypto/openpgp` deprecated and frozen since 2021, the
+maintained route a third-party fork) and a CA costs an operated PKI for delegation
+nobody needs yet, with **certificate expiry as an active hazard** — a lapsed cert
+breaks every mount using that plugin at a moment nobody chose. `crypto/ed25519` is
+stdlib; pin a **list** so rotation needs no CA. Precedent is the Go toolchain
+pinning `sum.golang.org`'s key.
+
+**Whose key is the harder half: two paths, never one.** Signing someone else's
+binary with drivel's key is the trap (we either build it, needing reproducible
+builds, or we attest to provenance we never verified). So **drivel signs only what
+drivel builds**, and a third-party plugin is checked against *its author's* key,
+pinned by the user at install. **That TOFU happens at install and never at mount** —
+the SFTP host-key rule again (M18: a boot mount has nobody to answer a prompt, so it
+refuses). A signature proves provenance only: not that code is good, and **not that
+it outranks what is bundled**. **Overrides are three switches** — allow external at
+all; allow *unsigned* external; name a custom location — because folding the third
+into the second means someone who wanted a custom directory silently accepted
+unsigned code, and a boot mount must reach neither of the last two by default.
+
+**Unsettled, in order.** Whether a *newer* authenticated external plugin should
+outrank the bundled one automatically: the recommendation is **no** — it
+reintroduces the invisible precedence this milestone removes, cannot read a version
+without launching the thing it is deciding about, turns an install into a mount
+outage (a bundled backend is protocol-matched by construction and an external one is
+not, so a newer plugin speaking the next `ProtocolVersion` is refused at handshake),
+and makes a signed artifact with a high version number a permanent override. The
+goal behind it is right, and the alternative is that an external plugin wins because
+a **record** says so (kind, version, digest, key, written at install), making "a
+newer one exists" something `drivel plugin list` reports rather than something that
+happens silently. Then **replace vs precede** (it decides whether out-of-tree
+backends, the reason `provider` is public, remain possible, and whether M24 has an
+install target at all). Then whether `Loader`'s `refused`/`shadowed` machinery
+survives as the external path or is deleted with the search path it serves.
 
 **M24** plugin registry — a named, versioned, verifiable way to install a
 `drivel-provider-*` executable, modelled on `registry.terraform.io`. Unscheduled,
@@ -484,18 +553,27 @@ time naming both* — never a resolution rule, because first-on-the-path-wins is
 tolerable today only because nobody can install two by accident. **There is no
 version solver** — one provider per mount, no dependencies between plugins, so an
 exact version or the newest, and record what you got. **Checksum pinning stops being
-optional** (go-plugin's `SecureConfig`), reversing M23's "moot" note, and the trust
-anchor must *not* be the registry itself — that is the one part of Terraform's design
+optional** (go-plugin's `SecureConfig`) — M23's "moot" note covers bundled backends
+only, and an installed plugin is the external case it explicitly does not cover — and
+the trust anchor must *not* be the registry itself — that is the one part of Terraform's design
 not to copy, and it is circular for everyone but HashiCorp, whose key is pinned in
 the binary. What works over there is `.terraform.lock.hcl`; drivel's version is an
 **install manifest beside the binary** recording name, version, source registry and
 the executable's `sha256` — trust-on-first-use with a durable record, no cryptography
 beyond a hash, shippable before any signature scheme exists, and the same record a
-collision refusal needs in order to name the incumbent. If signatures land later the
-registry may carry the signature and never the key. And **it is a consumer of M23's
-external-plugin flag**: an installed
-plugin lives in the very search path M23 proposes to retire, so if embedded-only ever
-wins, M24 has no install target and is withdrawn rather than reconciled. **The
+collision refusal needs in order to name the incumbent — and since M23 decided the
+signature scheme, the manifest records the author's **key** too, which is what turns
+"the same bytes as last time" into "the same author as last time". The registry
+carries the signature and **never** the key: the key is pinned at install, because a
+registry that served both would be the circular trust anchor this entry already
+rejects. And **it is a consumer of M23's
+external-plugin flag**: an installed plugin lives in the very search path M23
+proposes to retire, so if bundled-only ever wins, M24 has no install target and is
+withdrawn rather than reconciled. **M23 also shrinks it**: a bundled default build
+answers "installing a backend needs a Go toolchain" for every backend drivel ships,
+so what is left for the registry is third-party backends — which moves the
+authentication question to the front, since M23's external path and M24's install
+path need one answer between them. **The
 licence question is answered and was dissolved rather than resolved**: under MPL-2.0
 a plugin may carry any licence whether it imports `provider` or speaks only protobuf,
 because the copyleft reaches drivel's own files and no further. The registry records a

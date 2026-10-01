@@ -553,6 +553,17 @@ import it transitively). Every cross-compile failure on every target traces to
 go-fuse and nothing else. That is a stronger statement of §2.5/§2.7 than M8's
 two-Drive-stores test: adding a platform is a `mount.Backend`, never a port.
 
+This is a claim about the **tree**, not about any one binary's link set, and the
+distinction matters because §9/M23 will change the latter: a bundled build links
+every shipped backend into `drivel` itself. The claim above survives that
+unchanged — `internal/provider/gdrive`, `internal/provider/sftp` and `plugin` all
+build clean for `windows/amd64`, where only go-fuse's internal packages fail
+(measured 2026-10-01) — but one thing read off it today stops being available.
+That nothing above the mount seam depends on a concrete provider type can
+currently be *inferred* from the host having linked no backend; once it links two,
+the property is unchanged in the source and has to be asserted directly, by an
+import-graph test rather than by a binary's contents. M23 owes that test.
+
 **Tier 1 — builds today.** Linux (all 13 arches), macOS (amd64/arm64), FreeBSD.
 Linux and FreeBSD are *tested*; macOS is compile-verified only, and is documented
 as such rather than as supported. M10 gave macOS a real xattr implementation
@@ -1977,9 +1988,12 @@ are both lossy and racy.
    process boundary casually. There is no checksum pinning for a plugin binary
    (go-plugin offers `SecureConfig`); the mode and directory checks are what ships.
    A pinned digest per kind in the config file was recorded here as the obvious
-   next step; **M23 supersedes that** — a host that carries its own backends has
-   nothing left to pin, and the mode checks it retires are the ones whose
-   check-then-exec window cannot be closed while a plugin is named by a path. And
+   next step; **M23 supersedes it for a bundled backend and not for an external
+   one** — a host that carries its own backends has nothing left to pin for those,
+   and the mode checks it retires are the ones whose check-then-exec window cannot
+   be closed while a plugin is named by a path. An external plugin is still a
+   separate file reached by a path, so pinning stays live there and merges with
+   M24's signing question. And
    the protocol is not merged with M14's control socket — see that entry, where
    the reason is that the trust directions are opposite.
 12. **M10 — Platform parity (macOS, then FreeBSD).** Independent of M9; nothing
@@ -3322,13 +3336,13 @@ this whole group walks through, so it is a precondition rather than a note.
     separate tool that happens to share this repo's OAuth code, and it should be
     scoped that way or not at all.
 
-25. **M23 — Embedded plugins & in-memory launch.** The host binary carries its
-    backends inside itself and executes them without ever writing them to a
-    filesystem. It is a **supply-chain milestone, not an isolation one**, and the
-    entry leads with that because the obvious reading is the wrong one: moving the
-    bytes inside the binary does not change what the plugin process may do once it
-    is running. See "What this does not buy" below before scheduling it as a
-    hardening item.
+25. **M23 — Bundled backends & re-exec launch.** The host binary carries its
+    backends' *code*, and launches one by re-executing itself with a hidden
+    subcommand naming the kind. It is a **supply-chain milestone, not an isolation
+    one**, and the entry leads with that because the obvious reading is the wrong
+    one: putting the code in the same binary does not change what the plugin
+    process may do once it is running. See "What this does not buy" below before
+    scheduling it as a hardening item.
 
     **What it removes, which is the whole case for it.** Each of these is a live
     surface in M9's design, not a hypothetical:
@@ -3341,113 +3355,246 @@ this whole group walks through, so it is a precondition rather than a note.
       do not cover.
     - *`safeToRun`'s race.* The mode and directory checks run against a **path**
       and the `execve` resolves that path again afterwards. No amount of checking
-      closes the window; it can only be narrowed. Launching from a sealed memory
-      image closes it by construction, because there is no name left to re-resolve
-      — the bytes that were verified are the bytes that run.
+      closes the window; it can only be narrowed. Re-executing the host closes it
+      by construction: on Linux `/proc/self/exe` is the running inode and cannot
+      be swapped, and elsewhere the bytes being launched are the ones already
+      running.
     - *Shadowed kinds.* Two files claiming one kind resolve first-on-the-path-wins
-      with a log line nobody reads. A zip has one entry per name.
-    - *The checksum-pinning item* left open in §2.10 ("not implemented"). It
-      becomes **moot rather than pending**: pinning a digest of content you are
-      already carrying is a digest of yourself.
+      with a log line nobody reads. A subcommand argument has one meaning.
+    - *The checksum-pinning item* left open in §2.10 ("not implemented"). For a
+      bundled backend it becomes **moot rather than pending**: pinning a digest of
+      code you are already executing is a digest of yourself. It does *not* become
+      moot for an external plugin — see "Unsettled" below.
 
-    **Both halves are prototyped, on 2026-09-11, against Linux 6.19.14.** Neither
-    is assumed.
+    **The mechanism.** The host resolves its own image (`os.Executable()`, or
+    `/proc/self/exe` on Linux) and runs it as `drivel plugin-serve <kind>`; that
+    subcommand is the three lines `cmd/drivel-provider-<kind>/main.go` holds today,
+    `plugin.Serve(<kind>.Factory)`. `clientConfig` (`plugin/host.go`) is the tree's
+    only `exec` site and changes from naming an installed file to naming the host
+    plus two arguments. Nothing else in the launch path moves.
 
-    *Execution from memory.* `memfd_create(MFD_CLOEXEC|MFD_ALLOW_SEALING)`, write
-    the image, add all four seals (`F_SEAL_SEAL|SHRINK|GROW|WRITE`, read back as
-    `017`), hand the fd to the child through `cmd.ExtraFiles` and exec
-    `/proc/self/fd/3`. `ExtraFiles` is load-bearing and not a convenience: Go sets
-    `CLOEXEC` on every descriptor *except* stdio and that slice, so it is the only
-    way the fd survives into the child's `execve` to be resolved there. No
-    filesystem artifact exists at any point. The change is contained — `clientConfig`
-    (`plugin/host.go`) is the tree's only `exec` site, and it changes from a path
-    to a path plus an `ExtraFiles` entry.
+    **This replaced an earlier recommendation, and the numbers are why.** Until
+    2026-10-01 this entry proposed carrying the backends as *executables* — an
+    appended zip (or `embed.FS`) unpacked into a sealed `memfd` and exec'd through
+    `/proc/self/fd/3`. Both halves were prototyped on 2026-09-11 against Linux
+    6.19.14 and both work: `memfd_create(MFD_CLOEXEC|MFD_ALLOW_SEALING)` with all
+    four seals reading back as `017` and the fd passed through `cmd.ExtraFiles`,
+    and `archive/zip` reading an archive behind an arbitrary prefix natively
+    because the end-of-central-directory scan computes the base offset. Keep that
+    record: it is a working fallback if re-exec ever cannot be used. But re-exec
+    dominates it on five axes, and four of them are not about size.
 
-    *The appended zip.* `archive/zip` reads an archive with an arbitrary prefix
-    natively — the end-of-central-directory scan computes the base offset — so
-    `cat drivel plugins.zip > drivel-fat` needs no framing of our own, no trailer
-    and no magic number. The empty case degrades correctly: a host with no payload
-    appended reports `zip: not a valid zip file` and falls through to the M9
-    search path rather than crashing, which is what makes the fallback below
-    implementable at all.
+    - *Size, measured 2026-10-01.* Host 24.2 MB, gdrive 27.8 MB, sftp 20.6 MB —
+      72.6 MB as three files, and 48.8 MB as host plus a deflated two-backend zip.
+      One link unit holding all three is **30.7 MB**, 37% smaller than the zip,
+      because the Go runtime, gRPC, protobuf and `plugin`/`provider` are linked
+      once instead of three times.
+    - *One implementation on every platform, where the zip needs three.* `memfd_create`
+      is Linux-only; FreeBSD's `shm_open(SHM_ANON)` + `fexecve` was **never
+      verified**; and macOS has no anonymous-image exec at all, so there the honest
+      implementation was extract to a `0700` directory, launch, unlink — a *weaker*
+      claim that writes to disk. Re-exec is the same code everywhere and the
+      guarantee does not vary by platform, so no document has to qualify it.
+    - *No `vm.memfd_noexec`.* The Linux ≥ 6.3 sysctl that reads `0` on the
+      development container and at `2` would refuse every launch, requiring
+      `MFD_EXEC` where the kernel knows it and a startup error naming the sysctl
+      where it does not. It stops being reachable.
+    - *The build graph does not invert.* The zip made `make build` two-stage —
+      plugins first, host embeds them — and made the payload architecture-specific,
+      so a wrong-arch zip had to be refused by name at discovery or fail as an
+      `exec` error indistinguishable from corruption. Re-exec is one `go build`,
+      and wrong-arch is impossible by construction.
+    - *The embed-versus-zip question dissolves.* There is no payload, so there is
+      nothing to embed or append, and the "built once, plugin set varied
+      afterwards" use case that was the only thing justifying the archive is served
+      instead by the external-plugin path below.
 
-    **The platform split is what decides the design**, and it is the reason this is
-    a seam rather than a function. `memfd_create` is Linux-only. FreeBSD's
-    equivalent is `shm_open(SHM_ANON)` + `fexecve` — believed present since 13,
-    **not yet verified, and it must be run on the VM before this entry is trusted**
-    (the FreeBSD run in M10 is the precedent: it found nothing wrong with the
-    milestone and one real bug underneath it). macOS has **no** anonymous-image
-    exec at all, so there the honest implementation is extract to a `0700`
-    directory, `0500` the file, launch, and unlink — which is a *weaker* claim, not
-    the same one by another route. So "plugins never touch disk" is a Linux and
-    (pending) FreeBSD guarantee and a best-effort elsewhere, and every document
-    that describes the feature has to say which it is. The shape to copy is
-    `hydrate/xattr_*.go`: one interface, a shared body where two platforms agree,
-    a separate file where the API differs.
+    **The pattern is already in the tree, which is an argument for it.** M16's mount
+    helper dispatches on argv0 (`/sbin/mount.fuse.drivel`), carries a hidden
+    `mount-helper` subcommand, and re-execs `/proc/self/exe` with a marker
+    environment variable and an inherited pipe on fd 3. This is that mechanism
+    applied a second time, not a new one introduced.
 
-    One kernel detail belongs here because it is invisible until it fails:
-    `vm.memfd_noexec` (Linux ≥ 6.3) can refuse to execute a memfd that was not
-    created with `MFD_EXEC`. It reads `0` on the development container; a host set
-    to `2` would refuse every launch. Pass `MFD_EXEC` where the kernel knows it and
-    fall back cleanly where it does not — and treat a refusal as a startup error
-    naming the sysctl, never as a mysterious `EACCES` from `exec`.
+    **gRPC is retained, and behavioural equivalence is the requirement rather than
+    an aspiration.** A bundled backend must reach the host through the same socket,
+    the same handshake and the same generated protocol as an installed one, so that
+    the launch mechanism is the *only* difference between them and no behaviour is
+    reachable on one path and not the other. go-plugin's original `net/rpc` + gob
+    protocol would be available unmodified and is rejected twice over: `net/rpc`
+    has no streaming, while `Put` is a client stream and `Get` a server stream of
+    `Chunk`s — buffering a whole file in memory is fatal for the 50 GB copy that
+    arrives as one `OpCreate` plus one `OpWrite`, and hand-rolling chunking over
+    the `MuxBroker` reimplements on the data path what gRPC already does — and the
+    stdlib package is frozen with its own documentation pointing at gRPC. The
+    protocol is also already generated, committed, and guarded by `make
+    proto-check`. One thing does simplify: `ProtocolVersion` cannot mismatch for a
+    bundled backend, because host and plugin are the same build. The handshake
+    check stays regardless, because an external plugin can still be any version.
 
-    **What it costs, measured rather than estimated.** Host 24.2 MB, gdrive
-    28.0 MB, sftp 20.8 MB; the two backends deflate to 24.8 MB, so a fat binary is
-    roughly **49 MB per GOOS/GOARCH**. Two consequences follow. The build graph
-    inverts — plugins are built first and the host embeds them, so `make build`
-    becomes two-stage and the `bin/`-first search path that makes a checkout work
-    with no configuration has to keep working alongside it. And the payload is
-    **architecture-specific**: a zip holding the wrong arch must be refused by
-    name at discovery, because the alternative is an `exec` failure that looks
-    exactly like a corrupt plugin. This does not weaken §2.9's cross-compile proof
-    — the host still links no backend — but it does mean a release matrix row is
-    now a *pair* of builds rather than one.
+    **The bundled binary is the default build.** `make build` produces one
+    executable that is host and every shipped backend, so a fresh checkout is
+    usable the moment it compiles and a release artifact is one file with no plugin
+    directory to populate. The separate `cmd/drivel-provider-*` targets stay, for
+    two reasons that are not symmetric: they are how an out-of-tree backend is
+    built at all, and `plugin/testdata/drivel-provider-fake` is a real executable
+    on disk, so the test suite must keep exercising **both** launch paths or the
+    external one rots unobserved.
 
-    **The one real decision, and it is a product decision rather than a technical
-    one: do embedded plugins replace the search path, or precede it?** `provider`
-    is a public package specifically so that a backend can be built out of tree,
-    and embedded-only ends that. The recommendation is **embedded wins and external
-    is opt-in behind an explicit flag** — which is `PathEnv`'s own reasoning
-    reused, that a path which merely goes first makes "which plugin am I running?"
-    depend on something invisible, and that replacing is the decision an operator
-    can see the whole of. A flag that re-enables the M9 path keeps out-of-tree
-    backends alive while making their use a thing someone typed.
+    **What it costs.** Two things, and the first is smaller than it looks.
 
-    **`embed.FS` would be simpler and should be rejected deliberately, not by
-    default.** It is a single directive, no archive parsing, and the payload is
-    covered by whatever signs the binary. The appended zip earns the extra
-    machinery only if the host is to be built once and have its plugin set varied
-    afterwards — a distributor shipping one host with different backend bundles, or
-    a user dropping a backend into an existing install. If that use case is not
-    wanted, `embed.FS` is the better answer and this entry should say so instead.
+    §2.9's cross-compile proof **survives**, because it is a property of the tree
+    and not of the host's link set: `internal/provider/gdrive`, `internal/provider/sftp`
+    and `plugin` all build clean for `windows/amd64`, where the only failures are
+    go-fuse's own internal packages, so "every cross-compile failure traces to
+    go-fuse and nothing else" stays true of a binary that links both backends
+    (measured 2026-10-01). What is lost is narrower: the *inference* that nothing
+    above the seam depends on a concrete provider type, which could previously be
+    read off the host having linked no backend. That property is unchanged in the
+    source and now wants asserting directly — an import-graph test over `go list
+    -deps` that fails if `vfs`, `syncengine`, `app`, `mount`, `hydrate` or `state`
+    reaches `internal/provider/*`. That is a better statement of the rule than a
+    consequence of it, and it is the one new test this milestone owes.
 
-    **Self-verification is worth one paragraph of honesty.** Recording a digest per
-    zip entry at build time and checking it before exec defends against *corruption*
-    and essentially nothing else: anyone who can rewrite the appended payload can
-    rewrite the host's own code, so the check is not an obstacle to an attacker who
-    has already won. Integrity of the plugin becomes integrity of the host binary,
-    which is a genuine simplification — one artifact to sign, one thing for a
-    package manager or dm-verity to protect — and it should be described that way
-    rather than as a new guarantee.
+    `govulncheck` reporting shifts: a Drive SDK advisory is currently a finding
+    against `drivel-provider-gdrive` alone and becomes one against `drivel`. The
+    risk is identical and the distinction is not worth preserving for a bundled
+    app — accepted deliberately, 2026-10-01.
+
+    **M9 rule 4 needs rewording rather than violating.** "The kind is the
+    executable's filename and nothing the plugin says" has no filename to point at
+    for a bundled backend. The replacement is that the kind is the argument the
+    *host* passed, which is still not anything the plugin claims about itself, so
+    the rule's purpose holds; and the failure mode it was written against —
+    two files claiming one kind, resolved by directory order — is one of the things
+    this milestone removes. Prefer one `plugin-serve <kind>` subcommand over one
+    subcommand per kind, so dispatch is a single entry rather than a list to keep
+    in step.
+
+    **The hidden subcommand is a surface and must be kept out of `usage()`, `help`
+    and the completions.** `completionApp` already fails on a flag with no
+    `completionHints` entry; a subcommand needs the equivalent *deliberate*
+    exclusion rather than an accidental one. Direct invocation is inert without
+    help from us — `MagicCookieKey` is `DRIVEL_PLUGIN`, so go-plugin prints its
+    "not meant to be executed directly" line and exits — so this is surface area
+    and tidiness, not a hole.
+
+    **The one real decision is unchanged by the mechanism, and it is a product
+    decision: do bundled plugins replace the external path, or precede it?**
+    `provider` is a public package specifically so that a backend can be built out
+    of tree, and bundled-only ends that. The recommendation is **bundled wins and
+    external is opt-in behind an explicit flag** — which is `PathEnv`'s own
+    reasoning reused, that a path which merely goes first makes "which plugin am I
+    running?" depend on something invisible, and that replacing is the decision an
+    operator can see the whole of. It is also what decides whether M24 has an
+    install target at all.
+
+    **Self-verification is worth one paragraph of honesty.** For a bundled backend,
+    integrity of the plugin *is* integrity of the host binary — one artifact to
+    sign, one thing for a package manager or dm-verity to protect — and that is a
+    genuine simplification rather than a new guarantee. It says nothing about an
+    external plugin, which is a separate artifact and the reason the authentication
+    rule below exists at all.
+
+    **An external plugin proves what produced it with an Ed25519 signature checked
+    against a key the host pins — not OpenPGP, and not a CA** (decided 2026-10-01;
+    M24 inherits this rather than deciding it again). The signature covers a small
+    manifest naming `(kind, version, sha256)`, the digest is the executable's, and
+    it is the same number go-plugin's `SecureConfig` already verifies before exec —
+    so the signature adds *provenance* to an integrity check that exists, rather
+    than being a second mechanism beside it.
+
+    The constraint that decides the format is **where verification happens**: at
+    plugin launch, during mount startup, which has to work offline. An fstab mount
+    at boot has no network and no guarantee that any particular binary is
+    installed. That removes OCSP, CRL fetching and shelling out to `gpg(1)` before
+    any comparison of merits.
+
+    - *OpenPGP fails on the verifying side, not the signing side.* Signing a release
+      with an existing GPG key is fine; the host has to verify **in process**, and
+      `golang.org/x/crypto/openpgp` has been deprecated and frozen since 2021. The
+      maintained route is a third-party fork, which `docs/dev/dependencies.md` would
+      have to justify, for a format whose web of trust buys nothing here because the
+      key would be pinned regardless.
+    - *A CA costs operation and adds a failure mode nobody wants.* `crypto/x509` is
+      stdlib, so verification is not the problem — operating the thing is: offline
+      root, key ceremony, intermediate issuance, revocation distribution. Revocation
+      cannot be network-based on this path, so it degrades to shipping a new drivel
+      with an updated list, which is what a pinned key list already is minus the
+      X.509. And **certificate expiry is an active hazard**: a lapsed cert breaks
+      every mount using that plugin at a moment nobody chose, which for a program
+      holding people's files is worse than having no expiry. The one real benefit is
+      delegation — an intermediate per plugin author — and there is nobody to
+      delegate to yet. Build it when there is.
+    - *Pinned Ed25519 is the right size.* `crypto/ed25519` is stdlib, verification
+      is a few lines, there is no new dependency and no ASN.1 surface, and it works
+      offline. The precedent is direct: the Go toolchain pins `sum.golang.org`'s
+      key, and `signify`/minisign are the same shape. Pin a **list** rather than one
+      key, so rotation needs no CA — ship key N and N+1, retire N a release later.
+
+    **Whose key is the harder half, and the answer is two paths rather than one.**
+    Signing someone else's binary with drivel's key is the mistake: either we build
+    it, which needs reproducible builds or we are attesting to bytes we did not
+    produce, or we sign what they send, so the signature attests to provenance we
+    never verified. Instead — **drivel signs only what drivel builds**, and a
+    third-party plugin is authenticated against **its author's** key, pinned by the
+    user on first install. That second path is M24's trust-on-first-use record with
+    one field added, and it upgrades the record from "the same bytes as last time"
+    to "the same author as last time" without anyone operating a CA. A signature
+    proves provenance and nothing else: not that the code is good, and **not that it
+    should outrank what is bundled**.
+
+    **The trust-on-first-use happens at install, never at mount**, and this is the
+    SFTP host-key rule arriving a second time (§9/M18: a mount that comes up at boot
+    from `/etc/fstab` has nobody to answer a prompt, so the key is in `known_hosts`
+    or the mount refuses to open). `drivel plugin install` may ask; `drivel mount`
+    may not, and must refuse an unknown key rather than accept it — the same answer
+    as `mount` being non-interactive generally, for the same reason.
+
+    **The override surface is three switches, because they are three trust
+    decisions.** Allow external plugins at all (M23's opt-in); allow *unsigned*
+    external plugins; and name a custom location (`DRIVEL_PLUGIN_PATH`, meaningful
+    only when the first is on). Folding the third into the second means someone who
+    wanted a custom directory silently accepted unsigned code — M8 rule 6's
+    reasoning running the other way, a setting that is broader than it looks. And
+    **a boot or fstab mount must not reach the second or third by default**: M16's
+    privilege drop already had to unset root's inherited `XDG_*` to stop a mount
+    reading the wrong account's token, and environment-derived trust goes wrong on
+    exactly that path.
 
     **What this does not buy.** A plugin still runs as the same user with that
     user's entire filesystem; §2.10 already says this and M23 does not change one
     word of it. `plugin/env.go`'s built-not-inherited environment is untouched and
-    remains the actual restraint on what a backend is handed. If the goal is a
-    privilege boundary rather than a supply-chain one, the lever is **Landlock or
-    seccomp on the plugin process** — orthogonal to this milestone, considerably
-    larger, and it composes with it rather than competing. Do not let M23 be
-    recorded as having delivered it.
+    remains the actual restraint on what a backend is handed — and it still applies,
+    because the backend is still a child process with an environment the host
+    builds. If the goal is a privilege boundary rather than a supply-chain one, the
+    lever is **Landlock or seccomp on the plugin process** — orthogonal to this
+    milestone, considerably larger, and it composes with it rather than competing.
+    Do not let M23 be recorded as having delivered it.
 
-    **Unsettled, in the order that matters.** The FreeBSD `fexecve` verification,
-    because it decides whether the seam has two implementations or three. Then the
-    embed-versus-zip question above, because it decides whether there is an archive
-    at all. Then whether `Loader`'s `refused`/`shadowed` machinery survives as the
-    fallback path or is deleted with the search path it serves — and note that
-    `plugin/testdata/drivel-provider-fake` is built as a real executable on disk,
-    so the test suite must keep exercising **both** launch paths whatever is
-    decided, or the fallback rots unobserved.
+    **Unsettled, in the order that matters.** First, whether a *newer* authenticated
+    external plugin should outrank the bundled one automatically. The recommendation
+    is **no**, on four grounds, and it is recorded here rather than decided because
+    the goal behind the proposal — not stranding users on a stale bundled backend —
+    is right and wants serving some other way. "Newer wins" reintroduces the
+    invisible precedence this milestone exists to remove, making "which plugin am I
+    running?" depend on a directory *and* a comparison. It cannot read a version
+    without launching the thing it is deciding about: the kind is a name, not a
+    version, so knowing "newer" first needs a filename convention, an install
+    manifest that does not exist yet, or asking the plugin, which is circular. It
+    turns an install into a mount outage, because a bundled backend is
+    protocol-matched by construction and an external one is not, so a *newer* plugin
+    speaking the next `ProtocolVersion` is refused at handshake and the mount fails
+    *because* someone upgraded. And it makes a signature a permanent override, since
+    anyone able to produce a signed artifact with a high version number wins
+    forever — version precedence without pinning is what lockfiles exist to prevent.
+    **The alternative that serves the same goal**: an external plugin wins because a
+    *record* says so — kind, version, digest, key, written when someone installed it
+    — so precedence is explicit and attributable, and "a newer one exists" is
+    something `drivel plugin list` reports rather than something that happens
+    silently at the next mount. That is M24's install manifest with no new
+    machinery. Second, the replace-versus-precede decision above. Third, whether
+    `Loader`'s `refused`/`shadowed` machinery survives as the external path or is
+    deleted with the search path it serves.
 
 26. **M24 — A plugin registry.** A named, versioned, verifiable way to find and
     install a `drivel-provider-*` executable, modelled on `registry.terraform.io`.
@@ -3598,16 +3745,29 @@ this whole group walks through, so it is a precondition rather than a note.
     version, the source registry and the executable's `sha256`, re-checked before
     every exec through `SecureConfig`. It needs no cryptography beyond a hash; it is
     the same record the naming rule above needs in order to *name the incumbent* in
-    a collision refusal; and it can ship before any signature scheme exists, which
-    is what makes the signature question deferrable rather than blocking.
+    a collision refusal; and it could have shipped before any signature scheme
+    existed, which is what made the signature question deferrable rather than
+    blocking.
 
-    **If signatures come later, the registry may carry the signature and must never
-    carry the key.** The key is named in drivel's own configuration or compiled into
-    the binary, and the response carries a `signature_url` at most. Prefer
-    minisign/signify or `ssh-keygen -Y` over GPG: the payload is a detached
-    signature over thirty-two bytes, and GPG brings a keyring, key rotation and
-    revocation semantics that Terraform's registry has had to grow a whole surface
-    to administer.
+    **It is no longer deferred: §9/M23 decided the scheme on 2026-10-01 and this
+    milestone inherits it rather than choosing again.** Ed25519 over a
+    `(kind, version, sha256)` manifest, verified against a pinned key, with
+    `crypto/ed25519` from the standard library — which is the "prefer
+    minisign/signify or `ssh-keygen -Y` over GPG" instinct this entry already
+    carried, now settled and for a sharper reason: verification happens at mount
+    startup, offline, so OpenPGP's deprecated Go support and a CA's network-based
+    revocation are both unavailable rather than merely heavy. The consequence here
+    is one field: **the install manifest records the author's key alongside the
+    digest**, which upgrades trust-on-first-use from "the same bytes as last time"
+    to "the same author as last time" and lets a rebuild be accepted without a
+    re-prompt.
+
+    **The registry carries the signature and must never carry the key.** The key is
+    pinned at install — in drivel's own configuration for a third-party author, or
+    compiled into the binary for drivel's own builds — and the response carries a
+    `signature_url` at most. A registry serving both halves is precisely the
+    circular anchor rejected above, and the whole reason `trust_signature` is empty
+    in practice over at Terraform.
 
     **Digest pinning assumes a published version is immutable, so put that in the
     protocol rather than discovering it.** OpenTofu needed a written immutability
@@ -3623,15 +3783,23 @@ this whole group walks through, so it is a precondition rather than a note.
     wrong, whatever else it buys.
 
     **It depends on M23's one real decision in a way that could kill it.** M23
-    recommends that embedded plugins *replace* the search path, with external ones
+    recommends that bundled plugins *replace* the external path, with external ones
     behind an explicit flag. An installed plugin is an external plugin: it lands in
-    the very path M23 proposes to retire, so M24 is a consumer of that flag and
-    nothing else. If embedded-only ever wins, this milestone has **no install
+    the very search path M23 proposes to retire, so M24 is a consumer of that flag
+    and nothing else. If bundled-only ever wins, this milestone has **no install
     target** and should be withdrawn rather than reconciled — a host that must be
     rebuilt to gain a backend is a defensible product, just not one with a
-    registry. Sequence M23's embed-versus-zip question first for that reason: a
-    host whose plugin set can be varied after it is built is the same property a
-    registry needs.
+    registry. So sequence M23's replace-versus-precede decision first.
+
+    **And M23 narrows what is left for this milestone to solve.** The registry's
+    original motivation was that installing a backend required a Go toolchain; a
+    bundled default build answers that for every backend drivel ships, leaving the
+    registry to serve *third-party* backends only. That is a smaller and less
+    urgent problem, and it moves the authentication question to the front: M23's
+    external path and M24's install path need the *same* answer about how a plugin
+    proves what produced it, so decide it once for both. The digest decided above
+    is half of it — a signature over that digest, verified against a key the host
+    pins, is the other half.
 
     **The licence question this entry carried is answered, and the answer came from
     relicensing rather than from resolving it.** Under AGPLv3 a plugin importing
