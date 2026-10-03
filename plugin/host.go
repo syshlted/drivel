@@ -48,14 +48,45 @@ const (
 	closeTimeout = 5 * time.Second
 )
 
+// launchSpec says what to execute for one backend, and how to describe it.
+//
+// It is one type for both launch paths (M23): an installed plugin is its own
+// executable with no arguments, and a bundled backend is the host re-executed
+// with `plugin-serve <kind>`. Everything past the exec — the handshake, the
+// socket, the protocol, the relaunch — is then written once, which is what makes
+// "the launch mechanism is the only difference between them" something the code
+// says rather than something a document promises.
+type launchSpec struct {
+	kind string
+	// path is the executable, and args what follows it. An installed plugin
+	// passes no arguments; there is nothing to say to it that its filename has
+	// not already said.
+	path string
+	args []string
+	// bundled distinguishes the two for logs and errors. It is not derived from
+	// len(args), because "an installed plugin that happens to take arguments" is
+	// a thing this type should be able to describe without changing meaning.
+	bundled bool
+}
+
+// what names the thing being launched, for an error message. A path for an
+// installed plugin, because which file failed is the first question; for a
+// bundled backend the answer would be this program, which the message already
+// came from.
+func (s launchSpec) what() string {
+	if s.bundled {
+		return "the backend bundled in this binary"
+	}
+	return s.path
+}
+
 // process is one backend running in its own process, and the host's session to
 // it. It is the piece that makes a crash survivable: every call goes through
 // acquire, which relaunches a process that has exited.
 type process struct {
-	kind string
-	path string
-	cfg  provider.Config
-	lg   *log.Logger
+	launchSpec
+	cfg provider.Config
+	lg  *log.Logger
 
 	mu       sync.Mutex
 	client   *goplugin.Client
@@ -88,9 +119,11 @@ func (p *process) clientConfig() *goplugin.ClientConfig {
 	// happened to trigger a launch would kill the process the moment that push or
 	// poll finished. Close is what ends it.
 	//
-	//#nosec G204 -- the path comes from Loader's own scan of its search
-	// directories, which it has already vetted; it is never user text.
-	cmd := exec.CommandContext(context.Background(), p.path)
+	//#nosec G204 -- neither half is user text. The path is either a file from
+	// Loader's own scan of its search directories, which it has already vetted, or
+	// this program's own image; the arguments are a constant and a kind name the
+	// host itself registered.
+	cmd := exec.CommandContext(context.Background(), p.path, p.args...)
 	cmd.Cancel = func() error { return nil }
 	cmd.Env = pluginEnv()
 
@@ -167,7 +200,7 @@ func (p *process) launch(ctx context.Context) error {
 	addr, err := client.Start()
 	if err != nil {
 		client.Kill()
-		return transportError("plugin %s: launching %s: %w", p.kind, p.path, err)
+		return transportError("plugin %s: launching %s: %w", p.kind, p.what(), err)
 	}
 	if err := checkLocalTransport(addr); err != nil {
 		client.Kill()
@@ -176,13 +209,13 @@ func (p *process) launch(ctx context.Context) error {
 		// the only thing that reports a backend as unusable, and a second class of
 		// launch error that bypasses it would need its own plumbing all the way up
 		// to the engine for a case no shipped backend can produce.
-		return transportError("plugin %s: %s %w", p.kind, p.path, err)
+		return transportError("plugin %s: %s %w", p.kind, p.what(), err)
 	}
 
 	rpc, err := client.Client()
 	if err != nil {
 		client.Kill()
-		return transportError("plugin %s: launching %s: %w", p.kind, p.path, err)
+		return transportError("plugin %s: launching %s: %w", p.kind, p.what(), err)
 	}
 	raw, err := rpc.Dispense(pluginName)
 	if err != nil {
@@ -361,6 +394,12 @@ func trimLine(s string) string {
 // names the executable because "which gdrive plugin is this?" is the first
 // question when two are installed, and the capability list because it is what
 // decides whether this mount has a pull loop at all.
-func describeLaunch(kind, path string, caps provider.CapabilitySet) string {
-	return fmt.Sprintf("loaded %s plugin from %s (capabilities: %s)", kind, path, caps)
+//
+// A bundled backend names no file, which is the answer to that first question
+// rather than an omission: there is no other copy it could have been.
+func describeLaunch(s launchSpec, caps provider.CapabilitySet) string {
+	if s.bundled {
+		return fmt.Sprintf("loaded the bundled %s backend (capabilities: %s)", s.kind, caps)
+	}
+	return fmt.Sprintf("loaded %s plugin from %s (capabilities: %s)", s.kind, s.path, caps)
 }

@@ -12,7 +12,9 @@
 //	drivel mount  [flags]   # mount and sync (default if no subcommand given)
 //
 // It is also the mount(8) helper for /etc/fstab, when invoked through the
-// /sbin/mount.fuse.drivel symlink or as `drivel mount-helper` (Linux only).
+// /sbin/mount.fuse.drivel symlink or as `drivel mount-helper` (Linux only), and
+// — since M23 — the backends it carries, when it re-executes itself as `drivel
+// plugin-serve KIND`.
 //
 // See DESIGN.md for the architecture.
 //
@@ -27,6 +29,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/syshlted/drivel/plugin"
 )
 
 func main() {
@@ -55,6 +59,12 @@ func main() {
 		failHelper(runMountHelper(args))
 	case "completion":
 		fail(runCompletion(args))
+	case plugin.ServeCommand:
+		// This program as one of the backends it carries (M23). Hidden on purpose
+		// — it is not a command anyone has a reason to run, and it is absent from
+		// usage() and from the completions for that reason rather than by
+		// oversight. See plugin.ServeCommand and bundle.go.
+		fail(runPluginServe(args))
 	case "help":
 		usage(os.Stdout)
 	default:

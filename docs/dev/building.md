@@ -6,7 +6,7 @@ passed in CI" cannot mean different things.
 
 ```sh
 make help         # every target, plus worked examples — the default goal
-make build        # the CLI binary, into bin/
+make build        # one binary — the command and its backends — into bin/
 make run          # build, then mount ./mnt over ./data
 make test         # go test -race ./...
 make lint         # golangci-lint over the whole tree
@@ -92,6 +92,63 @@ stripping is the lever that matters:
 | `CGO_ENABLED=1` (the old default) | 28.7 MB |
 | `CGO_ENABLED=0` | 28.5 MB |
 | `CGO_ENABLED=0 -trimpath -ldflags="-s -w"` | 19.6 MB |
+
+## One binary, or a host plus plugins
+
+`make build` produces a single executable that is `drivel` **and** every backend
+the tree ships (M23). A backend still runs in its own process: the host launches
+one by re-executing itself as `drivel plugin-serve <kind>`, which reaches the
+same handshake, the same unix socket and the same generated protocol an installed
+plugin does. The launch mechanism is the only difference between the two, and
+that is a requirement rather than an observation — a behaviour reachable on one
+path and not the other is a difference nothing tests.
+
+```sh
+make build                    # drivel, with gdrive and sftp inside it
+make build-plugins            # ...and the backends as drivel-provider-* executables
+make build TAGS=nobundle      # drivel alone; every backend comes from the search path
+```
+
+`TAGS` is threaded through `vet`, `test`, `test-fast` and `test-full` as well, so
+`make test TAGS=nobundle` runs the suite against the unbundled host.
+
+**It is a supply-chain change, not an isolation one.** Nothing about what a
+backend may do once it is running is different — see the security notes on
+`plugin.Loader`, which are unchanged. What it removes is the trust needed to get
+there: `DRIVEL_PLUGIN_PATH` and the five-directory search path (for a shipped
+backend), shadowed kinds, and `safeToRun`'s check-then-exec window, which cannot
+be closed while a plugin is named by a path and is closed by construction when
+the image is `/proc/self/exe`.
+
+**Precedence is bundled-wins**, and the loader logs the file it ignored. A kind
+the binary does not carry still comes from the search path exactly as before,
+which is what keeps an out-of-tree backend working, so `provider` stays public
+for the reason it was made public.
+
+Two things hold the pair of paths in place:
+
+- **`make build-nobundle` is a `check` gate** (and a CI step). It compiles the
+  host with no backend linked in, because a build nobody performs is a build that
+  stops working — and the unbundled shape is the one a distribution packaging each
+  backend separately needs.
+- **`internal/app/seam_test.go` asserts the import graph.** Until M23 "nothing
+  above the seam depends on a concrete provider" was readable off the host binary
+  having linked no backend. The property is unchanged in the source and the
+  inference is gone, so it is now a test over `go list -deps` — which is the
+  better statement of the rule anyway. §2.9's cross-compile proof is unaffected:
+  it is a claim about the tree, and both backends plus `plugin` still build clean
+  for `windows/amd64`, where only go-fuse fails.
+
+The `cmd/drivel-provider-*` targets stay for two reasons that are not symmetric:
+they are how an out-of-tree backend is built at all, and
+`plugin/testdata/drivel-provider-fake` is a real on-disk executable, so the suite
+exercises both launch paths rather than letting the external one rot.
+
+One hidden subcommand comes with it. `drivel plugin-serve <kind>` is how the host
+re-enters itself as a backend, and it is deliberately absent from `usage()`,
+`drivel help` and the completions — `cmd/drivel/bundle_test.go` asserts that
+absence, so it stays deliberate. Running it by hand is inert: go-plugin refuses
+to serve without the handshake cookie in the environment.
 
 ## Shell completions are printed by the binary
 
@@ -292,9 +349,11 @@ code, so that job needs a heartbeat independent of commits.
 ## Running the binary
 
 ```sh
-# `make build` builds drivel AND every cmd/drivel-provider-*, into bin/ — which is
-# first on the plugin search path, so no configuration is needed to find them.
-# `go build ./cmd/drivel` alone leaves a binary with no backends at all.
+# `make build` builds one binary carrying every backend, so `go build
+# ./cmd/drivel` is equivalent and nothing needs configuring to find a provider.
+# `make build-plugins` additionally writes the backends into bin/, which is first
+# on the plugin search path — useful for exercising the installed launch path,
+# though a bundled kind wins over a file of the same name and says so in the log.
 
 # Separate backing dir: operate on ./mnt; changes land in ./data and log as events.
 ./bin/drivel mount -mount ./mnt -data ./data

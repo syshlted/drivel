@@ -81,11 +81,11 @@ layout: hextra-home
 ```sh
 sudo apt install fuse3                                    # or: dnf install fuse3
 go install github.com/syshlted/drivel/cmd/drivel@latest
-go install github.com/syshlted/drivel/cmd/drivel-provider-gdrive@latest
 ```
 
-A backend is a separate executable, so the host binary alone has no providers.
-Syncing to a server you can `ssh` to needs no login step and no credentials of
-its own — it is your existing SSH key. See [SFTP](docs/sftp/).
+One binary, carrying both of the backends that ship with it — Google Drive and
+SFTP. Each still runs in its own process, so a crash in one cannot take your
+filesystem down. Syncing to a server you can `ssh` to needs no login step and no
+credentials of its own — it is your existing SSH key. See [SFTP](docs/sftp/).
 
 </div>

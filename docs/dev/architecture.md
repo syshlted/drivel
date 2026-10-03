@@ -160,6 +160,9 @@ flowchart TD
     sftpcmd --> sftppkg
     gdrive --> gdconf
 
+    main -.bundles.-> gdrive
+    main -.bundles.-> sftppkg
+
     config --> app
     config --> syncengine
 
@@ -210,12 +213,20 @@ What the graph enforces:
   `provider.Store`, not touching `syncengine`.
 - **`gdrive` is the only package that knows about Drive**, and it is the only one
   that imports `transport` and `gauth`.
-- **The blue boxes are not in the `drivel` binary.** Since M9 a backend is a
-  separate executable (`cmd/drivel-provider-*`), so the Drive SDK, the QUIC
-  transport, OAuth, the path index and the SSH stack are all linked into the
-  plugin that needs them and into nothing else. `cmd/drivel` imports `plugin`,
-  which knows how to launch one, and `gdconf`, which is the leaf holding the
-  Drive settings table the `-drive-*` flags build — vocabulary without the SDK.
+- **The blue boxes run in the backend process, never in the mount's.** A backend
+  is always a separate process (M9), so the Drive SDK, the QUIC transport, OAuth,
+  the path index and the SSH stack execute where a failure in them costs one
+  process that the mount survives. Since M23 the host also *carries* the shipped
+  backends' code — the dotted `bundles` edges — and launches one by re-executing
+  itself; an out-of-tree backend is still its own executable
+  (`cmd/drivel-provider-*`), built from exactly the same packages. The host also
+  imports `gdconf`, the leaf holding the Drive settings table the `-drive-*` flags
+  build, which is vocabulary without the SDK and is why that split still earns its
+  keep: a `nobundle` build has the flags and not the backend.
+- **Nothing between `main` and the seams reaches a provider.** Those two dotted
+  edges are the only ones, and they belong to the composition root. The property
+  used to be readable off the host binary linking no backend at all; it is now
+  asserted directly over `go list -deps`, in `internal/app/seam_test.go`.
 - **`provider`, `ranges` and `plugin` are public packages**, outside `internal/`,
   because an out-of-tree backend has to import all three: the interfaces it
   implements, the extent type `RangePutter` names, and the `Serve` its `main`

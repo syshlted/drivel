@@ -65,8 +65,8 @@ for reasoning, not for interface documentation.
 | `internal/fsevent` | Backend-neutral change `Event` / `Op` types. |
 | `provider` | **Public.** The backend seam: `Store`, the optional capabilities, the registry, and capability negotiation. |
 | `ranges` | **Public.** Leaf value package: the block bitmap. No I/O. Public because `RangePutter` names it. |
-| `plugin` | **Public.** Loading a backend that runs in its own process: discovery, the host-side proxy, and `Serve`. |
-| `cmd/drivel-provider-*` | The backends, each a three-line `main` around `plugin.Serve`. Not commands a user runs. |
+| `plugin` | **Public.** Loading a backend that runs in its own process: discovery, the re-exec of a bundled one, the host-side proxy, and `Serve`. |
+| `cmd/drivel-provider-*` | The backends as installable executables, each a three-line `main` around `plugin.Serve`. Not commands a user runs, and not in the default build — `cmd/drivel` bundles them. |
 | `internal/provider/gdrive` | Google Drive. The only package that knows what a file ID is. |
 | `internal/provider/gdrive/gdconf` | Drive's settings table and its two enumerated types — the vocabulary, without the SDK. |
 | `internal/provider/sftp` | SFTP. Host key verification fails closed. |

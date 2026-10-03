@@ -33,16 +33,17 @@ const driveKind = "gdrive"
 
 // newRegistry builds the provider registry every entry point mounts through.
 //
-// Since M9 there is nothing compiled in for it to hold: a backend is a separate
-// executable that drivel launches, so this is a scan of the plugin search path
-// and a Factory per kind found there. Two things follow from that and are worth
-// stating where the wiring is.
+// A backend is a separate *process* either way (M9), and since M23 it may not be
+// a separate *file*: the kinds in bundledBackends are launched by re-executing
+// this binary, and everything else comes from a drivel-provider-<kind> on the
+// plugin search path. The Loader decides between them, so the precedence is
+// stated in one place — a bundled kind wins, and an installed file of that name
+// is ignored with a log line naming it.
 //
-// The drivel binary no longer links any backend. That is the point of the
-// milestone and not a side effect — the Drive SDK, OAuth, the QUIC transport and
-// the SSH stack are all in the plugin that needs them, so a failure in any of
-// them is a failure of one process that the mount survives and the host
-// relaunches.
+// Out of process is the part that was never about where the code lives. The
+// Drive SDK, OAuth, the QUIC transport and the SSH stack all run in the child,
+// so a failure in any of them is a failure of one process that the mount
+// survives and the host relaunches, whichever way that child was started.
 //
 // And it is still written once. Both the flag/config path and the M16 mount
 // helper call this, because a backend available from the command line and
@@ -50,7 +51,9 @@ const driveKind = "gdrive"
 // suffered once.
 func newRegistry() (*provider.Registry, error) {
 	reg := provider.NewRegistry()
-	if err := plugin.NewLoader(nil, nil).Register(reg); err != nil {
+	ld := plugin.NewLoader(nil, nil)
+	ld.Bundled(bundledKinds()...)
+	if err := ld.Register(reg); err != nil {
 		return nil, err
 	}
 	return reg, nil

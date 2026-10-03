@@ -66,6 +66,16 @@ fail that one.
 Building it costs one `go build` per test binary (`sync.OnceValues`), so the whole
 plugin suite runs in a couple of seconds.
 
+**Both launch paths are covered, and separately** (M23). The fake is an installed
+plugin, found on a search path; the bundled path re-executes the host, so a test
+cannot reach it through the fake alone. `plugin/bundled_test.go` runs the whole
+host side of it — the spec, the exec arguments, and a real launch of the fake with
+the subcommand arguments in place — and `cmd/drivel/bundle_on_test.go` covers the
+other half by building `drivel` and reading go-plugin's handshake line out of
+`drivel plugin-serve <kind>`, which needs neither network nor FUSE because a
+factory is not called until `Open`. Keeping the installed path exercised is the
+reason the `cmd/drivel-provider-*` targets still exist.
+
 ## Property tests
 
 `ranges/property_test.go` and `syncengine/coalescer_property_test.go` are

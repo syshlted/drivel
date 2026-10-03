@@ -8,7 +8,12 @@ obvious change is wrong and the tests will not tell you.
 - **Keep the core provider- and FUSE-agnostic.** The sync engine depends only on
   the `provider` and `internal/mount` seams and on `internal/fsevent` — never on a
   concrete Drive or go-fuse type. New backends implement an interface; they do not
-  get special-cased upstream. Since M9 the `drivel` binary does not even link one.
+  get special-cased upstream. **It is a test, not an inference**
+  (`internal/app/seam_test.go`, over `go list -deps`): until M23 the `drivel`
+  binary linked no backend at all and the property could be read off the artifact,
+  and now that the host bundles its backends the rule has to be asserted on its
+  own. `cmd/drivel` is the composition root and is the one place allowed to name
+  one — in `bundledBackends` and nowhere else.
 - **Ask a store what it can do; never assert it.** `provider.AsChangeSource` and
   its four siblings, not `store.(provider.ChangeSource)`. A backend in another
   process is reached through one proxy type that has every optional method

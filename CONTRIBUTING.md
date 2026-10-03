@@ -10,8 +10,10 @@ filesystem that holds the only local copy of someone's data, and several of its
 rules exist because the obvious change is wrong in a way no test catches —
 particularly around echo suppression, placeholders, and inferred deletions.
 
-If you are adding a cloud backend, you should not need to touch anything outside
-your own package: see [docs/dev/new-provider.md](docs/dev/new-provider.md).
+If you are adding a cloud backend, nothing outside your own package needs to
+change except the line that names it — one entry in `bundledBackends` for an
+in-tree backend, and nothing at all for one built out of tree: see
+[docs/dev/new-provider.md](docs/dev/new-provider.md).
 
 ## The loop
 
@@ -20,8 +22,10 @@ make hooks            # once per clone — installs the git hooks
 make check            # everything CI runs, in CI's order
 ```
 
-`make check` is `tidy-check`, `fmt-check`, `proto-check`, `license-check`,
-`lint`, `test-full` and `vuln`. The
+`make check` is `tidy-check`, `fmt-check`, `vet`, `build`, `build-nobundle`,
+`proto-check`, `license-check`, `gates-check`, `lint`, `test-full` and `vuln`, in
+CI's order — and `gates-check` is what keeps that list and the workflow the
+same. The
 hooks split the same gates by cost: fast ones at commit time, the whole-tree lint
 and the race suite at push time.
 

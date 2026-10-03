@@ -124,21 +124,20 @@ ones for the backend you point it at, so it runs under an identity you control.
 Each provider uses its own transport: Drive traffic is HTTP/3 (QUIC) with an
 automatic fallback to HTTP/2, and SFTP is the file transfer subsystem of SSH.
 .PP
-A provider is a
-.I separate executable
+A provider runs in a
+.I separate process
 that
 .B drivel
-starts for you, named
-.IB drivel-provider- kind
-\(em so
-.B drivel-provider-gdrive
-serves
-.BR provider " = " \(dqgdrive\(dq .
-At least one must be installed for a mount to sync; a
+starts for you. The backends that ship with
 .B drivel
-with none still mounts, but has nothing to sync with. They are separate so that a
-failure inside a backend cannot take the filesystem down: a backend that crashes
-is restarted underneath a mount that stays up, and pending transfers are retried.
+are carried in the binary itself, and it launches one by re-executing itself; a
+backend from anywhere else is an executable named
+.IB drivel-provider- kind
+that
+.B drivel
+finds on a search path. Either way the process is separate so that a failure
+inside a backend cannot take the filesystem down: a backend that crashes is
+restarted underneath a mount that stays up, and pending transfers are retried.
 See
 .BR "PROVIDER BACKENDS" .
 .SH COMMANDS
@@ -965,11 +964,34 @@ created through the mount at all: the attempt fails with
 .B EINVAL
 and creates nothing.
 .SH PROVIDER BACKENDS
-A storage backend runs in its own process.
+A storage backend runs in its own process, started by
 .B drivel
-looks for an executable named
+and reached over a private socket.
+.PP
+The backends that ship with
+.B drivel
+\(em
+.B gdrive
+and
+.B sftp
+\(em are compiled into the binary, and
+.B drivel
+launches one by re-executing itself. Nothing has to be installed for them, there
+is no search path involved, and the
+.I kind
+a config file names with
+.BR provider " = " \(dq kind \(dq
+is the one
+.B drivel
+asked for. A build made with the
+.B nobundle
+build tag carries none of them, and needs the executables below instead.
+.PP
+Any other backend is an executable named
 .IB drivel-provider- kind
-in, in order: the directory holding the running
+which
+.B drivel
+looks for in, in order: the directory holding the running
 .B drivel
 binary,
 .IR $XDG_DATA_HOME/drivel/plugins ,
@@ -978,11 +1000,10 @@ and
 .IR /usr/lib/drivel/plugins .
 The
 .I kind
-is taken from the filename and from nothing else, so it is what a config file
-names with
-.BR provider " = " \(dq kind \(dq .
-If two directories hold the same kind, the first wins and the other is named in
-the log.
+is taken from the filename and from nothing else. A backend compiled into the
+binary wins over an installed file of the same kind, and the file it ignored is
+named in the log; between two installed copies the first on the path wins, and
+the other is named in the log the same way.
 .PP
 .B drivel
 refuses to start a backend that is group- or world-writable, or one whose
@@ -1136,9 +1157,9 @@ type. Both are placed by
 .BR "make install" .
 .TP
 .I $PREFIX/lib/drivel/plugins/drivel-provider-*
-The provider backends placed by
-.BR "make install" ,
-where
+Provider backends as separate executables, placed by
+.B "make install"
+only for a build that carries none of its own, where
 .I $PREFIX
 defaults to
 .IR /usr/local .

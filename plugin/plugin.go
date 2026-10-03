@@ -51,13 +51,30 @@
 // A backend's main is three lines:
 //
 //	func main() {
-//		plugin.Serve("mykind", myprovider.Factory)
+//		plugin.Serve(myprovider.Factory)
 //	}
 //
 // Everything else — the handshake, the gRPC plumbing, capability negotiation,
 // routing the provider's log output back to the mount that launched it — is this
 // package's business. Build the result as `drivel-provider-mykind` and drop it
 // in one of the directories Loader searches.
+//
+// # Two ways a backend is launched
+//
+// Since M23 the drivel binary carries the code of the backends it ships and
+// launches one by re-executing itself with a hidden subcommand (ServeCommand);
+// a backend from anywhere else is the executable above, found on the search
+// path. The difference is the exec and nothing else: both reach the host through
+// the same handshake, the same unix socket and the same generated protocol, so
+// Serve is what either one calls and no behaviour is reachable on one path and
+// not the other.
+//
+// Two consequences for a plugin author. A kind drivel bundles cannot be
+// overridden by installing a file of that name — the bundled one wins, and the
+// mount's log names the file it ignored — so pick a kind of your own rather than
+// shadowing one that ships. And an installed plugin is still subject to the
+// checks on Loader, which a bundled backend does not go through because the
+// image being re-executed is the one already running.
 package plugin
 
 import (

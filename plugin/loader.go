@@ -53,6 +53,12 @@ type Loader struct {
 	// shadowed records kinds that appeared in more than one directory, for the
 	// one log line that says which won.
 	shadowed map[string][]string
+
+	// bundled names the kinds this binary carries itself (M23), and overridden
+	// records the installed files a bundled kind won over — for the one log line
+	// that names what is being ignored.
+	bundled    map[string]bool
+	overridden map[string][]string
 }
 
 // NewLoader returns a Loader searching path, or the default search path when it
@@ -62,6 +68,28 @@ func NewLoader(path []string, lg *log.Logger) *Loader {
 		path = DefaultPath()
 	}
 	return &Loader{path: path, lg: lg}
+}
+
+// Bundled declares the provider kinds this binary carries in its own code, which
+// it launches by re-executing itself rather than by finding a file (M23). Call
+// it before anything else on the Loader; it is read when the search path is
+// scanned.
+//
+// A bundled kind wins, and an installed drivel-provider-<kind> of the same name
+// is ignored with a log line naming it. That direction is the whole point of
+// bundling: the alternative — a file that merely goes first — makes "which
+// backend am I running?" depend on a directory listing nobody is looking at,
+// which is PathEnv's own reasoning, and it leaves in place the swap-the-file
+// window the bundled path closes by construction. Kinds this binary does *not*
+// carry still come from the search path exactly as before, so an out-of-tree
+// backend is unaffected.
+func (l *Loader) Bundled(kinds ...string) {
+	if l.bundled == nil {
+		l.bundled = make(map[string]bool, len(kinds))
+	}
+	for _, k := range kinds {
+		l.bundled[k] = true
+	}
 }
 
 // DefaultPath is where drivel looks for plugins, in order, when PathEnv is
@@ -123,6 +151,7 @@ func (l *Loader) Discover() {
 	l.found = map[string]string{}
 	l.refused = map[string]error{}
 	l.shadowed = map[string][]string{}
+	l.overridden = map[string][]string{}
 
 	for _, dir := range l.path {
 		entries, err := os.ReadDir(dir)
@@ -138,6 +167,13 @@ func (l *Loader) Discover() {
 				continue
 			}
 			full := filepath.Join(dir, e.Name())
+			if l.bundled[kind] {
+				// Recorded rather than examined: a bundled kind is not going to be
+				// launched from a file, so refusing this one for its mode would put a
+				// complaint in the log about something that cannot happen.
+				l.overridden[kind] = append(l.overridden[kind], full)
+				continue
+			}
 			if _, taken := l.found[kind]; taken {
 				l.shadowed[kind] = append(l.shadowed[kind], full)
 				continue
@@ -161,13 +197,33 @@ func (l *Loader) Discover() {
 		}
 		l.logf("plugin %s: using %s; also found %s", kind, winner, strings.Join(others, ", "))
 	}
+	// Sorted, so that a host bundling several backends over an installed set of
+	// the same names logs the same lines in the same order every run.
+	for _, kind := range sortedKeys(l.overridden) {
+		l.logf("plugin %s: using the backend bundled in this binary; ignoring %s",
+			kind, strings.Join(l.overridden[kind], ", "))
+	}
 }
 
-// Kinds lists every provider kind found on the search path, sorted, including
-// kinds whose executable was refused.
+// sortedKeys is the deterministic iteration a log line needs.
+func sortedKeys[V any](m map[string]V) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// Kinds lists every provider kind this Loader can hand out a Factory for,
+// sorted: the kinds bundled in this binary, plus those found on the search path,
+// including those whose executable was refused.
 func (l *Loader) Kinds() []string {
 	l.Discover()
-	out := make([]string, 0, len(l.found)+len(l.refused))
+	out := make([]string, 0, len(l.bundled)+len(l.found)+len(l.refused))
+	for k := range l.bundled {
+		out = append(out, k)
+	}
 	for k := range l.found {
 		out = append(out, k)
 	}
@@ -218,6 +274,9 @@ func (l *Loader) describeMissing(kind string) string {
 // apart from a backend that exists and failed.
 func (l *Loader) Factory(kind string) (provider.Factory, error) {
 	l.Discover()
+	if l.bundled[kind] {
+		return bundledFactory(kind), nil
+	}
 	if reason, refused := l.refused[kind]; refused {
 		// A Factory rather than an error, so the refusal is reported when someone
 		// tries to *use* the backend, naming the file and the problem, instead of
@@ -231,13 +290,14 @@ func (l *Loader) Factory(kind string) (provider.Factory, error) {
 		return nil, fmt.Errorf("%w: %q (%s)", provider.ErrUnknownKind, kind, l.describeMissing(kind))
 	}
 	return func(ctx context.Context, p provider.Params) (provider.Store, error) {
-		return open(ctx, kind, path, p)
+		return open(ctx, launchSpec{kind: kind, path: path}, p)
 	}, nil
 }
 
-// open launches one backend and returns the host-side store.
-func open(ctx context.Context, kind, path string, p provider.Params) (provider.Store, error) {
-	proc := &process{kind: kind, path: path, cfg: p.Config, lg: p.Log}
+// open launches one backend and returns the host-side store. It is the single
+// path both launch mechanisms go through; see launchSpec.
+func open(ctx context.Context, spec launchSpec, p provider.Params) (provider.Store, error) {
+	proc := &process{launchSpec: spec, cfg: p.Config, lg: p.Log}
 	proc.mu.Lock()
 	err := proc.launch(ctx)
 	caps := proc.caps
@@ -246,15 +306,15 @@ func open(ctx context.Context, kind, path string, p provider.Params) (provider.S
 		return nil, err
 	}
 	if p.Log != nil {
-		p.Log.Print(describeLaunch(kind, path, caps))
+		p.Log.Print(describeLaunch(spec, caps))
 	} else {
-		log.Print(describeLaunch(kind, path, caps))
+		log.Print(describeLaunch(spec, caps))
 	}
 	return &pluginStore{
 		remoteStore: &remoteStore{
 			sess: proc,
 			caps: caps,
-			lg:   func(f string, a ...any) { proc.logf(kind+": "+f, a...) },
+			lg:   func(f string, a ...any) { proc.logf(spec.kind+": "+f, a...) },
 		},
 		proc: proc,
 	}, nil

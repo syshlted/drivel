@@ -13,14 +13,13 @@ sudo apt install fuse3        # Debian/Ubuntu
 sudo dnf install fuse3        # Fedora
 
 go install github.com/syshlted/drivel/cmd/drivel@latest
-go install github.com/syshlted/drivel/cmd/drivel-provider-gdrive@latest
 ```
 
-That puts both in `$(go env GOPATH)/bin`. The second one is the Google Drive
-backend: Drivel runs its backends as separate programs and starts them for you, so
-you install the ones you use and a crash in one cannot take your filesystem down.
-See [Installing](install.md) for building from a checkout, macOS and FreeBSD, and
-shell completions.
+That puts one binary in `$(go env GOPATH)/bin`, carrying both of the backends
+that ship with Drivel — Google Drive and SFTP. Drivel still runs a backend as a
+separate process, starting a copy of itself to be the one a mount asked for, so a
+crash in one cannot take your filesystem down. See [Installing](install.md) for
+building from a checkout, macOS and FreeBSD, and shell completions.
 
 ## 2. Get Google credentials
 

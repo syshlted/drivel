@@ -33,8 +33,7 @@ is trying to be, and what that costs: **[MANIFESTO.md](MANIFESTO.md)**.
 
 ```sh
 sudo apt install fuse3                                    # or: dnf install fuse3
-go install github.com/syshlted/drivel/cmd/drivel@latest
-go install github.com/syshlted/drivel/cmd/drivel-provider-gdrive@latest  # the backend
+go install github.com/syshlted/drivel/cmd/drivel@latest   # one binary, backends included
 
 drivel login -account personal                            # one-time OAuth wizard
 drivel mount                                              # serves your config file
@@ -113,7 +112,10 @@ Release history is in [CHANGELOG.md](CHANGELOG.md). Contributions:
   credentials and state, validated against each other before any of them opens.
 - **HTTP/3** (QUIC) transport with automatic HTTP/2 fallback.
 - **Pluggable backends** — the cloud side is a narrow path-addressed interface
-  rather than a Drive-shaped one. Google Drive is the provider that ships today.
+  rather than a Drive-shaped one, and each backend runs in its own process, so a
+  crash in one cannot take the filesystem down. Google Drive and SFTP ship inside
+  the binary; a backend from outside the tree is an executable Drivel finds and
+  launches.
 - **Bring your own credentials** — Drivel ships none of its own; you supply the
   credentials for the backend you point it at.
 
@@ -137,7 +139,8 @@ initial enumeration and multi-account mounts are all shipped. See
 [CHANGELOG.md](CHANGELOG.md) for what landed when, and what is planned next.
 
 There are no tagged releases yet; build from source with `make build`, or
-`go install …@latest` — the command and at least one `drivel-provider-*` backend.
+`go install …/cmd/drivel@latest` — one binary, carrying the backends it ships
+with.
 
 ## Building
 
@@ -145,6 +148,11 @@ There are no tagged releases yet; build from source with `make build`, or
 make build            # or: go build -o ./bin/drivel ./cmd/drivel
 make check            # everything CI runs, in CI's order
 ```
+
+`make build` produces one binary that is the command and both of its backends.
+`make build TAGS=nobundle` leaves the backends out, for packaging them
+separately; `make build-plugins` is what builds them as `drivel-provider-*`
+executables.
 
 `make help` lists every target. See
 [docs/dev/building.md](docs/dev/building.md).

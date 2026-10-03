@@ -25,9 +25,15 @@ bidirectional sync — don't regress it.
 ## Layout
 
 - `cmd/drivel` — entrypoint; flag parsing, the flag→spec mapping, signal context.
-  Since M9 it links **no backend at all**: `newRegistry` is a scan of the plugin
-  search path. `cmd/drivel-provider-gdrive` and `cmd/drivel-provider-sftp` are the
-  backends, each a three-line `main` around `plugin.Serve`.
+  Since M23 it **bundles** every shipped backend (`bundle_on.go`'s
+  `bundledBackends`; `bundle_off.go` empties it behind the `nobundle` tag) and
+  launches one by re-executing itself as `drivel plugin-serve <kind>`, so
+  `newRegistry` is that map plus a scan of the plugin search path for anything
+  else. It is the **only** package above the seam allowed to name a provider, and
+  `internal/app/seam_test.go` asserts that. `cmd/drivel-provider-gdrive` and
+  `cmd/drivel-provider-sftp` still build those two as installable plugins — not in
+  the default build, kept because an out-of-tree backend is built that way and
+  because the installed launch path would otherwise rot.
   `fstab.go` is the M16 mount(8) helper — argv0 dispatch, the `-o` option table
   and the spec mapping (portable, so its tests run everywhere); `fstab_linux.go`
   holds the privilege drop and the daemonize handshake.
@@ -217,7 +223,10 @@ still works): `drivel login` (interactive OAuth wizard → credentials.json +
 token.json) and `drivel mount`. **Both entry points build their registry through
 `newRegistry()` in `cmd/drivel/mount.go`** — the flag/config path and the M16 mount
 helper — because a backend registered in one but not the other is a config file
-that works from the shell and fails at boot. `drivel login` is Drive-specific by
+that works from the shell and fails at boot. Two more are **hidden and stay
+hidden**: `mount-helper` (M16) and `plugin-serve <kind>` (M23, the host as one of
+its own backends), both absent from `usage()`, `help` and the completions
+deliberately, and the second one with a test asserting it. `drivel login` is Drive-specific by
 nature; an SFTP account needs no login step and is written by hand. From M8 both are account-aware: `drivel login
 -account NAME` scopes credentials to `$XDG_CONFIG_HOME/drivel/NAME` and appends
 `[account.NAME]` to the config file, and `drivel mount` with no flags reads
@@ -375,7 +384,9 @@ tree's first real `RangePutter`. See "SFTP" below.
 
 M9 plugin architecture **shipped**: every backend runs in its own process,
 launched over hashicorp/go-plugin (gRPC on a unix socket), one process per mount.
-`drivel` links no backend. See "Plugin architecture" below for the invariants.
+As M9 shipped it `drivel` linked no backend; **M23 has since bundled the shipped
+ones into the host**, which changes how the child is started and nothing below it.
+See "Plugin architecture" below for the invariants.
 
 **v2, planned** (DESIGN.md §9 has the detail). **M10** platform parity — both xattr halves are written; **FreeBSD has been
 run on its own OS (2026-09-06), macOS has not**: one shared linux+darwin
@@ -433,16 +444,41 @@ the out-of-band one primary; that is the shape to copy when it lands.
 before that number went to special files; if you meet a stray M15 in an old
 branch or note meaning the mount helper, this is it.
 
-**M23** bundled backends & re-exec launch — the host binary carries its backends'
-*code* and launches one by re-executing itself as `drivel plugin-serve <kind>`.
-Unscheduled, not started, and **it is a supply-chain milestone rather than an
-isolation one**: it retires the whole discovery surface (`DRIVEL_PLUGIN_PATH`, the
-five-directory search path, shadowed kinds, and `safeToRun`'s check-then-exec race,
-which cannot be closed while a plugin is named by a path), and it changes nothing
-about what a plugin may do once running — that lever is Landlock/seccomp and is a
-different piece of work. It supersedes M9's "pinned digest per kind" note **for a
-bundled backend only**; an external plugin is still a file reached by a path, so
-pinning stays live there and merges with M24's signing question.
+**M23** bundled backends & re-exec launch **shipped 2026-10-02** (except the
+external-plugin authentication below, which M24 inherits): the host binary carries
+its backends' *code* and launches one by re-executing itself as `drivel
+plugin-serve <kind>`. **It is a supply-chain milestone rather than an isolation
+one**: it retires the discovery surface (`DRIVEL_PLUGIN_PATH`, the five-directory
+search path, shadowed kinds, and `safeToRun`'s check-then-exec race, which cannot be
+closed while a plugin is named by a path) **for the kinds the host carries, which is
+every backend that ships, and for no others** — the search path and the mode checks
+still exist and still run for a kind the binary does not have, so don't write "M23
+removed the search path". It changes nothing about what a plugin may do once
+running — that lever is Landlock/seccomp and is a different piece of work. It
+supersedes M9's "pinned digest per kind" note **for a bundled backend only**; an
+external plugin is still a file reached by a path, so pinning stays live there and
+merges with M24's signing question.
+
+**What landed.** `cmd/drivel/bundle_on.go`'s `bundledBackends` (kind →
+`provider.Factory`, `gdrive` + `sftp`), emptied by `bundle_off.go` under the
+`nobundle` tag — that tag *is* the build option, `TAGS=nobundle` through the
+Makefile. `drivel plugin-serve <kind>` is the child entry point, dispatched in
+`main` beside `mount-helper`. In `plugin`, one `launchSpec` describes both paths and
+`open` is the only thing that consumes it, so the exec is the single place they
+differ; `Loader.Bundled` carries the precedence. **Precedence is bundled-wins per
+kind and the losing file is named in the log** — a bundled kind is never looked for
+on the path and never mode-checked, since refusing a file nobody will launch would
+register a Factory that fails. `make build-nobundle` is a `check` gate and a CI step;
+`internal/app/seam_test.go` is the import-graph test the milestone owed. Measured
+**33.8 MB bundled against 76.4 MB as three files** — and **a bigger binary costs
+less memory, not more**: host and child map one inode, so combined PSS is 33.8 MB
+against 45.9 MB for host-plus-plugin as separate files, with 18.2 MB shared-clean
+against none. DESIGN.md §9/M23 has the table and the two things not to misread off
+it (residency is not execution; private-dirty, 5.3/8.4 MB, is what scales per
+mount). What did *not* ship: the switch
+that would disable the external path wholesale — precedence shipped, the opt-in
+waits on authentication, because "allow external at all" and "allow *unsigned*
+external" must not be met one at a time.
 
 **Re-exec replaced an earlier memfd+zip design on 2026-10-01, and the record of
 that design is kept in DESIGN.md as a working fallback** (`memfd_create` + all four
@@ -467,21 +503,25 @@ one `OpCreate` plus one `OpWrite` — and `net/rpc` is frozen. **The bundled bin
 the default build**, so a fresh checkout is usable the moment it compiles; the
 separate `cmd/drivel-provider-*` targets stay, because they are how an out-of-tree
 backend is built and because `plugin/testdata/drivel-provider-fake` is a real
-on-disk executable, so the suite must keep exercising both launch paths or the
-external one rots. **§2.9's cross-compile proof survives** — it is a claim about the
-tree, not a link set, and both providers plus `plugin` build clean for
-`windows/amd64` where only go-fuse fails — but the *inference* that nothing above
-the seam imports a provider stops being readable off the host binary, so M23 owes an
-import-graph test asserting it directly. **`govulncheck` reporting shifts** from
-`drivel-provider-gdrive` to `drivel` for a Drive SDK advisory; same risk, accepted.
+on-disk executable, so the suite keeps exercising both launch paths rather than
+letting the external one rot — which is also why the bundled path has its own tests
+(`plugin/bundled_test.go` for the host half, `cmd/drivel/bundle_on_test.go` reading
+go-plugin's handshake out of the built binary for the child half). **§2.9's
+cross-compile proof survives** — it is a claim about the tree, not a link set, and
+both providers plus `plugin` build clean for `windows/amd64` where only go-fuse
+fails — but the *inference* that nothing above the seam imports a provider stopped
+being readable off the host binary, which is what `internal/app/seam_test.go` now
+asserts directly. **`govulncheck` reporting shifts** from `drivel-provider-gdrive`
+to `drivel` for a Drive SDK advisory; same risk, accepted.
 
-Two consequences are easy to get wrong. **M9 rule 4 needs rewording, not
-violating** — there is no filename to be the kind, so the kind is the argument the
-*host* passed, which is still not anything the plugin says about itself; prefer one
-`plugin-serve <kind>` subcommand over one per kind. And **the hidden subcommand
-stays out of `usage()`, `help` and the completions**, deliberately rather than by
-accident, the way `completionApp` already refuses a flag with no hint entry; direct
-invocation is already inert because `MagicCookieKey` is `DRIVEL_PLUGIN`.
+Two consequences are easy to get wrong. **M9 rule 4 was reworded, not violated** —
+there is no filename to be the kind, so the kind is the argument the *host* passed,
+which is still not anything the plugin says about itself; one `plugin-serve <kind>`
+subcommand rather than one per kind. And **the hidden subcommand stays out of
+`usage()`, `help` and the completions**, now by a test (`cmd/drivel/bundle_test.go`)
+rather than by habit, the way `completionApp` already refuses a flag with no hint
+entry; direct invocation is inert anyway because `MagicCookieKey` is
+`DRIVEL_PLUGIN`.
 
 **An external plugin proves what produced it with a pinned Ed25519 signature —
 not OpenPGP, not a CA** (decided 2026-10-01; M24 inherits it). The signature covers
@@ -1197,14 +1237,23 @@ composition — and about the ways several mounts can corrupt each other.
    byte for byte what it was pre-M8. New log calls belong on `e.logf`/`d.logf`/
    `d.logf`/`n.logf`, never `log.Printf`.
 
-## Plugin architecture (M9)
+## Plugin architecture (M9, M23)
 
-Every backend runs in its own process. `drivel` discovers `drivel-provider-<kind>`
-on a search path, launches it, and talks to it over gRPC on a unix socket
-(hashicorp/go-plugin). **One plugin process per mount** — two mounts are two sets
-of credentials, which is the same per-mount rule that keeps their state DBs,
-engines and worker pools apart. `cmd/drivel` imports no backend; `newRegistry` is a
-directory scan.
+Every backend runs in its own process, talking to the host over gRPC on a unix
+socket (hashicorp/go-plugin). **One plugin process per mount** — two mounts are two
+sets of credentials, which is the same per-mount rule that keeps their state DBs,
+engines and worker pools apart.
+
+**Two launch paths, differing in one step.** A backend the tree ships is *bundled*
+(M23): its code is in `drivel`, which re-executes itself as `drivel plugin-serve
+<kind>`. Anything else is an installed `drivel-provider-<kind>` found on the search
+path, which is how M9 shipped. `newRegistry` is `bundledBackends` plus a directory
+scan for the rest, and precedence is **bundled-wins per kind, with the ignored file
+named in the log**. Everything after the exec is identical, and that is a
+requirement rather than an observation — a behaviour reachable on one path and not
+the other is a difference nothing tests, which is why both are tested separately
+(`plugin/bundled_test.go`, `cmd/drivel/bundle_on_test.go`, and the fake plugin for
+the installed path).
 
 Nine things carry the correctness.
 
@@ -1229,11 +1278,13 @@ Nine things carry the correctness.
    "no drivel-provider-gdrive in …" appended to the registry's own message. The
    registry must not learn what a plugin is — it holds factories and nothing else
    — so the layer that knows contributes the sentence.
-4. **The kind is the executable's filename and nothing the plugin says.** A plugin
-   that named itself could contradict its filename, and two files could then claim
-   one kind with a resolution order that is either a directory listing or
-   last-install-wins. Two files claiming one kind *by filename* resolve
-   first-on-the-path-wins and the loser is named in the log.
+4. **The kind is the host's word for a backend and nothing the plugin says.** For
+   an installed plugin that is its filename; for a bundled one it is the map key
+   and the argument the host passes itself (M23 reworded this rule rather than
+   violating it). A plugin that named itself could contradict its filename, and two
+   files could then claim one kind with a resolution order that is either a
+   directory listing or last-install-wins. Two files claiming one kind *by filename*
+   resolve first-on-the-path-wins and the loser is named in the log.
 5. **Three error classifications are rebuilt on the far side, and each one lost is
    silent.** The plugin classifies (only it can see its backend's error types) and
    sends the classification as a gRPC status detail. `ErrNotExist` lost ⇒ renames
@@ -1325,7 +1376,9 @@ the daemon.
 treatment, nothing is asking for it, and a FUSE connection is not a thing to hand
 across a process boundary casually. **Not implemented: checksum pinning** —
 go-plugin offers `SecureConfig`; the mode and directory checks are what ships, and a
-pinned digest per kind in the config file is the obvious next step.
+pinned digest per kind in the config file is the obvious next step **for an
+installed plugin**. M23 made it moot for a bundled one: a digest of code you are
+already executing is a digest of yourself.
 
 ## fstab & non-interactive mount (M16)
 
@@ -1605,7 +1658,9 @@ the seam clean anyway — the cross-compile shows that costs nothing.
 ```sh
 make help                                      # every gate as a target, plus examples
 make check                                     # everything CI runs, in CI's order
-make build                                     # drivel AND every cmd/drivel-provider-*
+make build                                     # ONE binary: drivel with its backends inside
+make build TAGS=nobundle                       # ...or the host alone, backends off the search path
+make build-plugins                             # ...the backends as installable drivel-provider-*
 make proto                                     # regenerate plugin/internal/pb after editing proto/
 drivel completion bash                         # print the bash completion script
 make hooks                                     # install the git hooks (once per clone)
@@ -1616,15 +1671,15 @@ go vet ./...
 go test -race ./...                            # what `make test` runs
 DRIVEL_REQUIRE_TESTENV=all go test -race ./... # ...and nothing silently skipped
 
-# A backend is a separate executable, so `go build ./cmd/drivel` alone leaves a
-# binary with no providers. bin/ is first on the plugin search path, which is what
-# makes the pair below work with no configuration.
+# One build is the whole program since M23 — the backends are in it, and it starts
+# one by re-executing itself. bin/ is still first on the plugin search path, so a
+# `drivel-provider-*` built there is found for any kind the binary does not carry
+# (a bundled kind wins over a file of its own name, and logs that it did).
 go build -o ./bin/drivel ./cmd/drivel
-go build -o ./bin/drivel-provider-gdrive ./cmd/drivel-provider-gdrive
 ./bin/drivel mount -mount ./mnt -data ./data   # separate backing dir; -debug for FUSE tracing
 ./bin/drivel mount -mount ./dir                # in-place: ./dir is its own backing (Linux)
 
-sudo make install                              # + /sbin/mount.fuse.drivel, + $PREFIX/lib/drivel/plugins
+sudo make install                              # + /sbin/mount.fuse.drivel (plugins only for TAGS=nobundle)
 ```
 
 `./mnt` and `./data` are gitignored scratch dirs; create them (the binary
@@ -1649,7 +1704,10 @@ events. Ctrl-C unmounts.
   for `OpRename`.
 - Keep the FS layer provider-agnostic — depend on `provider`, never on a concrete
   Drive type. Nothing above the seam may import `internal/provider/gdrive` or
-  `internal/provider/sftp`; since M9 those are not even in the drivel binary.
+  `internal/provider/sftp` — **`internal/app/seam_test.go` is what says so** since
+  M23, over `go list -deps`, because the host now links both and the property
+  stopped being readable off the binary. `cmd/drivel` is the composition root and
+  the one exception, in `bundledBackends` and nowhere else.
 - Ask a store what it can do with `provider.As*`, never with a type assertion. See
   "Plugin architecture" rule 1 for what the assertion answers wrongly.
 - FS operations must not block on the network; sync happens off the FUSE path via

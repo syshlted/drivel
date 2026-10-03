@@ -58,7 +58,9 @@ highest semver tag.
 
 ## What will (and won't) be documented
 
-- **`cmd/drivel`** and the `cmd/drivel-provider-*` commands are `package main` —
+- **`cmd/drivel`** and the `cmd/drivel-provider-*` commands (which build the
+  shipped backends as installable plugins, for a host that carries none) are
+  `package main` —
   commands, not importable libraries. pkg.go.dev lists them and renders each
   command's doc comment, but there is no importable API surface.
 - **Three packages are public and are meant to be**: `provider` (the backend seam),
@@ -100,12 +102,11 @@ Once a tag exists, users install the command with:
 
 ```sh
 go install github.com/syshlted/drivel/cmd/drivel@latest
-go install github.com/syshlted/drivel/cmd/drivel-provider-gdrive@latest
 ```
 
-(That places both binaries in `$(go env GOBIN)` or `$GOPATH/bin`. The second one
-is the Google Drive backend: since M9 the command carries no backend of its own,
-so a `drivel` installed alone mounts but cannot sync. It also still needs the
+(That places one binary in `$(go env GOBIN)` or `$GOPATH/bin`, carrying both
+shipped backends — since M23 the command bundles them and launches one by
+re-executing itself, so nothing else has to be installed. It does still need the
 system `fuse3` helper at runtime — see the README.)
 
 ## Removing a bad version

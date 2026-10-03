@@ -351,8 +351,10 @@ locally and could never be hydrated later.
 
 ## 6. Launching a backend, and surviving one that dies
 
-A backend is a separate process (M9, DESIGN.md §2.10). This is what a mount does
-to get one, and what happens when it goes away underneath.
+A backend is a separate process (M9, DESIGN.md §2.10) — whether its code is
+bundled in this binary and launched by re-executing it (M23) or installed as a
+`drivel-provider-KIND` executable. This is what a mount does to get one, and what
+happens when it goes away underneath.
 
 ```mermaid
 sequenceDiagram
@@ -360,14 +362,14 @@ sequenceDiagram
     participant App as internal/app.Open
     participant Loader as plugin.Loader
     participant Proc as plugin process supervisor
-    participant Plug as drivel-provider-KIND
+    participant Plug as the backend process
     participant Engine as syncengine.Engine
 
     App->>Loader: Register(registry)
-    Loader->>Loader: scan the search path<br/>kind := filename suffix
+    Loader->>Loader: take the bundled kinds<br/>scan the search path for the rest
     Loader->>Loader: refuse group/world-writable binaries
     App->>Proc: Factory(ctx, Params{Config, Log})
-    Proc->>Plug: fork/exec with a BUILT environment
+    Proc->>Plug: fork/exec with a BUILT environment<br/>(this image + "plugin-serve KIND", or the installed file)
     Plug-->>Proc: handshake on stdout
     Proc->>Plug: Open{config TOML, content broker id}
     Plug->>Plug: factory(ctx, Params)<br/>provider.Capabilities(store)
@@ -404,6 +406,11 @@ Three things this picture is making a point of:
   point is that a backend authenticates with what its configuration names, so
   which account a mount uses is a property of the config file rather than of the
   shell that started it.
+- **Everything from step 6 on is identical for both launch paths**, and that is
+  the requirement M23 is built on rather than something it happened to achieve: a
+  bundled backend reaches the host through the same handshake, socket and
+  generated protocol an installed one does, so the only thing the two differ in is
+  what step 5 executes.
 
 ## 7. Mount lifecycle
 

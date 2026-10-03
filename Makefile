@@ -117,26 +117,69 @@ help:
 # this to a global would break the entire test suite with "-race requires cgo".
 CGO_ENABLED ?= 0
 
-# The provider backends are separate executables (M9), so a build is the host
-# plus one binary per backend. PLUGINS is derived from the directory names rather
-# than listed, so adding cmd/drivel-provider-<kind> is the whole of adding a
-# backend to the build.
+# The provider backends are separate executables (M9), so a build *can* be the
+# host plus one binary per backend. PLUGINS is derived from the directory names
+# rather than listed, so adding cmd/drivel-provider-<kind> is the whole of adding
+# a backend to the build.
 #
 # They go in the same directory as the host on purpose: bin/ is the first entry
-# on the default plugin search path, which is what makes `make build && make run`
-# work with no configuration at all.
+# on the default plugin search path, which is what makes `make build-plugins &&
+# make run` work with no configuration at all.
 PLUGIN_CMDS := $(wildcard cmd/drivel-provider-*)
 PLUGINS     := $(notdir $(PLUGIN_CMDS))
 
+# TAGS is the build option, and there is exactly one tag to pass: `nobundle`.
+#
+# By default the host carries every backend in the tree and launches one by
+# re-executing itself (M23), so `make build` produces ONE file that is drivel and
+# its providers — a fresh checkout is usable the moment it compiles, and there is
+# no plugin directory to populate. `nobundle` links no backend into the host, so
+# every provider comes from a drivel-provider-<kind> on the search path, which is
+# M9 unchanged and is the shape a distribution packaging each backend separately
+# wants.
+#
+# Nothing about the *running* backend changes between the two: it is a separate
+# process either way, reached over the same socket, speaking the same protocol.
+# The tag decides how that process is started and nothing else.
+TAGS    ?=
+GO_TAGS := $(if $(TAGS),-tags $(TAGS),)
+
+# Empty when the host links no backend, which is what the install and build rules
+# below branch on: shipping plugin executables beside a bundled host installs
+# files the host will ignore, and say so in the log of every mount.
+BUNDLED := $(if $(findstring nobundle,$(TAGS)),,yes)
+
 #> make build                       # static, portable, no libc dependency
 #> make build CGO_ENABLED=1         # distro packaging only; links the host's libc
-## build: compile drivel and its provider plugins into bin/ (static)
+#> make build TAGS=nobundle         # host alone; backends come from the search path
+#> make build-plugins               # the backends as installable executables
+## build: compile drivel into bin/ (static), with its backends bundled in
 .PHONY: build
 build:
-	CGO_ENABLED=$(CGO_ENABLED) go build -o $(BIN)/drivel ./cmd/drivel
+	CGO_ENABLED=$(CGO_ENABLED) go build $(GO_TAGS) -o $(BIN)/drivel ./cmd/drivel
+ifeq ($(BUNDLED),)
+	@$(MAKE) --no-print-directory build-plugins
+endif
+
+# The backends as separate executables. They are not part of the default build
+# any more, and the target stays for two reasons that are not symmetric: it is
+# how an out-of-tree backend is built at all, and the installed launch path rots
+# unobserved if nothing in the tree still produces one.
+## build-plugins: compile the provider backends as installable plugins
+.PHONY: build-plugins
+build-plugins:
 	@for p in $(PLUGINS); do \
 		CGO_ENABLED=$(CGO_ENABLED) go build -o $(BIN)/$$p ./cmd/$$p || exit 1; \
 	done
+
+# A build nobody performs is a build that stops working, and the host's "links no
+# provider" shape is the one a packager needs and nobody here exercises. This
+# gate compiles it; the import-graph test (internal/app/seam_test.go) is what
+# asserts the property that used to be readable off the binary itself.
+## build-nobundle: check that the unbundled host still compiles
+.PHONY: build-nobundle
+build-nobundle:
+	CGO_ENABLED=$(CGO_ENABLED) go build -tags nobundle -o $(BIN)/drivel-nobundle ./cmd/drivel
 
 # The local run loop: build first, then serve. Building first is not a courtesy
 # — debugging a mount against yesterday's binary is a long afternoon.
@@ -212,15 +255,22 @@ install: build
 	install -d $(DESTDIR)$(PREFIX)/bin $(DESTDIR)$(MANDIR)/man1
 	install -m0755 $(BIN)/drivel $(DESTDIR)$(PREFIX)/bin/drivel
 	install -m0644 docs/user/drivel.1 $(DESTDIR)$(MANDIR)/man1/drivel.1
-# The backends (M9). They go in $(PLUGINDIR) rather than in bin/, because they
-# are not commands: running one from a shell prints a handshake line and exits.
-# 0755 and a root-owned directory are not cosmetic — drivel refuses to launch a
-# plugin that is group- or world-writable, or one whose directory is, since a
-# backend runs with the user's credentials.
+# The backends, when this build does not carry them (TAGS=nobundle). They go in
+# $(PLUGINDIR) rather than in bin/, because they are not commands: running one
+# from a shell prints a handshake line and exits. 0755 and a root-owned directory
+# are not cosmetic — drivel refuses to launch a plugin that is group- or
+# world-writable, or one whose directory is, since a backend runs with the user's
+# credentials.
+#
+# A bundled host installs none of them, and the directory is not created either:
+# a bundled kind wins over an installed file of the same name, so the files would
+# be ignored and the ignoring logged on every mount.
+ifeq ($(BUNDLED),)
 	install -d $(DESTDIR)$(PLUGINDIR)
 	@for p in $(PLUGINS); do \
 		install -m0755 $(BIN)/$$p $(DESTDIR)$(PLUGINDIR)/$$p || exit 1; \
 	done
+endif
 # The helper is the same binary under another name: mount(8) picks a program by
 # the filesystem type, and argv[0] is the whole difference. A symlink rather than
 # a second binary means there is no second thing to keep in version lockstep.
@@ -260,18 +310,18 @@ uninstall:
 ## test: race-enabled suite; skips tests whose kernel facilities are absent
 .PHONY: test
 test:
-	go test -race ./...
+	go test -race $(GO_TAGS) ./...
 
 #> make test-full                   # the whole suite, nothing silently skipped
 ## test-full: race suite with no silent skips — needs /dev/fuse and user xattrs
 .PHONY: test-full
 test-full:
-	DRIVEL_REQUIRE_TESTENV=all go test -race ./...
+	DRIVEL_REQUIRE_TESTENV=all go test -race $(GO_TAGS) ./...
 
 ## test-fast: no race instrumentation; the pre-commit lane
 .PHONY: test-fast
 test-fast:
-	go test ./...
+	go test $(GO_TAGS) ./...
 
 #> make cover                       # coverage profile into bin/coverage.out
 ## cover: race suite with a coverage profile written to bin/coverage.out
@@ -330,7 +380,7 @@ lint-fix: $(GOLANGCI_LINT)
 ## vet: go vet — a subset of lint, but free and always installed
 .PHONY: vet
 vet:
-	go vet ./...
+	go vet $(GO_TAGS) ./...
 
 ## vuln: known vulnerabilities in dependencies and the toolchain
 .PHONY: vuln
@@ -376,7 +426,7 @@ gates-check:
 #> make precommit                   # the fast gate, before committing
 #> make check                       # everything CI runs, in CI's order
 # In CI's order, and gates-check keeps that true.
-CHECK_GATES = tidy-check fmt-check vet build proto-check license-check gates-check \
+CHECK_GATES = tidy-check fmt-check vet build build-nobundle proto-check license-check gates-check \
               lint test-full vuln
 
 ## check: everything CI runs, in CI's order

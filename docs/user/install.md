@@ -35,41 +35,43 @@ sysctl vfs.usermount=1
 
 Add `fusefs_load="YES"` to `/boot/loader.conf` to make it persist.
 
-## Install the command — and at least one backend
-
-Drivel is two kinds of program. `drivel` is the command: it mounts the
-filesystem, watches for changes, and keeps the local state. A **backend** is a
-separate executable that talks to one storage service — `drivel-provider-gdrive`
-for Google Drive, `drivel-provider-sftp` for an SFTP server — which `drivel`
-starts for you when a mount needs it.
-
-They are separate on purpose. Nothing that goes wrong inside a backend can take
-your filesystem down: if it crashes, the mount stays up and Drivel starts it
-again. It also means you only install the backends you actually use.
-
-**You need at least one.** A `drivel` with no backend installed can still mount a
-directory, but it has nothing to sync with.
+## Install the command
 
 ```sh
 go install github.com/syshlted/drivel/cmd/drivel@latest
-go install github.com/syshlted/drivel/cmd/drivel-provider-gdrive@latest
 ```
 
-Everything lands in `$(go env GOBIN)`, or `$(go env GOPATH)/bin` if `GOBIN` is
-unset. Make sure that is on your `PATH`. Drivel looks for backends next to itself
-first, so installing them the same way is all it takes.
+That is everything. The binary lands in `$(go env GOBIN)`, or
+`$(go env GOPATH)/bin` if `GOBIN` is unset; make sure that is on your `PATH`.
 
-If you want SFTP as well:
+One file carries the command and both of the backends that ship with it — Google
+Drive and SFTP. A **backend** is the part that talks to one storage service, and
+Drivel still runs it as a **separate process**: it starts a copy of itself to be
+the backend a mount asked for. That is not a detail you have to manage, but it is
+why nothing that goes wrong inside a backend takes your filesystem down. If it
+crashes, the mount stays up and Drivel starts it again.
+
+To see which backends a `drivel` has:
 
 ```sh
-go install github.com/syshlted/drivel/cmd/drivel-provider-sftp@latest
+drivel mount -h        # errors from a mount name the backends available
 ```
 
-To see what Drivel can find:
+### Backends that do not ship with Drivel
 
-```sh
-drivel mount -h        # errors from a mount name the backends that are installed
-```
+A backend can also be its own executable, named `drivel-provider-<kind>`, which
+Drivel finds and launches. That is how a backend somebody else wrote reaches you,
+and how a distribution can package each one separately. Drivel looks for them
+next to itself, then in `~/.local/share/drivel/plugins`,
+`/usr/local/lib/drivel/plugins` and `/usr/lib/drivel/plugins`.
+
+A backend built into Drivel wins over an installed file of the same name, and the
+mount's log says which file it ignored — so there is never a question about which
+one you are running.
+
+Drivel refuses to start an installed backend that is group- or world-writable, or
+one whose directory is: a backend runs with your credentials, and a file anyone
+could replace is a file anyone could replace *with*.
 
 ## Build from source
 
@@ -79,10 +81,18 @@ cd drivel
 make build
 ```
 
-`make build` produces `bin/drivel` and every backend beside it, which is what CI uses and produces a **statically linked** binary
-with no library dependencies — it runs on any Linux of the same architecture,
-whatever glibc that machine has. `make help` lists every target; contributors
-should read [the developer build guide](../dev/building.md) instead of this page.
+`make build` produces `bin/drivel`: one **statically linked** binary with no
+library dependencies and both backends inside it, which runs on any Linux of the
+same architecture whatever glibc that machine has. `make help` lists every
+target; contributors should read [the developer build
+guide](../dev/building.md) instead of this page.
+
+Two variations exist and neither is the usual choice. `make build-plugins` builds
+the shipped backends as separate `drivel-provider-*` executables as well, which
+is what an out-of-tree backend is built like. `make build TAGS=nobundle` builds a
+`drivel` with no backend inside it at all, which only makes sense alongside
+those files — it is the shape a distribution wants when it ships one package per
+backend.
 
 If you are **packaging Drivel for a distribution**, build with `make build
 CGO_ENABLED=1` instead. That links the system's C library, so the package tracks
@@ -90,11 +100,10 @@ your distribution's patch level and its security updates arrive through your
 package manager rather than waiting on a Drivel release.
 
 Cross-compiling works for every Linux architecture, `darwin/amd64`,
-`darwin/arm64` and FreeBSD. Remember the backends:
+`darwin/arm64` and FreeBSD, and one command is the whole of it:
 
 ```sh
 GOOS=darwin GOARCH=arm64 go build ./cmd/drivel
-GOOS=darwin GOARCH=arm64 go build ./cmd/drivel-provider-gdrive
 ```
 
 Windows is not supported — see [Platform support](platforms.md#windows).
@@ -110,16 +119,16 @@ sudo make install         # PREFIX=/usr/local  MANDIR=$PREFIX/share/man  SBINDIR
 | What | Where |
 | --- | --- |
 | The binary | `$PREFIX/bin/drivel` |
-| The backends | `$PREFIX/lib/drivel/plugins/drivel-provider-*` |
 | The man page | `$MANDIR/man1/drivel.1` |
 | The `mount(8)` helper | `$SBINDIR/mount.fuse.drivel` and `$SBINDIR/mount.drivel`, both symlinks to the binary |
 | Shell completions | `$PREFIX/share/bash-completion/completions/drivel`, `$PREFIX/share/zsh/site-functions/_drivel` |
 
-The backends go under `lib` rather than `bin` because they are not commands you
-run: started from a shell, one prints a handshake line and exits. Drivel refuses
-to start a backend that is group- or world-writable, or one whose directory is, so
-install them as root and leave them `0755` — a backend runs with your credentials,
-and a file anyone could replace is a file anyone could replace *with*.
+There is no backend to install: they are in the binary. With
+`make install TAGS=nobundle` they are separate files instead, and land in
+`$PREFIX/lib/drivel/plugins/` — under `lib` rather than `bin` because they are not
+commands you run, since started from a shell one prints a handshake line and
+exits. Install those as root and leave them `0755`, or Drivel will refuse to
+start them.
 
 `SBINDIR` defaults to `/sbin` rather than to something under `PREFIX` because
 `mount(8)` searches `/sbin` and `/usr/sbin` only. Those two symlinks are what let
@@ -194,7 +203,7 @@ With `-account NAME`, everything follows the XDG base directories:
 | `~/.config/drivel/NAME/token.json` | The access/refresh token. **Secret.** |
 | `~/.local/state/drivel/NAME/state.db` | Sync bookkeeping — the change cursor and echo records. |
 | Wherever `data =` points | **Your files.** |
-| `~/.local/share/drivel/plugins/` | Backends you installed for yourself, if you did not install them system-wide. |
+| `~/.local/share/drivel/plugins/` | Backends you installed for yourself as separate executables, if you installed any. |
 
 Both credential files are written `0600`. Neither the state database nor the
 path index is a credential, and neither is authoritative: deleting them costs API
@@ -210,7 +219,7 @@ fusermount3 -u ~/drive                    # unmount first (or just Ctrl-C the pr
 
 sudo make uninstall                       # if you installed with `sudo make install`
 rm "$(command -v drivel)"                 # if you installed with `go install`
-rm ~/go/bin/drivel-provider-*             # ...and the backends it installed beside it
+rm ~/go/bin/drivel-provider-*             # ...and any separate backends, if you installed some
 
 rm -rf ~/.config/drivel ~/.local/state/drivel ~/.local/share/drivel/plugins
 ```

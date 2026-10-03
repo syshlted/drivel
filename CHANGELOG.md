@@ -8,11 +8,48 @@ decision lives in the repo's design notes; this file is the summary.
 > you cannot afford to lose. See [project status](docs/user/status.md).
 
 There are **no tagged releases yet**. Everything below is on the master branch.
-Install with `go install github.com/syshlted/drivel/cmd/drivel@latest`
-**plus at least one backend** (`…/cmd/drivel-provider-gdrive@latest`), or build
+Install with `go install github.com/syshlted/drivel/cmd/drivel@latest`, or build
 from source with `make build`.
 
 ## Unreleased
+
+### One binary: the backends ship inside Drivel — 2026-10-02
+
+**Installing Drivel is one command again.** `go install
+…/cmd/drivel@latest` now gives you a `drivel` that can mount Google Drive and
+SFTP, with nothing to install beside it:
+
+```sh
+go install github.com/syshlted/drivel/cmd/drivel@latest    # that is all of it
+```
+
+Until now the command and each backend were separate executables, and a `drivel`
+without `drivel-provider-gdrive` installed somewhere it could find could mount a
+directory but had nothing to sync with. The backends are now compiled into the
+binary, and Drivel starts one by **re-executing itself**. `make build` produces
+that one file, and a release is one artifact rather than a binary plus a plugin
+directory to populate.
+
+**Nothing changes about how a backend runs.** It is still a separate process,
+reached over the same private socket, speaking the same protocol — so a backend
+that crashes still cannot take your filesystem down, and Drivel still starts it
+again underneath a mount that stays up. What changes is only how that process is
+started, which removes the parts that were worth removing: there is no directory
+anyone can write a `drivel-provider-gdrive` into and be handed your credentials,
+and no gap between Drivel checking a file and running it.
+
+**A backend from somewhere else still works exactly as before.** An executable
+named `drivel-provider-<kind>` on the search path is found and launched the same
+way, which is how a backend Drivel does not ship reaches you. A backend built
+into Drivel **wins** over an installed file of the same kind, and the mount's log
+names the file it ignored, so "which backend am I running?" is always answered in
+the log rather than by a directory listing.
+
+If you installed the separate backends, you can remove them —
+`rm ~/go/bin/drivel-provider-*` — or leave them; they will be ignored with a log
+line. For packaging, `make build TAGS=nobundle` builds a `drivel` with no backend
+inside it and `make build-plugins` builds them as separate executables, which is
+the shape a distribution shipping one package per backend wants.
 
 ### `login` writes the mount block, and the backing store leaves the cache — 2026-09-30
 
@@ -235,6 +272,10 @@ with it — the mount stays up, Drivel restarts the backend behind it, and anyth
 that was waiting to upload is retried. And you carry only the backends you use:
 the Drive client, its OAuth stack and its HTTP/3 transport are no longer in the
 binary of someone who only syncs to SFTP.
+
+*Superseded on 2026-10-02 as far as installing goes — the shipped backends are
+back inside the binary and there is nothing to install beside it. A backend is
+still a separate process, which is what the paragraph above is about.*
 
 **It also means Drivel can be extended without being forked.** A backend is an
 ordinary Go program in its own repository: implement the storage interface, call

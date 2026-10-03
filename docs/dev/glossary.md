@@ -5,11 +5,15 @@ everyday reading that is *wrong* here, that is called out.
 
 ### backend / provider plugin
 
-The executable that talks to one storage service — `drivel-provider-gdrive`,
-`drivel-provider-sftp`. Since M9 a backend is a separate process that `drivel`
-launches and speaks gRPC to over a unix socket; the `drivel` binary links none of
-them. The **kind** it provides is the suffix of its filename, which is what a
-config file names with `provider = "…"`. See DESIGN.md §2.10.
+The code that talks to one storage service — Google Drive, SFTP. Since M9 a
+backend is a separate *process* that `drivel` launches and speaks gRPC to over a
+unix socket. Since M23 a shipped backend's code is **bundled** in the `drivel`
+binary, which launches it by re-executing itself as `drivel plugin-serve <kind>`;
+any other backend is an installed executable named `drivel-provider-<kind>` that
+`drivel` finds on a search path. Either way the **kind** is the host's word for
+it, never the backend's: the map key and subcommand argument for a bundled one,
+the filename suffix for an installed one, and what a config file names with
+`provider = "…"`. See DESIGN.md §2.10.
 
 ### backing store / backing directory
 

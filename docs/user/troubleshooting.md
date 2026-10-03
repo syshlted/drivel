@@ -29,19 +29,20 @@ tool is pointed at the mounted directory *as if* it were the backing directory.
 
 ## Backends
 
-Drivel's storage backends are separate programs it starts for you — see
-[Installing](install.md#install-the-command--and-at-least-one-backend).
+Drivel runs a backend as a separate process. The two that ship with it are
+inside the binary, and a backend from anywhere else is an executable Drivel finds
+and launches — see [Installing](install.md#install-the-command).
 
-**`unknown kind: "gdrive" (available: sftp); no drivel-provider-gdrive in …`** —
-the backend is not installed. The message lists what *is* available and every
-directory Drivel looked in. Install it the same way you installed `drivel`:
+**`unknown kind: "thing" (available: gdrive, sftp); no drivel-provider-thing in …`**
+— nothing provides that kind. The message lists what *is* available and every
+directory Drivel looked in. Check the spelling in your config file first; if the
+backend really is one you meant to add, install `drivel-provider-thing` into one
+of those directories.
 
-```sh
-go install github.com/syshlted/drivel/cmd/drivel-provider-gdrive@latest
-```
-
-or, from a checkout, `make build` (which builds all of them) or
-`sudo make install`.
+**`unknown kind: "gdrive" (available: sftp)`, from a Drivel that should have
+both** — this is a `drivel` built without its backends (`TAGS=nobundle`), and it
+needs the matching `drivel-provider-*` executables installed beside it. A
+`go install …/cmd/drivel@latest` build has both inside it.
 
 **`refusing to run: mode 0777 is writable by everyone`** — the backend is there,
 but anyone on the machine could replace it, and it runs with your credentials.
@@ -59,12 +60,19 @@ starting it again. Your mount stays up throughout; pending uploads are retried
 once it is back. If it repeats, the lines just above it in the log are the
 backend's own output and are where the reason will be.
 
-**Drivel is running a backend you did not expect.** With two installed copies of
-the same backend, the first on the search path wins and Drivel logs the other:
-`plugin gdrive: using /usr/bin/drivel-provider-gdrive; also found …`. The search
-order is: next to the `drivel` binary, then `~/.local/share/drivel/plugins`, then
+**Drivel is running a backend you did not expect.** A backend built into Drivel
+wins over an installed file of the same name, and Drivel names the file it
+ignored: `plugin gdrive: using the backend bundled in this binary; ignoring
+/usr/lib/drivel/plugins/drivel-provider-gdrive`. Among *installed* copies the
+first on the search path wins, and Drivel logs the other the same way: `plugin
+gdrive: using /usr/bin/drivel-provider-gdrive; also found …`. The search order
+is: next to the `drivel` binary, then `~/.local/share/drivel/plugins`, then
 `/usr/local/lib/drivel/plugins`, then `/usr/lib/drivel/plugins`. Setting
 `DRIVEL_PLUGIN_PATH` replaces that list entirely.
+
+Either way the log is the answer, and it is worth reading once after a change:
+the point of those lines is that "which backend am I running?" is never something
+you have to work out from a directory listing.
 
 **A backend cannot find something it could find when you ran it by hand.** Drivel
 gives a backend a deliberately small environment — `PATH`, `HOME`, `TMPDIR`,

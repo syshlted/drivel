@@ -205,11 +205,30 @@ not really change. Getting the encoding subtly wrong is harmless in the dangerou
 direction — hashes simply never match and every push proceeds — but you lose the
 optimisation, so it is worth a test against a real round-trip.
 
-## 4. Ship it as a plugin
+## 4. Ship it
 
-Since M9 a backend is a **separate executable** that drivel launches and talks to
-over gRPC on a unix socket. Nothing about the interface changed — what changed is
-where the implementation lives — and the whole of the wiring is a `main`:
+A backend always runs in **its own process**, launched by drivel and reached over
+gRPC on a unix socket (M9). Where its code lives is a separate question with two
+answers, and the interface is identical either way.
+
+**In tree**, a backend is bundled into the `drivel` binary and launched by
+re-executing it (M23). Adding one is one line in `bundledBackends`
+([cmd/drivel/bundle_on.go](../../cmd/drivel/bundle_on.go)):
+
+```go
+var bundledBackends = map[string]provider.Factory{
+    driveKind: gdrive.Factory,
+    sftpKind:  sftp.Factory,
+    "thing":   thing.Factory,     // the kind a config file names
+}
+```
+
+Keep the `cmd/drivel-provider-<name>/main.go` below as well. It is how your
+backend is built for a `nobundle` host, and it is what proves the installed
+launch path still works.
+
+**Out of tree**, a backend is its own executable, and the whole of the wiring is
+a `main`:
 
 ```go
 // cmd/drivel-provider-<name>/main.go   (or your own repo, if you are out of tree)
@@ -239,12 +258,16 @@ func Factory(ctx context.Context, p provider.Params) (provider.Store, error) {
 Build it as **`drivel-provider-<name>`** and put it somewhere drivel looks:
 alongside the `drivel` binary, in `$XDG_DATA_HOME/drivel/plugins`, in
 `/usr/local/lib/drivel/plugins` or `/usr/lib/drivel/plugins`. `DRIVEL_PLUGIN_PATH`
-replaces that list if you want it somewhere else.
+replaces that list if you want it somewhere else. A kind drivel bundles wins over
+an installed file of that name, so pick a kind of your own rather than shadowing
+one that ships.
 
-**The kind is the filename.** `drivel-provider-thing` provides `thing`, which is
-what a user writes as `provider = "thing"`. Your code never names it — a plugin
-that could name itself could contradict its filename, and then two files could
-claim one kind.
+**Your code never names the kind.** For an installed plugin it is the filename —
+`drivel-provider-thing` provides `thing`, which is what a user writes as
+`provider = "thing"` — and for a bundled one it is the key in the map and the
+argument the host passes itself. Both are the *host's* word for your backend: a
+plugin that could name itself could contradict its filename, and then two files
+could claim one kind.
 
 Three consequences worth knowing before you debug something confusing:
 
@@ -314,7 +337,8 @@ coverage.
 - [ ] `RangeGetter` implemented **iff** the provider serves real byte ranges.
 - [ ] Store is safe for concurrent use.
 - [ ] A `main` calling `plugin.Serve(Factory)`, built as `drivel-provider-<name>`
-      and installed somewhere on the search path; nothing else changed.
+      and installed somewhere on the search path; nothing else changed. In tree,
+      one more line in `bundledBackends` and that `main` stays as well.
 - [ ] Nothing written to standard output — that is the handshake.
 - [ ] Nothing read from the environment beyond what `plugin.EnvAllowed()` lists;
       everything else comes through the config, as an absolute path.

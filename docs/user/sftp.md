@@ -13,16 +13,11 @@ the same file, you get a conflict copy rather than a silent loss.
 
 ## Setting it up
 
-First, install the backend. Drivel runs its storage backends as separate programs,
-so the SFTP one has to be there for a mount to use it:
+The SFTP backend ships inside the `drivel` binary, so there is nothing to
+install for it — see [Installing](install.md#install-the-command) if you have a
+`drivel` that was built without its backends.
 
-```sh
-go install github.com/syshlted/drivel/cmd/drivel-provider-sftp@latest
-```
-
-(or `make build` / `sudo make install` from a checkout, which build every backend).
-
-SFTP is then configured through [the config file](configuration.md#the-config-file).
+SFTP is configured through [the config file](configuration.md#the-config-file).
 There are no `-sftp-*` flags; the mount flags are Drive-shaped by history.
 
 ```toml

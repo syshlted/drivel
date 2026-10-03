@@ -16,10 +16,12 @@ settings. Two kinds ship: `gdrive` and [`sftp`](sftp.md). A **mount** references
 account and says what to mount from it. Their provider settings merge, with the
 mount's winning, so one account can be mounted several times with different roots.
 
-The kind names a **backend**, which is a separate program Drivel starts for you —
-`provider = "gdrive"` needs `drivel-provider-gdrive` installed. See
-[Installing](install.md#install-the-command--and-at-least-one-backend); if it is
-missing, the mount fails with a message naming every directory that was searched.
+The kind names a **backend**, which Drivel runs as a separate process. Both
+shipped backends are inside the `drivel` binary, so there is nothing to install
+for either; a backend somebody else wrote is an executable Drivel finds and
+launches, and a mount naming one that is absent fails with a message listing the
+kinds that are available and every directory that was searched. See
+[Installing](install.md#install-the-command).
 
 ```toml
 [account.personal]
