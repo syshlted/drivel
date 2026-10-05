@@ -320,3 +320,192 @@ func TestWorkerFlagsAreShapingFlags(t *testing.T) {
 		}
 	}
 }
+
+// selectorConfig writes a config file with three mounts over two accounts, the
+// shape where -name and -account ask different questions.
+func selectorConfig(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+	body := `
+[account.personal]
+provider = "gdrive"
+credentials = "/c.json"
+token = "/t.json"
+
+[[mount]]
+name = "docs"
+account = "personal"
+path = "./docs"
+data = "./docs-data"
+
+[[mount]]
+name = "photos"
+account = "personal"
+path = "./photos"
+data = "./photos-data"
+
+[[mount]]
+name = "scratch"
+path = "./scratch"
+data = "./scratch-data"
+`
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// The headline case: one mount out of a config file that describes several.
+func TestSelectorsNarrowTheConfig(t *testing.T) {
+	path := selectorConfig(t)
+	for _, tc := range []struct {
+		flag  string
+		value string
+		want  []string
+	}{
+		{"name", "photos", []string{"photos"}},
+		{"name", "scratch", []string{"scratch"}},
+		{"account", "personal", []string{"docs", "photos"}},
+	} {
+		t.Run(tc.flag+"="+tc.value, func(t *testing.T) {
+			f := defaults()
+			f.configPath = path
+			switch tc.flag {
+			case "name":
+				f.selectName = tc.value
+			case "account":
+				f.selectAccount = tc.value
+			}
+			specs, err := mountSpecs(quietFlagSet(), map[string]bool{"config": true, tc.flag: true}, f)
+			if err != nil {
+				t.Fatalf("mountSpecs: %v", err)
+			}
+			var got []string
+			for _, s := range specs {
+				got = append(got, s.Name)
+			}
+			if strings.Join(got, ",") != strings.Join(tc.want, ",") {
+				t.Errorf("got %v; want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// A selector is not a shaping flag: it chooses among mounts the file already
+// describes, so unlike every flag in mountShapingFlags it composes with -config.
+func TestSelectorsAreNotShapingFlags(t *testing.T) {
+	for _, name := range mountSelectorFlags {
+		for _, shaping := range mountShapingFlags {
+			if name == shaping {
+				t.Errorf("-%s is in both mountSelectorFlags and mountShapingFlags", name)
+			}
+		}
+	}
+}
+
+// With no config file there is nothing to select from, and the flags describing
+// a mount must not quietly serve that mount while ignoring the -name.
+func TestSelectorWithoutAConfigIsRefused(t *testing.T) {
+	// An empty XDG_CONFIG_HOME, so the default path exists as a path and holds no
+	// file: that is the case where the error can name where it looked.
+	dir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", dir)
+
+	t.Run("no config at all", func(t *testing.T) {
+		f := defaults()
+		f.selectName = "photos"
+		_, err := mountSpecs(quietFlagSet(), map[string]bool{"name": true}, f)
+		if err == nil {
+			t.Fatal("-name with no config file was accepted")
+		}
+		if !strings.Contains(err.Error(), "-name") || !strings.Contains(err.Error(), "config.toml") {
+			t.Errorf("error should name the flag and the path it looked at: %v", err)
+		}
+	})
+
+	t.Run("alongside -mount", func(t *testing.T) {
+		f := defaults()
+		f.mountpoint = "/m"
+		f.selectName = "photos"
+		_, err := mountSpecs(quietFlagSet(), map[string]bool{"name": true, "mount": true}, f)
+		if err == nil {
+			t.Fatal("-name alongside -mount was accepted")
+		}
+		if !strings.Contains(err.Error(), "-mount") {
+			t.Errorf("error should name -mount: %v", err)
+		}
+	})
+}
+
+// -name already identifies one mount, so naming its account too can only agree
+// or contradict. Refused rather than resolved.
+func TestSelectorsCannotBeCombined(t *testing.T) {
+	f := defaults()
+	f.configPath = selectorConfig(t)
+	f.selectName, f.selectAccount = "photos", "personal"
+	_, err := mountSpecs(quietFlagSet(), map[string]bool{"config": true, "name": true, "account": true}, f)
+	if err == nil {
+		t.Fatal("-name and -account together were accepted")
+	}
+}
+
+// An explicit empty value is refused for the reason an explicit 0 is refused for
+// the pool sizes: it would otherwise read as "no selector" and serve every mount
+// in the file, which is the opposite of what typing the flag asks for.
+func TestSelectorWithAnEmptyValueIsRefused(t *testing.T) {
+	path := selectorConfig(t)
+	for _, name := range mountSelectorFlags {
+		t.Run(name, func(t *testing.T) {
+			f := defaults()
+			f.configPath = path
+			_, err := mountSpecs(quietFlagSet(), map[string]bool{"config": true, name: true}, f)
+			if err == nil {
+				t.Fatalf("-%s with an empty value was accepted", name)
+			}
+			if !strings.Contains(err.Error(), "-"+name) {
+				t.Errorf("error should name the flag: %v", err)
+			}
+		})
+	}
+}
+
+// A selector works off the default config path too, which is what makes
+// `drivel mount -name photos` the whole invocation.
+func TestSelectorUsesTheDefaultConfig(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", dir)
+	t.Setenv("XDG_STATE_HOME", filepath.Join(dir, "state"))
+	path := filepath.Join(dir, config.AppName, "config.toml")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	body := "[[mount]]\nname = \"one\"\npath = \"./a\"\n\n[[mount]]\nname = \"two\"\npath = \"./b\"\n"
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	f := defaults()
+	f.selectName = "two"
+	specs, err := mountSpecs(quietFlagSet(), map[string]bool{"name": true}, f)
+	if err != nil {
+		t.Fatalf("mountSpecs: %v", err)
+	}
+	if len(specs) != 1 || specs[0].Name != "two" {
+		t.Fatalf("got %v; want just two", specs)
+	}
+}
+
+// A mistyped selector must fail at startup naming what the config does define,
+// not serve nothing and exit successfully.
+func TestSelectorThatMatchesNothingFailsAtStartup(t *testing.T) {
+	f := defaults()
+	f.configPath = selectorConfig(t)
+	f.selectName = "photoss"
+	_, err := mountSpecs(quietFlagSet(), map[string]bool{"config": true, "name": true}, f)
+	if err == nil {
+		t.Fatal("a -name matching no mount was accepted")
+	}
+	if !strings.Contains(err.Error(), "photos") {
+		t.Errorf("error should list the names the config defines: %v", err)
+	}
+}

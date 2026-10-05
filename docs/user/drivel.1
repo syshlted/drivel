@@ -35,6 +35,9 @@ drivel \- cloud-backed FUSE interceptor filesystem
 .B drivel mount
 .RB [ -config
 .IR file ]
+.RB [ -name
+.IR name " | " -account
+.IR name ]
 .br
 .B drivel mount
 .B -mount
@@ -250,10 +253,55 @@ on its own serves everything configured.
 It cannot be combined with any flag that describes
 .I what
 to mount \(em that would require a precedence rule between the two \(em though
-.B -debug
+.BR -debug ,
+.BR -pprof ,
+.B -name
 and
-.B -pprof
+.B -account
 compose with it.
+.TP
+.BI -name " name"
+Serve only the mount of this name, instead of every mount in the config file.
+The name is the one a mount reports in its log lines: the
+.B name
+key, or the account name, or the mountpoint's basename. Names are unique, so this
+selects exactly one mount.
+.IP
+It
+.I selects
+among the mounts a config file describes and never describes one itself, which is
+why it composes with
+.B -config
+where
+.B -mount
+and the rest cannot \(em and why it requires a config file. Given alongside
+.B -mount
+it is an error rather than a flag that is quietly disregarded. A name matching no
+mount is a startup error listing the names the file does define.
+.TP
+.BI -account " name"
+Serve only the mounts belonging to this account \(em the ones whose
+.B account
+key is
+.IR name .
+An account may own several mounts, so unlike
+.B -name
+this may select more than one. It cannot be combined with
+.BR -name ,
+which already identifies a single mount, and it is otherwise the same kind of
+flag: a selector, requiring a config file to select from.
+.IP
+Note that
+.B -account
+means something different on each of the three paths that has one. Here it
+selects from a config file;
+.B "drivel login -account"
+creates an account; and
+.B account=
+in an fstab line names where the credentials for that one line come from. An
+fstab line selects from a config file with
+.B name=
+instead, since one line is one mount.
 .TP
 .BI -mount " dir"
 Path to mount the filesystem. Required unless

@@ -76,8 +76,8 @@ Every key mirrors a flag. Both are listed together below; `drivel mount -h` and
 | --- | --- | --- | --- |
 | `-mount DIR` | `path` | — | Where the filesystem appears. Required. |
 | `-data DIR` | `data` | — | The backing directory: where the files really live. Omitting it selects [in-place mode](#in-place-mode) (Linux only). |
-| — | `name` | the account name, else the mountpoint's basename | A label for this mount, used in log lines and to derive default paths. |
-| — | `account` | — | Which `[account.*]` supplies credentials. |
+| `-name NAME` | `name` | the account name, else the mountpoint's basename | As a key, a label for this mount, used in log lines and to derive default paths. As a flag, it [serves only that one mount](#serving-some-of-the-mounts) from the config file. |
+| `-account NAME` | `account` | — | As a key, which `[account.*]` supplies credentials. As a flag, it [serves only the mounts belonging to that account](#serving-some-of-the-mounts). |
 | `-state FILE` | `state` | `drivel-state.db` | The sync-state database (change cursor and echo records). Must not sit inside a backing tree. |
 | `-lazy` | `lazy` | off | [Lazy hydration](lazy-mode.md): show remote files as placeholders, fetch on first read. |
 | `-xattr` | `xattr` | off | Serve extended attributes through the mountpoint. Off is a [safety property](lazy-mode.md#why--xattr-is-off-by-default). |
@@ -293,6 +293,42 @@ break each other in ways one cannot. These are startup errors naming both mounts
 
 Logging is per mount and prefixed with the mount name — except when there is only
 one, where the output is unprefixed.
+
+### Serving some of the mounts
+
+`drivel mount` serves every `[[mount]]` in the config file. Two flags narrow that
+to a subset, which is what you want for a mount you bring up by hand, or for one
+service unit per mount:
+
+```sh
+drivel mount -name photos         # just that one mount
+drivel mount -account personal    # every mount belonging to that account
+```
+
+`-name` matches the name a mount reports in its log lines — the `name` key, or the
+default it falls back to — and names are unique, so it selects exactly one mount.
+`-account` matches the `account` key, so it selects however many mounts use that
+account: in a config with one mount per account the two flags do the same thing,
+and they diverge once an account has several. You cannot combine them, since a
+name already identifies a single mount.
+
+Because `-name photos` leaves one mount running, its log output is unprefixed —
+the same as a config file that described only that mount.
+
+They **choose** among mounts rather than describing one, which is why they are the
+only mount flags that may be combined with `-config`. The same reasoning says they
+need a config file to choose from: `-name` together with `-mount`, `-data` or any
+other flag describing a mount is an error rather than a flag that gets ignored.
+
+A selector that matches nothing is a startup error listing the names or accounts
+the file does define. Mounting nothing and exiting successfully is the failure an
+[unrecognised key](#the-config-file) is an error for.
+
+> [!NOTE]
+> `-account` on `mount` *selects*; `-account` on [`login`](#login-options) *creates*,
+> and `account=` in [an fstab line](fstab.md) names where credentials come from for
+> the mount that line describes. An fstab line selects from a config file with
+> `name=` instead, because one line is one mount.
 
 ## Profiling
 

@@ -13,6 +13,32 @@ from source with `make build`.
 
 ## Unreleased
 
+### Mount one of the mounts in your config file — 2026-10-05
+
+`drivel mount` serves every `[[mount]]` in your config file. Two new flags narrow
+that to a subset, so bringing up a single mount no longer means restating it on
+the command line:
+
+```sh
+drivel mount -name photos         # just that one mount
+drivel mount -account personal    # every mount belonging to that account
+```
+
+`-name` matches the name a mount reports in its log lines, and names are unique,
+so it picks exactly one. `-account` matches the account a mount belongs to, so it
+picks however many use it. With one mount per account the two do the same thing;
+they differ once an account has several.
+
+They **choose** among the mounts your config file already describes rather than
+describing one, which is why they are the only mount flags you may use together
+with `-config`, and why they need a config file to choose from: `-name` alongside
+`-mount` or `-data` is an error rather than a flag that gets ignored. A name or
+account matching nothing is a startup error listing what the file does define,
+because mounting nothing and reporting success is worse than refusing.
+
+One thing to keep straight: `-account` on `mount` *selects* an account, while
+`-account` on `login` *creates* one.
+
 ### One binary: the backends ship inside Drivel — 2026-10-02
 
 **Installing Drivel is one command again.** `go install

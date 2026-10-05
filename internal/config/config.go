@@ -219,19 +219,26 @@ func (m mountEntry) describe() string {
 	return m.path
 }
 
+// specName is the name Specs gives this entry. Selector.Name matches on it, so
+// the fallbacks live here rather than inline in spec: a -name matching something
+// other than the name the logs print would be worse than having no -name at all.
+func (m mountEntry) specName() string {
+	if m.name != "" {
+		return m.name
+	}
+	// The account name is the better default than the mountpoint's basename: it is
+	// what the state directory is keyed on, and it is stable if the mountpoint
+	// moves.
+	if m.accountName != "" {
+		return m.accountName
+	}
+	return filepath.Base(m.path)
+}
+
 func (c *Config) spec(m mountEntry) (app.MountSpec, error) {
 	var spec app.MountSpec
 
-	name := m.name
-	if name == "" {
-		// The account name is the better default than the mountpoint's basename:
-		// it is what the state directory is keyed on, and it is stable if the
-		// mountpoint moves.
-		name = m.accountName
-	}
-	if name == "" {
-		name = filepath.Base(m.path)
-	}
+	name := m.specName()
 	if err := ValidName(name); err != nil {
 		return spec, err
 	}

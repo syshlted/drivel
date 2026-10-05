@@ -71,6 +71,15 @@ var mountShapingFlags = []string{
 	"upload-workers", "hydrate-workers",
 }
 
+// mountSelectorFlags narrow a config file to some of the mounts it describes.
+// They are the opposite category to mountShapingFlags and the distinction is
+// what makes them safe: a selector chooses among mounts the file already
+// describes rather than describing one itself, so there is no precedence to
+// arbitrate and it composes with -config the way -debug and -pprof do. The
+// corollary is that a selector *requires* a config file — without one there is
+// nothing to choose from, and it is refused rather than quietly ignored.
+var mountSelectorFlags = []string{"name", "account"}
+
 // mountCLI is everything `drivel mount` accepts: the mount description in
 // specFlags, plus the two process-level flags that describe how this *process*
 // reports rather than what it mounts.
@@ -93,6 +102,8 @@ func mountFlagSet(c *mountCLI) *flag.FlagSet {
 	fset := flag.NewFlagSet("drivel mount", flag.ExitOnError)
 	fset.StringVar(&c.configPath, "config", "", "TOML config file describing one or more mounts; defaults to $XDG_CONFIG_HOME/drivel/config.toml when no mount flags are given")
 	fset.StringVar(&c.mountpoint, "mount", "", "path to mount the filesystem (required unless -config is used)")
+	fset.StringVar(&c.selectName, "name", "", "serve only the mount with this name from the config file, instead of every mount in it")
+	fset.StringVar(&c.selectAccount, "account", "", "serve only the mounts belonging to this account, instead of every mount in the config file")
 	fset.StringVar(&c.dataDir, "data", "", "backing directory (source of truth). If omitted, in-place mode uses the mount dir as its own backing (Linux only)")
 	fset.StringVar(&c.credentials, "credentials", "", "OAuth client secret JSON; enables Drive sync (else log-only)")
 	fset.StringVar(&c.token, "token", "token.json", "path to the cached OAuth token (from 'drivel login')")
@@ -166,7 +177,14 @@ func runMount(args []string) error {
 
 // specFlags is the parsed flag set, gathered so mountSpecs stays testable.
 type specFlags struct {
-	configPath     string
+	configPath string
+
+	// The selectors. Not a mount description, but consumed where one is decided:
+	// they pick which of the config file's mounts become specs. See
+	// mountSelectorFlags.
+	selectName    string
+	selectAccount string
+
 	mountpoint     string
 	dataDir        string
 	credentials    string
@@ -190,19 +208,77 @@ type specFlags struct {
 	hydrateWorkers int
 }
 
+// checkSelectorFlags refuses the two ways a selector can be self-defeating. An
+// empty value is refused for the reason an explicit 0 is refused for the pool
+// sizes: `-name ""` would otherwise read as "no selector" and serve every mount
+// in the file, which is the opposite of what typing it asks for.
+func checkSelectorFlags(given map[string]bool, f specFlags) error {
+	for _, s := range []struct{ flag, value string }{
+		{"name", f.selectName},
+		{"account", f.selectAccount},
+	} {
+		if given[s.flag] && s.value == "" {
+			return fmt.Errorf("-%s needs a value (omit the flag to serve every mount in the config file)", s.flag)
+		}
+	}
+	if given["name"] && given["account"] {
+		// Also refused in config.SpecsFor; worded here for the flags that were
+		// typed. An intersection is the only other reading and it answers nothing:
+		// a name already identifies one mount, so naming its account too can only
+		// agree or contradict.
+		return errors.New("-name and -account cannot be combined; -name already identifies a single mount")
+	}
+	return nil
+}
+
+// selectorGiven names the selector flag that was typed, for an error message.
+// checkSelectorFlags has already refused more than one.
+func selectorGiven(given map[string]bool) string {
+	for _, f := range mountSelectorFlags {
+		if given[f] {
+			return f
+		}
+	}
+	return ""
+}
+
 // mountSpecs decides between the config file and the flags, and returns what to
 // mount either way. Both paths end in the same []app.MountSpec, so everything
 // downstream — validation, opening, the shutdown ordering — has one
 // implementation rather than a single-mount one that drifts from the N-mount one.
 func mountSpecs(fset *flag.FlagSet, given map[string]bool, f specFlags) ([]app.MountSpec, error) {
+	if err := checkSelectorFlags(given, f); err != nil {
+		return nil, err
+	}
+	sel := config.Selector{Name: f.selectName, Account: f.selectAccount}
+
 	path := f.configPath
+	// Remembered even when it does not exist, so a selector with no config file
+	// can say which path it looked at rather than only that it found nothing.
+	var defaultPath string
 	if !given["config"] && !given["mount"] {
 		// No -mount and no -config: fall back to the config file if the user has
 		// one. Absent, we fall through to the -mount required error below.
 		if p, err := config.DefaultPath(); err == nil {
+			defaultPath = p
 			if _, statErr := os.Stat(p); statErr == nil {
 				path = p
 			}
+		}
+	}
+
+	// A selector with nothing to select from. Refused rather than ignored: the
+	// flags describing a mount would otherwise serve that mount and say nothing
+	// about the -name they disregarded, which is a successful mount of something
+	// the user did not ask for.
+	if s := selectorGiven(given); s != "" && path == "" {
+		switch {
+		case given["mount"]:
+			return nil, fmt.Errorf("-%s cannot be combined with -mount; a selector chooses among the mounts a config file describes, so pass -config FILE instead", s)
+		case defaultPath == "":
+			return nil, fmt.Errorf("-%s needs a config file; pass -config FILE", s)
+		default:
+			return nil, fmt.Errorf("-%s needs a config file; there is none at %s (pass -config FILE)", s, defaultPath)
 		}
 	}
 
@@ -216,7 +292,7 @@ func mountSpecs(fset *flag.FlagSet, given map[string]bool, f specFlags) ([]app.M
 		if err != nil {
 			return nil, err
 		}
-		specs, err := cfg.Specs()
+		specs, err := cfg.SpecsFor(sel)
 		if err != nil {
 			return nil, fmt.Errorf("%s: %w", path, err)
 		}
