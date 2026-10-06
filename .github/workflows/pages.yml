@@ -55,11 +55,11 @@ jobs:
       HUGO_VERSION: 0.161.1
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       # Hextra is a Hugo module, which Hugo fetches with the Go tooling.
       - name: Setup Go
-        uses: actions/setup-go@v6
+        uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
           cache: false
