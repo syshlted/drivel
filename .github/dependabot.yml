@@ -1,0 +1,31 @@
+# Dependabot version updates, for the GitHub Actions this repo uses and nothing
+# else.
+#
+# The omission of `gomod` is deliberate rather than pending. `make vuln` runs
+# govulncheck, which is symbol-aware: it reports whether this code actually
+# reaches a vulnerable function, where a manifest scan can only compare version
+# numbers. The one advisory in the tree is GO-2026-5932 — golang.org/x/crypto's
+# openpgp package is unmaintained — which has no fixed version to move to and is
+# not called from here, so a bot would have no PR to open and would leave a
+# permanent alert instead. Go dependencies are upgraded deliberately, with `make
+# check` as the gate and docs/dev/dependencies.md as the record of why each one
+# is in the tree.
+#
+# Actions are the opposite case: ci.yml and pages.yml pin them by major tag
+# (actions/checkout@v7), which floats within a major version and stops dead at
+# the next one. This turns that into a pull request that CI runs.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      # Monday, matching ci.yml's scheduled govulncheck run: what arrives from
+      # outside the repo then lands on one morning rather than two.
+      day: monday
+    groups:
+      # One pull request for all of them. Separately they are three PRs that each
+      # want a full CI run to say the same thing.
+      actions:
+        patterns: ["*"]
+    open-pull-requests-limit: 3
