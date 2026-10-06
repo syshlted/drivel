@@ -201,15 +201,7 @@ func plural(n int, one, many string) string {
 // expanding paths. It does not validate them against each other; that is
 // app.Validate, which runs on the flag path too.
 func (c *Config) Specs() ([]app.MountSpec, error) {
-	out := make([]app.MountSpec, 0, len(c.mounts))
-	for i, m := range c.mounts {
-		spec, err := c.spec(m)
-		if err != nil {
-			return nil, fmt.Errorf("mount #%d (%s): %w", i+1, m.describe(), err)
-		}
-		out = append(out, spec)
-	}
-	return out, nil
+	return c.SpecsFor(Selector{})
 }
 
 func (m mountEntry) describe() string {

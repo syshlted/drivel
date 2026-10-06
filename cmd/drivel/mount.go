@@ -80,11 +80,31 @@ var mountShapingFlags = []string{
 // nothing to choose from, and it is refused rather than quietly ignored.
 var mountSelectorFlags = []string{"name", "account"}
 
+// mountListingFlags print what a config file describes instead of mounting it.
+// A third category, and the distinction from the other two is what decides their
+// rules: a listing flag neither describes a mount (so, like a selector, it needs
+// a config file to read and composes with -config) nor brings one up (so, unlike
+// a selector, it ends the command — nothing is mounted, nothing is served, and
+// the flags describing how this process would have reported have nothing to act
+// on).
+var mountListingFlags = []string{"list", "full"}
+
+// mountProcessFlags describe how this *process* reports and can be inspected,
+// rather than what it mounts. They are the ones that compose with -config, and
+// the ones -list has nothing to do with.
+var mountProcessFlags = []string{"debug", "pprof", "pprof-allow-remote"}
+
 // mountCLI is everything `drivel mount` accepts: the mount description in
-// specFlags, plus the two process-level flags that describe how this *process*
-// reports rather than what it mounts.
+// specFlags, plus the flags that describe how this *process* reports rather than
+// what it mounts, plus the two that print the config file instead of serving it.
 type mountCLI struct {
 	specFlags
+
+	// Printing the config file rather than mounting it. Not on specFlags because
+	// they describe no mount and reach no MountSpec: they decide whether this
+	// command mounts at all. See mountListingFlags.
+	list bool
+	full bool
 
 	pprofAddr   string
 	pprofRemote bool
@@ -104,6 +124,8 @@ func mountFlagSet(c *mountCLI) *flag.FlagSet {
 	fset.StringVar(&c.mountpoint, "mount", "", "path to mount the filesystem (required unless -config is used)")
 	fset.StringVar(&c.selectName, "name", "", "serve only the mount with this name from the config file, instead of every mount in it")
 	fset.StringVar(&c.selectAccount, "account", "", "serve only the mounts belonging to this account, instead of every mount in the config file")
+	fset.BoolVar(&c.list, "list", false, "print the mounts the config file describes — their name, account, provider and mountpoint, resolved as mounting them would resolve them — and exit without mounting any of them")
+	fset.BoolVar(&c.full, "full", false, "with -list, widen each row with the backing directory, the state DB, whether content is resident or faulted in, the sweep interval and the delete cap")
 	fset.StringVar(&c.dataDir, "data", "", "backing directory (source of truth). If omitted, in-place mode uses the mount dir as its own backing (Linux only)")
 	fset.StringVar(&c.credentials, "credentials", "", "OAuth client secret JSON; enables Drive sync (else log-only)")
 	fset.StringVar(&c.token, "token", "token.json", "path to the cached OAuth token (from 'drivel login')")
@@ -134,6 +156,15 @@ func runMount(args []string) error {
 
 	given := map[string]bool{}
 	fset.Visit(func(f *flag.Flag) { given[f.Name] = true })
+
+	if err := checkListingFlags(given); err != nil {
+		return err
+	}
+	// Before the registry, the signal context and any mounting: -list reads a
+	// file and prints it, and everything below this line is setup for serving.
+	if c.list {
+		return runMountList(given, c.specFlags, c.full)
+	}
 
 	if err := validatePprofFlags(c.pprofAddr, given["pprof-allow-remote"]); err != nil {
 		return err
@@ -242,6 +273,114 @@ func selectorGiven(given map[string]bool) string {
 	return ""
 }
 
+// mountConfigPath decides which config file this invocation reads, if any, and
+// also reports where it looked when it found none — which is what lets a flag
+// that needs one name the path rather than only report its absence.
+//
+// Extracted because -list answers the same question as -config and the
+// selectors, and a second copy of "how drivel finds your config file" is a
+// second answer to it.
+func mountConfigPath(given map[string]bool, f specFlags) (path, defaultPath string) {
+	path = f.configPath
+	if !given["config"] && !given["mount"] {
+		// No -mount and no -config: fall back to the config file if the user has
+		// one. Absent, the caller falls through to its own error.
+		if p, err := config.DefaultPath(); err == nil {
+			defaultPath = p
+			if _, statErr := os.Stat(p); statErr == nil {
+				path = p
+			}
+		}
+	}
+	return path, defaultPath
+}
+
+// errNoConfigFile explains why a flag that reads a config file has none to read,
+// in terms of the flag that was typed. `because` is the half that differs: what
+// that particular flag wanted the file for.
+func errNoConfigFile(flagName, because string, given map[string]bool, defaultPath string) error {
+	switch {
+	case given["mount"]:
+		return fmt.Errorf("-%s cannot be combined with -mount; %s, so pass -config FILE instead", flagName, because)
+	case defaultPath == "":
+		return fmt.Errorf("-%s needs a config file; pass -config FILE", flagName)
+	default:
+		return fmt.Errorf("-%s needs a config file; there is none at %s (pass -config FILE)", flagName, defaultPath)
+	}
+}
+
+// checkListingFlags refuses the two ways -list and -full can be inert.
+//
+// Both are M8 rule 6 — a setting that looks applied and is not. -full on its own
+// has no table to widen, and a flag describing how this process reports has
+// nothing to report on when the command prints a file and exits. Neither is
+// harmful; both would be silently discarded, which is the failure an unknown
+// config key is an error for.
+func checkListingFlags(given map[string]bool) error {
+	if !given["list"] {
+		if given["full"] {
+			return errors.New("-full needs -list; on its own there is no listing for it to widen")
+		}
+		return nil
+	}
+	for _, name := range mountProcessFlags {
+		if given[name] {
+			return fmt.Errorf("-%s cannot be combined with -list; -list prints the config file and exits without mounting anything, so -%s would have nothing to act on", name, name)
+		}
+	}
+	return nil
+}
+
+// runMountList prints the mounts a config file describes and returns, having
+// mounted nothing.
+func runMountList(given map[string]bool, f specFlags, full bool) error {
+	ls, path, err := mountListing(given, f)
+	if err != nil {
+		return err
+	}
+	// The table goes to stdout so it pipes; which file it came from goes to
+	// stderr, because without -config that file was discovered rather than named
+	// and the reader has no other way to tell which one they are looking at.
+	noun := "mounts"
+	if len(ls) == 1 {
+		noun = "mount"
+	}
+	fmt.Fprintf(os.Stderr, "%d %s in %s\n", len(ls), noun, path)
+	return printMountList(os.Stdout, ls, full)
+}
+
+// mountListing resolves what -list prints, and reports the file it read.
+//
+// It goes through config.List, which is the same resolution SpecsFor performs,
+// so the listing describes the mount that would actually come up rather than a
+// separate reading of the file. The shaping flags are refused for the reason
+// they are refused alongside -config: this command describes no mount, and one
+// described on the command line would be a mount the listing cannot show and
+// nothing would have said so.
+func mountListing(given map[string]bool, f specFlags) ([]config.Listing, string, error) {
+	if err := checkSelectorFlags(given, f); err != nil {
+		return nil, "", err
+	}
+	path, defaultPath := mountConfigPath(given, f)
+	if path == "" {
+		return nil, "", errNoConfigFile("list", "-list prints the mounts a config file describes", given, defaultPath)
+	}
+	for _, name := range mountShapingFlags {
+		if given[name] {
+			return nil, "", fmt.Errorf("-%s cannot be combined with -list; -list prints what %s describes and describes nothing itself", name, path)
+		}
+	}
+	cfg, err := config.Load(path)
+	if err != nil {
+		return nil, "", err
+	}
+	ls, err := cfg.List(config.Selector{Name: f.selectName, Account: f.selectAccount})
+	if err != nil {
+		return nil, "", fmt.Errorf("%s: %w", path, err)
+	}
+	return ls, path, nil
+}
+
 // mountSpecs decides between the config file and the flags, and returns what to
 // mount either way. Both paths end in the same []app.MountSpec, so everything
 // downstream — validation, opening, the shutdown ordering — has one
@@ -252,34 +391,14 @@ func mountSpecs(fset *flag.FlagSet, given map[string]bool, f specFlags) ([]app.M
 	}
 	sel := config.Selector{Name: f.selectName, Account: f.selectAccount}
 
-	path := f.configPath
-	// Remembered even when it does not exist, so a selector with no config file
-	// can say which path it looked at rather than only that it found nothing.
-	var defaultPath string
-	if !given["config"] && !given["mount"] {
-		// No -mount and no -config: fall back to the config file if the user has
-		// one. Absent, we fall through to the -mount required error below.
-		if p, err := config.DefaultPath(); err == nil {
-			defaultPath = p
-			if _, statErr := os.Stat(p); statErr == nil {
-				path = p
-			}
-		}
-	}
+	path, defaultPath := mountConfigPath(given, f)
 
 	// A selector with nothing to select from. Refused rather than ignored: the
 	// flags describing a mount would otherwise serve that mount and say nothing
 	// about the -name they disregarded, which is a successful mount of something
 	// the user did not ask for.
 	if s := selectorGiven(given); s != "" && path == "" {
-		switch {
-		case given["mount"]:
-			return nil, fmt.Errorf("-%s cannot be combined with -mount; a selector chooses among the mounts a config file describes, so pass -config FILE instead", s)
-		case defaultPath == "":
-			return nil, fmt.Errorf("-%s needs a config file; pass -config FILE", s)
-		default:
-			return nil, fmt.Errorf("-%s needs a config file; there is none at %s (pass -config FILE)", s, defaultPath)
-		}
+		return nil, errNoConfigFile(s, "a selector chooses among the mounts a config file describes", given, defaultPath)
 	}
 
 	if path != "" {

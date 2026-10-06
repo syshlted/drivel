@@ -352,6 +352,31 @@ a soak that produced nothing silently is worse than one that refused to start. I
 unset — a write deadline never resets on progress, so any value becomes the
 longest profile the build can ever take.
 
+**A `mount` flag belongs to exactly one of four categories, and the category *is*
+the rule about combining it with `-config`.** `mountShapingFlags` describe what to
+mount and are refused beside a config file (a precedence rule nobody would
+remember). `mountSelectorFlags` (`-name`, `-account`) *choose* among the mounts a
+file already describes, so they compose with `-config` and **require** it.
+`mountListingFlags` (`-list`, `-full`) read the file and mount nothing.
+`mountProcessFlags` (`-debug`, `-pprof`, `-pprof-allow-remote`) describe how this
+*process* reports. `TestFlagCategoriesAreDisjoint` walks `mountFlagSet` and fails
+on a flag in two categories or in none, because a flag with no category silently
+inherits whatever the fall-through does.
+
+**`-list` prints the config file's mounts and exits; `-full` widens the row.**
+Three things are load-bearing. It goes through `config.List`, which is the **one**
+resolution — `SpecsFor` and `Specs` are both that function with the config-level
+half dropped — because a listing that resolved separately would become a second,
+drifting account of what a config file means, and it is read precisely to find out
+what the mount will do. It is **not** a validator: `app.Validate`'s cross-mount
+guards are deliberately not run, since a listing is what someone reaches for when
+a config file is misbehaving and one that refused to print until the file was
+correct would be useless at the only moment it is wanted. And the cells that read
+`-` are M8 rule 6 as a *display* — a log-only mount still carries `SweepInterval`
+and `MaxDeletes`, which never apply, and printing `24h0m0s` for a mount that never
+sweeps shows a setting as applied when it is not. `-full` without `-list`, and a
+process flag beside `-list`, are both refused for the same reason.
+
 M8 adds `-config FILE` to `mount` and `-account NAME` / `-config FILE` to `login`.
 `-config` cannot be combined with any flag describing *what* to mount — that would
 need a precedence rule nobody would remember — but `-debug` and `-pprof` compose.

@@ -39,6 +39,26 @@ lazy    = true
 root = "root"                    # or a folder ID, to mount one subtree
 ```
 
+**A `[[mount]]` has two halves, and the sub-table is the remote one.** The keys
+written directly under `[[mount]]` — `path`, `data`, `lazy`, `state` — describe
+the filesystem on *this* machine. The keys in `[mount.provider]` are the
+**backend's** own settings, the same vocabulary an account table uses, and none
+of them says anything about the local side: `root` there is a Drive folder or an
+SFTP directory, never a local path.
+
+They live in two places because they answer two questions. Credentials belong to
+the account, so they are written once; *what to mount from it* belongs to the
+mount, so a second mount can point the same account somewhere else. Drivel lays
+the mount's table over the account's and the mount wins key by key — a
+`[mount.provider]` naming a folder ID replaces the account's `root` and leaves
+its `credentials` untouched. Drivel itself never learns what any key in either
+table means; it hands them to the backend, which reports anything it does not
+recognise.
+
+Note the single brackets. `[[mount.provider]]` is a TOML *array of tables* and is
+not this shape. It is refused rather than ignored, but the message names the keys
+inside it rather than the brackets, so it is worth getting right the first time.
+
 `drivel login -account NAME` writes both blocks for you: the `[account.NAME]`
 table, and a `[[mount]]` at `~/drive-NAME` to go with it, backed by
 `$XDG_DATA_HOME/drivel/mounts/NAME`. Edit them afterwards — the mount it writes
@@ -329,6 +349,65 @@ the file does define. Mounting nothing and exiting successfully is the failure a
 > and `account=` in [an fstab line](fstab.md) names where credentials come from for
 > the mount that line describes. An fstab line selects from a config file with
 > `name=` instead, because one line is one mount.
+
+### Listing the mounts
+
+`-list` prints the mounts your config file describes and exits, having mounted
+nothing:
+
+```console
+$ drivel mount -list
+4 mounts in /home/you/.config/drivel/config.toml
+NAME     ACCOUNT   PROVIDER  MOUNTPOINT
+docs     personal  gdrive    /home/you/drive/docs
+photos   personal  gdrive    /home/you/drive/photos
+backups  nas       sftp      /home/you/nas
+scratch  -         -         /home/you/scratch
+```
+
+The three columns before the mountpoint are the ones you cannot read off the file
+at a glance. `NAME` is what `-name` matches, including the one Drivel *derives*
+when a mount sets no `name` key. `ACCOUNT` is what `-account` matches. `PROVIDER`
+is the backend that mount will actually talk to — which the file states once, in
+an `[account.*]` table the mount then refers to by key, so a file holding both
+Drive and SFTP mounts never shows you the two side by side. A `-` in either means
+the mount has no account and so syncs with nothing: it mounts and logs, which is
+worth seeing when you are wondering why a directory never uploads.
+
+`-full` adds five more columns:
+
+```console
+$ drivel mount -list -full
+NAME   ACCOUNT   PROVIDER  MOUNTPOINT            DATA                  STATE                   MODE  SWEEP    MAX-DELETES
+docs   personal  gdrive    /home/you/drive/docs  …/drivel/mounts/docs  …/drivel/docs/state.db  lazy  24h0m0s  100
+```
+
+`DATA` is the backing directory, or `(in place)` for an
+[in-place mount](#in-place-mode). `STATE` is the sync-state DB, which is derived
+from the mount's name and so appears nowhere in your config file unless you set
+`state` yourself. `MODE` is `lazy`, `eager` or `log-only`. `SWEEP` is the
+re-enumeration interval — on [SFTP](sftp.md) that is the **poll interval**, and
+the 24-hour default is wrong for every SFTP mount — and `MAX-DELETES` is the cap
+on deletions one reconcile may infer. The last two read `-` for a log-only mount,
+which never enumerates and so never applies either.
+
+Every row is **resolved** rather than echoed back: relative paths are expanded
+against the config file's own directory, defaults nobody typed are filled in, an
+account's provider settings are merged with the mount's, and the name is the
+derived one where there is no `name` key. That is the point — it is the same
+resolution mounting performs, so the listing describes the mount you would get.
+
+It is not a config check, though. `-list` fails on a mount it cannot resolve at
+all, but it does **not** apply the guards that refuse two mounts sharing a
+mountpoint or a state DB. A listing is what you reach for when a config file is
+misbehaving, and one that refused to print until the file was already correct
+would be no use at the moment you want it.
+
+`-list` composes with the selectors, so `drivel mount -list -account nas` shows
+exactly what `drivel mount -account nas` would serve. It needs a config file for
+the same reason they do, and it refuses the flags that describe a mount — along
+with `-debug` and `-pprof`, which have nothing to act on in a command that exits
+without mounting anything.
 
 ## Profiling
 

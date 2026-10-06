@@ -68,6 +68,8 @@ var completionHints = map[string]hint{
 	"mount/mount":              {"path to mount the filesystem (required unless -config)", completion.Dir, nil, "mountpoint"},
 	"mount/name":               {"serve only the mount with this name from the config file", completion.Opaque, nil, "mount name"},
 	"mount/account":            {"serve only the mounts belonging to this account", completion.Opaque, nil, "account name"},
+	"mount/list":               {"print the mounts the config file describes, and exit", completion.None, nil, ""},
+	"mount/full":               {"with -list, also show backing dir, state DB, mode, sweep and delete cap", completion.None, nil, ""},
 	"mount/data":               {"backing directory (source of truth); omit for in-place mode", completion.Dir, nil, "backing dir"},
 	"mount/credentials":        {"OAuth client secret JSON; enables Drive sync", completion.File, nil, "credentials file"},
 	"mount/token":              {"cached OAuth token from drivel login", completion.File, nil, "token file"},

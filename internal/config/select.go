@@ -34,44 +34,18 @@ func (s Selector) empty() bool { return s.Name == "" && s.Account == "" }
 
 // SpecsFor is Specs narrowed to sel.
 //
-// Entries are filtered *before* they are resolved, so a malformed mount nobody
-// asked for cannot keep the one they did ask for from coming up. The name a
-// selector matches on therefore has to be the name Specs would give the same
-// entry, which is why both go through mountEntry.specName rather than computing
-// the fallbacks twice.
-//
-// A selector that matches nothing is an error naming what the file does define.
-// Serving no mounts because a name was mistyped would exit successfully having
-// done nothing at all, which is the failure an unknown config key is an error
-// for.
+// It is List with the config-level half dropped, because a selection that
+// resolved separately from the listing of the same selection would be two
+// answers to one question — and the listing is read precisely to find out what
+// the mount will do.
 func (c *Config) SpecsFor(sel Selector) ([]app.MountSpec, error) {
-	if sel.empty() {
-		return c.Specs()
+	ls, err := c.List(sel)
+	if err != nil {
+		return nil, err
 	}
-	// Refused here as well as at the flag layer, which words it for the flags the
-	// user typed. An intersection would be the only other reading and it answers
-	// a question nobody asks: a name already identifies one mount, so adding the
-	// account it belongs to can only confirm or contradict it.
-	if sel.Name != "" && sel.Account != "" {
-		return nil, fmt.Errorf("a selector names a mount or an account, not both")
-	}
-
-	out := make([]app.MountSpec, 0, len(c.mounts))
-	for i, m := range c.mounts {
-		switch {
-		case sel.Name != "" && m.specName() != sel.Name:
-			continue
-		case sel.Account != "" && m.accountName != sel.Account:
-			continue
-		}
-		spec, err := c.spec(m)
-		if err != nil {
-			return nil, fmt.Errorf("mount #%d (%s): %w", i+1, m.describe(), err)
-		}
-		out = append(out, spec)
-	}
-	if len(out) == 0 {
-		return nil, c.noMatch(sel)
+	out := make([]app.MountSpec, len(ls))
+	for i, l := range ls {
+		out[i] = l.Spec
 	}
 	return out, nil
 }

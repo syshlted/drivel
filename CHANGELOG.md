@@ -13,6 +13,45 @@ from source with `make build`.
 
 ## Unreleased
 
+### See what your config file describes, without mounting it — 2026-10-06
+
+`drivel mount -list` prints the mounts your config file describes and exits,
+having mounted none of them:
+
+```console
+$ drivel mount -list
+4 mounts in /home/you/.config/drivel/config.toml
+NAME     ACCOUNT   PROVIDER  MOUNTPOINT
+docs     personal  gdrive    /home/you/drive/docs
+photos   personal  gdrive    /home/you/drive/photos
+backups  nas       sftp      /home/you/nas
+scratch  -         -         /home/you/scratch
+```
+
+`NAME` is what `-name` selects on — including the name Drivel derives when you
+set no `name` key — and `ACCOUNT` is what `-account` selects on, so this is how
+you find out what to type. `PROVIDER` is the backend each mount actually talks
+to, which your file says once in an `[account.*]` table and afterwards refers to
+by key: with both a Drive mount and an SFTP mount in one file, nothing until now
+put the two side by side. A `-` means the mount has no account and syncs with
+nothing, which is worth seeing when you are wondering why a directory never
+uploads.
+
+`-list -full` adds the backing directory, the sync-state DB (derived from the
+mount's name, so it appears nowhere in your file unless you set `state`
+yourself), whether content is resident or faulted in, the sweep interval and the
+delete cap.
+
+Every row is **resolved** the way mounting would resolve it — relative paths
+expanded, defaults filled in, an account's provider settings merged with the
+mount's own — so what you see is the mount you would get. It is not a
+configuration checker, though: it prints a file that two mounts share a
+mountpoint in rather than refusing to, because a listing is what you want
+precisely when something is wrong.
+
+It composes with `-name` and `-account`, so `drivel mount -list -account nas`
+shows exactly what `drivel mount -account nas` would serve.
+
 ### Mount one of the mounts in your config file — 2026-10-05
 
 `drivel mount` serves every `[[mount]]` in your config file. Two new flags narrow

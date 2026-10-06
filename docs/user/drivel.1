@@ -39,6 +39,14 @@ drivel \- cloud-backed FUSE interceptor filesystem
 .IR name " | " -account
 .IR name ]
 .br
+.B drivel mount -list
+.RB [ -full ]
+.RB [ -config
+.IR file ]
+.RB [ -name
+.IR name " | " -account
+.IR name ]
+.br
 .B drivel mount
 .B -mount
 .I dir
@@ -302,6 +310,77 @@ in an fstab line names where the credentials for that one line come from. An
 fstab line selects from a config file with
 .B name=
 instead, since one line is one mount.
+.TP
+.B -list
+Print the mounts the config file describes and exit, having mounted none of them.
+One row per mount, with its name, its account, the provider it will talk to and
+its mountpoint. The provider column is the one a config file cannot show you
+directly: the kind is written once in an
+.B [account.*]
+table that each mount then refers to by key, so a file holding both a Drive mount
+and an SFTP mount never puts the two side by side.
+.IP
+Every row is
+.I resolved
+rather than echoed back \(em relative paths expanded, defaults filled in, an
+account's provider settings merged with the mount's, and the name the derived one
+where there is no
+.B name
+key \(em because it is the same resolution mounting performs, so the listing
+describes the mount you would actually get. Note what that does not make it: it
+fails on a mount it cannot resolve at all, but it does
+.B not
+apply the guards that refuse two mounts sharing a mountpoint or a state DB. A
+listing is what you reach for when a config file is misbehaving, and one that
+refused to print until the file was already correct would be no use then.
+.IP
+It reads a config file and mounts nothing, which decides what it combines with.
+Like
+.B -name
+and
+.BR -account ,
+with which it composes, it needs a config file and refuses every flag that
+describes a mount. Unlike them it also refuses
+.BR -debug ,
+.B -pprof
+and
+.BR -pprof-allow-remote ,
+which would have nothing to act on in a command that exits without serving
+anything.
+.IP
+The table goes to standard output, so it pipes; the file it was read from goes to
+standard error, since without
+.B -config
+that file was discovered rather than named.
+.TP
+.B -full
+With
+.BR -list ,
+widen each row with five more columns:
+.BR DATA ,
+the backing directory, or
+.B "(in place)"
+for an in-place mount;
+.BR STATE ,
+the sync-state DB, which is derived from the mount's name and so appears nowhere
+in the config file unless
+.B state
+was set by hand;
+.BR MODE ,
+one of
+.BR lazy ,
+.B eager
+or
+.BR log-only ;
+.BR SWEEP ,
+the re-enumeration interval, which on SFTP is the poll interval; and
+.BR MAX-DELETES ,
+the cap on deletions one reconcile may infer. The last two read
+.B -
+for a log-only mount, which never enumerates and so applies neither. On its own,
+without
+.BR -list ,
+it is an error rather than a flag that does nothing.
 .TP
 .BI -mount " dir"
 Path to mount the filesystem. Required unless
