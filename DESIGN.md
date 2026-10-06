@@ -4056,13 +4056,14 @@ this whole group walks through, so it is a precondition rather than a note.
     two things — if go-fuse's trace ever moves behind a drivel level, the flag keeps
     naming the FUSE trace and the level is a separate name.
 
-28. **M26 — Credentials in a secret service.** Unscheduled, not started. An
-    opt-in, per-account alternative to keeping an OAuth refresh token in a `0600`
-    file: `drivel login` stores it in the desktop secret service, and a mount
-    reads it back from there instead of from `token.json`. **It is a
-    secret-at-rest change and not an isolation one**, which is worth saying first
-    because the obvious reading is the wrong one and because this file is where an
-    overclaim would start.
+28. **M26 — Credentials in a secret service.** Unscheduled, not started, and
+    **deferred on 2026-10-06** pending the master-passphrase question below,
+    which may replace the whole shape. An opt-in, per-account alternative to
+    keeping an OAuth refresh token in a `0600` file: `drivel login` stores it in
+    the desktop secret service, and a mount reads it back from there instead of
+    from `token.json`. **It is a secret-at-rest change and not an isolation
+    one**, which is worth saying first because the obvious reading is the wrong
+    one and because this file is where an overclaim would start.
 
     **What it buys is narrow and must be documented in those terms.** A secret
     that is not a plaintext file in `~/.config` survives the ways a config
@@ -4076,6 +4077,26 @@ this whole group walks through, so it is a precondition rather than a note.
     behalf everywhere else. A feature whose documentation overstates it is worse
     than no feature, because a user who believes the stronger claim stops taking
     the precautions the weaker one still requires.
+
+    **There is no per-application access control, and the protocol has no room
+    for one.** Recorded because it is the first thing anyone asks, and because
+    the answer is structural rather than an implementation gap: the interface is
+    Service → Collection → Item, and `SearchItems`, `Unlock` and `GetSecret`
+    carry no caller identity in any signature, so there is no field a policy
+    could key on. The absence was arrived at rather than overlooked.
+    gnome-keyring once had per-application access control, with the "an
+    application wants access to the password for…" prompts, and dropped it: the
+    caller was identified by its executable path out of `/proc`, which is
+    worthless between processes of one uid — ptrace the authorised process,
+    `LD_PRELOAD` into it, or ignore the bus and read the unlocked keyring's own
+    files. KWallet still prompts per application, but the application *name* in
+    that prompt is supplied by the caller, so it is a label and not an
+    authenticated identity. Where enforced per-app secrets do exist on Linux the
+    keyring is not what enforces them: Flatpak's
+    `org.freedesktop.portal.Secret` can give each app its own secret because the
+    **sandbox** vouches for the app id. Outside a sandbox there is no identity to
+    bind a policy to — M9 rule 8's distinction between a built environment and a
+    sandbox, arriving in a second place.
 
     **GNOME and KDE are one backend, which is most of why this is tractable.**
     KWallet 5 and later implement the freedesktop **Secret Service** D-Bus
@@ -4122,6 +4143,25 @@ this whole group walks through, so it is a precondition rather than a note.
     at all while appearing to have worked. M8 rule 6's shape, with a worse
     consequence than a mistyped key.
 
+    **systemd credentials are the complement, and the one mechanism here with
+    granularity that is actually enforced.** `systemd-creds encrypt` seals a blob
+    to the host key and optionally to the TPM with PCR binding;
+    `LoadCredentialEncrypted=` on a unit has systemd decrypt it into
+    `$CREDENTIALS_DIRECTORY` as a `0400` file on a private tmpfs, scoped to that
+    unit and reachable from no other. The enforcement is the service manager's,
+    which is why it can be granular where a keyring cannot, and a TPM seal means
+    the ciphertext does not yield the token off a disk read elsewhere. It costs
+    little to accept, because `gauth.LoadToken` already takes a path: the read
+    side is a path the unit supplies rather than a second secret source. Two
+    things to settle rather than assume. It cannot be said in an fstab `-o` line
+    — credentials are a unit setting, so this is a drop-in or a hand-written
+    `.mount` unit, which makes it a documentation shape more than a code one. And
+    the interaction with M16's `run-as=` privilege drop needs checking, because
+    the credential directory's ownership and the moment of the drop have to
+    agree. The split it implies is the natural one: a session mount reads the
+    keyring, an unattended mount reads its unit's credentials, and neither has to
+    pretend to cover the other's case.
+
     **GPG is declined, and the reason is the daemon.** `gpg --decrypt` needs
     pinentry to prompt, and a mount brought up at boot or from a unit has no tty
     and may have no display; a passphrase-less key is a key file again with more
@@ -4154,10 +4194,46 @@ this whole group walks through, so it is a precondition rather than a note.
     three consumers in view, is a better use of the design than three narrow
     hooks. This milestone is the cheapest of the three to validate it against.
 
-    **Unsettled, in the order that matters.** First, whether this is a per-account
-    concern above the seam at all, because **SFTP already solves the same problem
-    correctly and differently**: M18 rule 6 refuses a password and a passphrase
-    option outright and defers to `ssh-agent`, so the only backend that wants a
+    **A master passphrase is a different shape and may be the better one; it is
+    what this entry was deferred on.** rclone's is the reference: one passphrase
+    encrypts the config, supplied interactively, through an environment variable,
+    or by a `--password-command` that runs something else to produce it. Three
+    things make it attractive here. It is **backend-neutral**, which *answers*
+    the first unsettled item below instead of inheriting it — one mechanism
+    covers Drive's refresh token, an SFTP key passphrase and whatever a later
+    backend keeps, where a keyring is wanted by Drive alone. It needs **no
+    session service**, so it works over ssh, in a container and at boot, which
+    are the three places the keyring path has to refuse. And a password command
+    is **delegation, the same move M18 rule 6 makes** when it answers an
+    encrypted key with an agent — so the passphrase source can be a keyring,
+    `pass`, a TPM or a unit credential, which makes the two designs above *back
+    ends of this one* rather than alternatives to it. That is the strongest
+    argument for it: it subsumes them instead of competing.
+
+    **What it would cost is M8 rule 5, unless only the values are encrypted.**
+    The config file is TOML because comments survive, it is appended to and never
+    re-serialised, and it is meant to be hand-edited and hand-read; encrypting
+    the whole file ends all three, and rclone does not pay that cost because its
+    config is a wizard's output rather than a document. So the shape that fits
+    drivel encrypts **secret values and not the file** — a setting whose value is
+    ciphertext under the master key, while the config around it stays plaintext,
+    commented and editable. That also keeps the blast radius honest: paths,
+    folder IDs and hostnames are metadata rather than secrets, and a design that
+    encrypted them would be making a promise about a screenshare it cannot keep,
+    which is this entry's own first rule. The trade to weigh against the keyring
+    is ergonomic and not security: PAM unlocks a login keyring once for a whole
+    session, where a passphrase is typed per mount unless it is delegated — and
+    delegation lands back on a keyring for the desktop case, so the honest
+    comparison is *one mechanism with pluggable sources* against *two mechanisms
+    with none*.
+
+    **Unsettled, in the order that matters.** First, master passphrase or secret
+    service, because it decides whether anything below this line is a question at
+    all: the two paragraphs above are the argument for the former and it is not
+    settled. Then whether this is a per-account concern above the seam at all,
+    because **SFTP already solves the same problem correctly and differently**:
+    M18 rule 6 refuses a password and a passphrase option outright and defers to
+    `ssh-agent`, so the only backend that wants a
     keyring is Drive — and the reason is specific, that an OAuth refresh token has
     no agent to defer to while an ssh key does. If the answer is "Drive-shaped",
     this may be a `gdrive` setting rather than an account-level one, which changes
@@ -4168,11 +4244,16 @@ this whole group walks through, so it is a precondition rather than a note.
     `-pprof` precedent says the surprising thing stays off, and a default that
     silently depends on a running session service would make `drivel login` fail
     over ssh. Then migration of an existing `token.json`, which wants an import
-    rather than a fresh consent round trip. Deliberately out of scope: encrypting
-    anything with a passphrase drivel itself prompts for and holds, which is the
-    one thing M18 rule 6 says never to build; and `credentials.json`, since an
-    installed application's client secret is not confidential by Google's own
-    account and protecting it would imply otherwise.
+    rather than a fresh consent round trip. Deliberately out of scope: a passphrase
+    drivel *persists* anywhere, which is what M18 rule 6 actually forbids — a
+    credential in cleartext beside the thing it protects. The master-passphrase
+    paragraph above is not that and survives the rule for a stated reason: it is
+    prompted for or delegated and stored nowhere, which is the same distinction
+    "encrypted key ⇒ agent" draws. Also out of scope: prompting at a moment
+    nobody can answer, which is the boot case and is what delegation is for; and
+    `credentials.json`, since an installed application's client secret is not
+    confidential by Google's own account and protecting it would imply
+    otherwise.
 
 
 ### M0 — Test & CI (cross-cutting, always open)
