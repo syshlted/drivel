@@ -25,18 +25,35 @@ placeholder is never uploaded, a deletion is inferred only from a sync baseline,
 partial write is never spliced into a remote file that has diverged. A way to
 violate one of those is a security issue even if no attacker is involved.
 
-**Storage backends are separate programs.** Drivel finds an executable named
-`drivel-provider-<name>` on a search path, launches it, and hands it the
+**Storage backends are separate programs.** Every backend runs in a process of
+its own, reached only over a private socket on your machine, and is handed the
 credentials for that mount. A backend is **not sandboxed, and is not meant to
 be**: it runs as you, with your files, exactly as it would have if it were
 compiled in. Installing one is trusting it, and that is not a vulnerability.
 
-What *is* a vulnerability is anything that lets a file Drivel did not mean to run
-become that backend. Drivel refuses a backend that is group- or world-writable or
-that sits in a world-writable directory, builds the child's environment instead of
-passing on its own, and speaks to it only over a private socket on your machine.
-Those checks run against a path that is resolved again when the process is
-launched, so they narrow that window rather than closing it.
+There are two ways one gets started, and the difference is what has to be trusted
+to get there. The backends Drivel ships — Google Drive and SFTP — are **inside the
+`drivel` binary**, which starts one by re-executing its own running image. A
+backend from anywhere else is a separate executable named
+`drivel-provider-<name>`, found on a search path. For a kind the binary carries,
+the file is never looked for and the bundled one wins.
+
+What *is* a vulnerability is anything that lets code Drivel did not mean to run
+become that backend, and the two paths differ exactly there. A bundled backend is
+not named by a path at all, so there is no directory to plant a file in and no
+window between checking a file and executing it. For a backend Drivel does not
+carry, both of those are real, and what it does about them is narrower: it refuses
+an executable that is group- or world-writable or that sits in a world-writable
+directory, and it builds the child's environment instead of passing on its own —
+but the mode checks run against a path that is resolved again when the process is
+launched, so they narrow that window rather than closing it. Closing it is not
+possible while a backend is named by a path, which is why the ones Drivel ships
+are no longer named that way.
+
+None of this changes what a backend may do **once it is running**. Both paths
+reach the same process boundary, the same built environment, and the same user
+with that user's whole filesystem. The difference is in what can become a
+backend, not in what one can then do.
 
 **The placeholder marker.** In lazy mode, an extended attribute on the backing
 file is the only record that a file's content has not been downloaded yet.
