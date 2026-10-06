@@ -641,6 +641,42 @@ already sends the fstab daemon's stdio to `logfile=` or `/dev/null`, so the moun
 that runs longest writes a file nothing rotates; reopen-on-`SIGHUP` first, because
 it forecloses neither internal rotation nor a syslog/journald destination.
 
+**M26** credentials in a secret service — an opt-in, per-account alternative to an
+OAuth refresh token in a `0600` file: `login` writes it to the desktop secret
+service, a mount reads it back. Unscheduled, not started. **It is secret-at-rest
+and not isolation**, and that has to be said in the docs: it keeps the token out
+of a dotfile backup, a synced home directory and a pasted config, and it does
+*nothing* against another process running as the same user, which can ask the
+service exactly as it could have read the file. Seven things are decided and in
+DESIGN.md §9/M26. **KWallet 5+ and gnome-keyring are one backend** (both implement
+the freedesktop Secret Service D-Bus interface), so there is no desktop detection
+to get wrong. **The token is already read-only at mount**, which is what makes this
+small: `gauth.SaveToken` has one caller (`login`), the provider only `LoadToken`s
+and lets `oauth2` refresh in memory without writing back, so the feature needs read
+at mount and write at login — no write-back across the seam, no protocol change.
+**The host does the lookup and `plugin/env.go` must not grow an entry**: D-Bus is
+deliberately unreachable below the seam (every `XDG_*` dropped, no
+`DBUS_SESSION_BUS_ADDRESS`), and admitting it would be strictly worse than the
+`SSH_AUTH_SOCK` exception it would cite — an agent signs with ssh keys, the secret
+service hands over *everything* the user has stored, to every backend including an
+out-of-tree one. **A boot mount cannot reach it and must refuse, naming the
+account** — no session bus, no unlocked keyring, nobody to answer a prompt (M18 rule
+6 again) — and **falling back to the file is the trap, not the kindness**, because
+then the file still has to exist and the feature bought nothing while appearing to
+work. **GPG is declined**: pinentry must prompt, a daemon has no tty and may have no
+display, and a passphrase-less key is a file again. **`godbus/dbus/v5` over
+`zalando/go-keyring`** — the latter shells out to `secret-tool`, so the secret
+transits a child process and an external binary becomes a requirement; macOS
+Keychain is deferred because it needs cgo or `security(1)` and §2.9's pure-Go build
+is worth more. And **it is the third consumer of `provider.Params`** — the host
+cannot know which provider settings are secret-valued (M8 rule 4 cuts both ways),
+which is the same declaration M12 needs for its inner store and the M17–M21 group
+needs for local-path validation; build it once. The first unsettled question is
+whether this belongs above the seam at all, since **SFTP already solved it
+differently and correctly** (M18 rule 6: no password, no passphrase, agent instead)
+— the only backend wanting a keyring is Drive, because an OAuth refresh token has no
+agent to defer to.
+
 **v2, backends on the roadmap** (DESIGN.md §9 has the reasoning; these three are
 unscheduled, none is started, and each one's shape is *decided* — the entries say
 so, so don't re-litigate them). **M11** deduplicating local backend: a

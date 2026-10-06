@@ -4056,6 +4056,124 @@ this whole group walks through, so it is a precondition rather than a note.
     two things — if go-fuse's trace ever moves behind a drivel level, the flag keeps
     naming the FUSE trace and the level is a separate name.
 
+28. **M26 — Credentials in a secret service.** Unscheduled, not started. An
+    opt-in, per-account alternative to keeping an OAuth refresh token in a `0600`
+    file: `drivel login` stores it in the desktop secret service, and a mount
+    reads it back from there instead of from `token.json`. **It is a
+    secret-at-rest change and not an isolation one**, which is worth saying first
+    because the obvious reading is the wrong one and because this file is where an
+    overclaim would start.
+
+    **What it buys is narrow and must be documented in those terms.** A secret
+    that is not a plaintext file in `~/.config` survives the ways a config
+    directory escapes: a dotfile backup, a synced or shared home directory, an
+    accidental `tar`, a screenshare, a support request with "here is my config".
+    What it does **not** do is isolate the token from other processes running as
+    the same user — anything that can `cat` the file today can ask the secret
+    service tomorrow, and nothing in a session-keyring model changes that. The
+    honest sentence is "it is not lying on disk in the clear", and anything
+    stronger is the kind of claim `docs/project/marketing.md` refuses on drivel's
+    behalf everywhere else. A feature whose documentation overstates it is worse
+    than no feature, because a user who believes the stronger claim stops taking
+    the precautions the weaker one still requires.
+
+    **GNOME and KDE are one backend, which is most of why this is tractable.**
+    KWallet 5 and later implement the freedesktop **Secret Service** D-Bus
+    interface, the same one `gnome-keyring` serves, so one client covers both
+    desktops and anything else implementing it (KeePassXC does). There is no
+    per-desktop code to write and no desktop detection to get wrong; what exists
+    on the session bus either answers the interface or it does not.
+
+    **The token is already read-only at mount time, and that is what makes the
+    rest small.** `gauth.SaveToken` has exactly one caller, `drivel login`. The
+    provider only ever `LoadToken`s and hands the result to
+    `oauth2.Config.TokenSource`, which refreshes the access token in memory and
+    never writes it back — so a refreshed access token is *already* discarded when
+    the process exits, and the only thing that has to persist is the refresh
+    token, which Google does not rotate. A secret source therefore needs **read at
+    mount and write at login**, and nothing else: no write-back callback across
+    the plugin seam, no new protocol method, no change to how refresh behaves. An
+    earlier sketch of this assumed the opposite and was much larger.
+
+    **The host resolves the secret, and `plugin/env.go` must not grow an entry for
+    this.** The token is read below the seam today, where D-Bus is deliberately
+    unreachable: the allowlist drops every `XDG_*` variable (M16's privilege-drop
+    lesson, so `XDG_RUNTIME_DIR` and the `$XDG_RUNTIME_DIR/bus` fallback are gone)
+    and has no `DBUS_SESSION_BUS_ADDRESS`. Adding one would be **strictly worse
+    than the `SSH_AUTH_SOCK` exception it would cite as precedent**: an ssh agent
+    signs with ssh keys and nothing else, while the secret service hands over
+    every secret the user has stored — other applications' tokens, browser
+    passwords, unrelated accounts. One allowlist entry would give every backend,
+    including an out-of-tree one, read access to the whole keyring, which turns M9
+    rule 8's narrow and documented disclosure into an unbounded one. So the host
+    performs the lookup and passes the **value** in the `provider.Config` TOML it
+    already builds; the secret crosses a private unix socket to a process the host
+    launched a moment earlier, which is barely a change from a plugin opening the
+    file itself.
+
+    **A boot mount cannot reach a secret service, and refusing is the only safe
+    answer.** Both implementations need a session bus and an unlocked login
+    keyring; an fstab mount ordered before `local-fs.target` has neither, and
+    there is nobody to answer an unlock prompt — the SFTP host-key rule (M18 rule
+    6) in a second place. A keyring-sourced account must therefore **fail at open,
+    naming the account**, and must never fall back to a file. The fallback is the
+    trap rather than the kindness: if an unreachable keyring silently reads
+    `token.json`, the file still has to exist, so the feature has bought nothing
+    at all while appearing to have worked. M8 rule 6's shape, with a worse
+    consequence than a mistyped key.
+
+    **GPG is declined, and the reason is the daemon.** `gpg --decrypt` needs
+    pinentry to prompt, and a mount brought up at boot or from a unit has no tty
+    and may have no display; a passphrase-less key is a key file again with more
+    moving parts. `gpg-agent` with a pre-cached passphrase works, but that is a
+    keyring with worse ergonomics and an extra dependency, reached through a
+    subprocess. Nothing here forecloses it — the secret *source* is the extension
+    point — but it should not be in the first implementation.
+
+    **The dependency is the real cost and belongs in
+    `docs/dev/dependencies.md`.** Two routes. `godbus/dbus/v5` is pure Go, and the
+    surface needed above it is roughly one `Lookup` plus unlocking a collection,
+    so a small in-tree client keeps §2.9's cross-compile property and adds no
+    runtime requirement beyond the bus. `zalando/go-keyring` is less code here but
+    shells out to `secret-tool`, which means the secret transits a child process's
+    output and the feature depends on an external binary being installed — on a
+    program whose whole premise is holding credentials carefully, that is the
+    wrong trade. **macOS Keychain is deferred** for the same reason and is not a
+    parity gap to close early: it needs cgo or `security(1)`, §2.9's pure-Go build
+    is worth more, and the platform is still compile-verified only.
+
+    **It needs the provider-declaration framework, and it is that framework's
+    third consumer.** The host cannot know which of a provider's settings name
+    secrets — `internal/config` must never learn what a Drive folder ID is, and
+    M8 rule 4 cuts both ways — so a provider has to *declare* that one of its
+    settings is secret-valued before the host can resolve it. That is the same
+    `provider.Params` shape **M12** needs to open an inner store through the
+    registry, and the same one the M17–M21 group's shared precondition needs so a
+    provider can declare the local paths it will touch before `app.Validate` runs.
+    Three unrelated milestones want one piece of framework; building it once, with
+    three consumers in view, is a better use of the design than three narrow
+    hooks. This milestone is the cheapest of the three to validate it against.
+
+    **Unsettled, in the order that matters.** First, whether this is a per-account
+    concern above the seam at all, because **SFTP already solves the same problem
+    correctly and differently**: M18 rule 6 refuses a password and a passphrase
+    option outright and defers to `ssh-agent`, so the only backend that wants a
+    keyring is Drive — and the reason is specific, that an OAuth refresh token has
+    no agent to defer to while an ssh key does. If the answer is "Drive-shaped",
+    this may be a `gdrive` setting rather than an account-level one, which changes
+    where the lookup lives and makes the declaration framework unnecessary for
+    *this* consumer. Then the item's attributes, because they are a compatibility
+    surface the moment anyone reads the item with `secret-tool` or recovers one by
+    hand. Then whether `login` writes to the keyring by default once it can: the
+    `-pprof` precedent says the surprising thing stays off, and a default that
+    silently depends on a running session service would make `drivel login` fail
+    over ssh. Then migration of an existing `token.json`, which wants an import
+    rather than a fresh consent round trip. Deliberately out of scope: encrypting
+    anything with a passphrase drivel itself prompts for and holds, which is the
+    one thing M18 rule 6 says never to build; and `credentials.json`, since an
+    installed application's client secret is not confidential by Google's own
+    account and protecting it would imply otherwise.
+
 
 ### M0 — Test & CI (cross-cutting, always open)
 
