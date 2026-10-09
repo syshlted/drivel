@@ -96,6 +96,36 @@ func (w *testLog) saw(sub string) bool {
 	return false
 }
 
+// mark returns the current end of this peer's log, for sawSince.
+//
+// It exists because saw answers "has this mount ever logged that?", which is
+// right for the one-shot cases above and a trap for every case that restarts a
+// peer: a peer's log accumulates across its restarts, so waiting for a line that
+// its previous life already printed returns on the first poll and leaves the
+// assertions after it racing whatever the new one is doing. Group V restarts a
+// peer in every case.
+func (w *testLog) mark() int {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return len(w.lines)
+}
+
+// sawSince reports whether this mount has logged a line containing sub since the
+// given mark.
+func (w *testLog) sawSince(from int, sub string) bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if from > len(w.lines) {
+		from = len(w.lines)
+	}
+	for _, l := range w.lines[from:] {
+		if strings.Contains(l, sub) {
+			return true
+		}
+	}
+	return false
+}
+
 func (w *testLog) close() {
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -117,12 +147,13 @@ type fleet struct {
 // single cancellation, which is right for a process and wrong for a test that has
 // to take one machine away.
 type peer struct {
-	t     *testing.T
-	name  string
-	spec  MountSpec
-	reg   *provider.Registry
-	store *memStore
-	logw  *testLog
+	t      *testing.T
+	name   string
+	spec   MountSpec
+	reg    *provider.Registry
+	store  *memStore
+	faults *faultStore
+	logw   *testLog
 
 	mount   *Mount
 	cancel  func()
@@ -142,19 +173,32 @@ func newFleet(t *testing.T, n int, opts ...func(*MountSpec)) *fleet {
 
 	store := newMemStore()
 	root := t.TempDir()
-	reg := registryWith(t, "mem", store)
+	// One provider kind per peer, each a faultStore over the one store they share
+	// (faultstore_test.go). Per peer and not per fleet because every Group V case
+	// takes exactly one client away from a remote that keeps working for the
+	// others: a fleet-wide fault stops everything and leaves nothing to observe.
+	// With no fault set it is a pass-through, so this is the only path and the
+	// cases that never touch it are unaffected.
+	reg := provider.NewRegistry()
 
 	f := &fleet{t: t, store: store}
 	specs := make([]MountSpec, 0, n)
 	for i := range n {
 		name := "c" + string(rune('1'+i))
 		dir := filepath.Join(root, name)
+		faults := &faultStore{memStore: store}
+		kind := "mem-" + name
+		if err := reg.Register(kind, func(context.Context, provider.Params) (provider.Store, error) {
+			return faults, nil
+		}); err != nil {
+			t.Fatalf("registering %s: %v", kind, err)
+		}
 		spec := MountSpec{
 			Name:       name,
 			Mountpoint: filepath.Join(dir, "mnt"),
 			DataDir:    filepath.Join(dir, "data"),
 			StateDB:    filepath.Join(dir, "state.db"),
-			Provider:   "mem",
+			Provider:   kind,
 			// Eager mode, and a sweep that finds remote-only content: a peer that
 			// joins an already-populated remote is the normal case in a fleet.
 			Materialize: true,
@@ -173,7 +217,7 @@ func newFleet(t *testing.T, n int, opts ...func(*MountSpec)) *fleet {
 		specs = append(specs, spec)
 		w := spec.Logger.Writer().(*testLog)
 		f.logs = append(f.logs, w)
-		f.peers = append(f.peers, &peer{t: t, name: name, spec: spec, reg: reg, store: store, logw: w})
+		f.peers = append(f.peers, &peer{t: t, name: name, spec: spec, reg: reg, store: store, faults: faults, logw: w})
 	}
 
 	// The rig checks itself with the same guards a real process uses. A fleet whose

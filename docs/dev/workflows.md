@@ -427,8 +427,9 @@ stateDiagram-v2
     Serving --> Draining: SIGINT / SIGTERM
 
     Draining: 1. unmount
-    Draining: 2. close(events)
-    Draining: 3. engine drains in-flight uploads<br/>on a DETACHED context, bounded
+    Draining: 2. wait for the inbound loop<br/>(pull + sweep), bounded
+    Draining: 3. close(events)
+    Draining: 4. engine drains in-flight uploads<br/>on a DETACHED context, bounded
     Draining --> Closing
 
     Closing: app.Close — release
@@ -438,10 +439,20 @@ stateDiagram-v2
 
 The three-phase split is what lets a process that fails to bring up mount 3 of 5
 unmount and drain the two that came up. Inside `Run` the per-mount ordering is
-load-bearing: **unmount → close the event channel → wait for the bounded drain**,
-with the engine on a **detached context** so that the Ctrl-C which stopped the
-mount does not also abort the uploads it is trying to finish. `App` aggregates
-around that; it must never collapse it into one cancellation.
+load-bearing: **unmount → wait for the inbound loop → close the event channel →
+wait for the engine's bounded drain**, with the engine on a **detached context** so
+that the Ctrl-C which stopped the mount does not also abort the uploads it is
+trying to finish. `App` aggregates around that; it must never collapse it into one
+cancellation.
+
+Both waits are bounded and the bounds differ on purpose. The engine is finishing
+uploads the user is waiting for; the pull loop and the sweep have nothing in hand
+worth delaying a shutdown for, since an unfinished sweep is resumed and an
+unfinished download is retried. What waiting for the inbound loop buys is that
+neither of them is still holding the state DB or the backing descriptor when
+`Close` takes those away — before it, a sweep outliving `Run` met a closed bbolt,
+and in in-place mode a download could have written through a `/proc/self/fd/N`
+whose number had been reused.
 
 ## Where to look next
 

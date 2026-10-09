@@ -27,10 +27,16 @@ obvious change is wrong and the tests will not tell you.
 - **Paths are root-relative slash paths, no leading slash** — the form `fsevent`
   emits and `provider.Store` consumes. `NewPath` is set only on `OpRename`.
 - **`context.Context` is threaded for cancellation.** SIGINT/SIGTERM unmounts,
-  which makes `server.Wait()` return; the engine then drains on a **detached**
-  context. With several mounts each runs that sequence itself — `App` waits for
-  them, it does not replace it. (`gosec` flags the detached context; the waiver is
-  deliberate.)
+  which makes `server.Wait()` return; `Run` then waits for the inbound loop and the
+  engine drains on a **detached** context. With several mounts each runs that
+  sequence itself — `App` waits for them, it does not replace it. (`gosec` flags the
+  detached context; the waiver is deliberate.)
+- **Cancelling a goroutine is not the same as waiting for it.** Anything still
+  running when `Run` returns is still running when `Close` shuts the state DB and
+  the backing dirfd behind it, and in in-place mode that descriptor's number can be
+  reused — so a write through it lands somewhere else. Both of `Run`'s loops are
+  therefore waited for, each under its own bound; see
+  [workflows §7](workflows.md#7-mount-lifecycle).
 - **A `provider.Factory`'s context bounds *opening* the store and nothing after
   it.** Out of process a Factory runs inside the plugin's gRPC `Open` handler,
   which grpc-go cancels the moment that handler returns, so a context retained

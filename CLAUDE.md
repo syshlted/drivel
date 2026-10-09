@@ -829,9 +829,16 @@ on every push, together with `golangci-lint` and `govulncheck`; every gate is a
 and "passed in CI" cannot drift apart. M8 closed the `cmd/drivel` and end-to-end
 items; the property tests, `gauth` and `fsevent` closed after it, which empties the
 numbered list. The live testing work is now Tier B of the multi-client campaign
-(`docs/dev/multiclient-test-plan.md`).
+(`docs/dev/multiclient-test-plan.md`), whose Tier A covers Groups I–IV plus **Group
+V, failure and degradation** (`internal/app/failure_test.go` over the per-peer fault
+injection in `faultstore_test.go`): MC-41, MC-43, MC-44b and MC-46 run in-process,
+MC-45's premise turned out not to hold, and MC-40/MC-44/MC-47 are Tier B by
+mechanism rather than by scheduling. Two of its findings are products of running it
+and not of the plan: an **abandoned push and a failed download are both repaired
+only by a sweep**, which `-sweep-interval 0` disables; and the shutdown gap in M8
+rule 1 above.
 
-Three rules the last rounds left behind. **A property test nobody has seen fail is a
+Four rules the last rounds left behind. **A property test nobody has seen fail is a
 property test nobody knows the strength of**: `ranges/property_test.go` and
 `syncengine/coalescer_property_test.go` were each checked by mutating the code they
 cover (round `Mark` outward, let a known event revive a poisoned accumulator, …) and
@@ -844,7 +851,13 @@ a tree the code under test is mutating must skip `fs.ErrNotExist`, not fail on i
 — `peer.manifest`/`peer.conflicts` in `multiclient_test.go` did the latter and made
 `TestFleetPropagatesABulkDelete` fail two runs in three, with the product innocent.
 A sampler in a poll loop is waiting out exactly that race; every *other* error still
-fails.
+fails. And the fourth, from Group V: **a predicate that answers "has this ever
+happened?" cannot be used to wait for it happening again.** `testLog.saw` searches a
+peer's whole log, which accumulates across that peer's restarts — so every case that
+restarts a peer and then waits for a line its previous life already printed gets a
+wait that returns on the first poll and assertions that race the new process.
+`mark`/`sawSince` is the fix; it was written twice before being noticed, once as a
+test that failed for the wrong reason and once as a test that passed for one.
 
 DESIGN.md §10 is a design note on carrying POSIX metadata (mode, ACLs, xattrs,
 SELinux) over Drive — unscheduled. If you touch it, the rule is that permission
@@ -1280,10 +1293,24 @@ composition — and about the ways several mounts can corrupt each other.
 1. **The three-phase lifecycle is not cosmetic.** `app.Open` acquires, `Run` serves
    then drains, `Close` releases. That split is what lets a process that fails to
    bring up mount 3 of 5 unmount and drain the two that came up. Inside `Run` the
-   per-mount ordering is unchanged and still load-bearing: unmount → `close(events)`
-   → wait for the engine's bounded drain, engine on a **detached context**. `App`
-   aggregates around that; it must never collapse it into one cancellation. (gosec
-   flags the detached context — the waiver is deliberate, not an oversight.)
+   per-mount ordering is load-bearing: unmount → **wait for the inbound loop** →
+   `close(events)` → wait for the engine's bounded drain, engine on a **detached
+   context**. `App` aggregates around that; it must never collapse it into one
+   cancellation. (gosec flags the detached context — the waiver is deliberate, not an
+   oversight.)
+
+   **The inbound wait is newer than the rest and is a fix** (Group V, 2026-10-09):
+   `Run` used to return once the engine had drained, leaving `down.Run` to notice
+   the cancelled context on its own, so `Close` shut the state DB under a live sweep
+   — `[sweep] delete pass: database not open`, which abandoned the delete pass and
+   skipped `FinishSweep`, parking a sweep that had actually finished. **Cancelling a
+   goroutine is not the same as waiting for it**, and the version that costs data is
+   in-place mode: the backing path is `/proc/self/fd/N`, and once `Close` has closed
+   that descriptor the number can be reused, so a download still writing through it
+   writes into whatever took it. Both waits are bounded and the inbound one is the
+   shorter (`inboundDrainTimeout`, 10s against the engine's 30s) because an
+   unfinished sweep is resumed and an unfinished download is retried, while the
+   engine holds uploads nothing will re-offer.
 2. **`app.Validate` runs before anything opens, on the flag path too.** Each guard
    exists because the failure is otherwise a deadlock, an opaque five-second bbolt
    timeout, or a file synced to the wrong account: shared state DB (each engine

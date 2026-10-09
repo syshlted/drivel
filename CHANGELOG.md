@@ -13,6 +13,26 @@ from source with `make build`.
 
 ## Unreleased
 
+### Fixed: unmounting could cut a sync short instead of letting it finish — 2026-10-09
+
+Drivel's two sync directions are not symmetrical on shutdown. The outbound half
+has always been allowed to finish: on Ctrl-C the filesystem is unmounted first,
+and the uploads already in hand are given time to complete. The inbound half —
+the change-feed poll loop and the periodic re-scan of the remote tree — was only
+asked to stop, and Drivel did not wait to hear that it had, so it could still be
+working when the databases behind it were closed.
+
+Mostly that cost a log line (`[sweep] delete pass: database not open`) and a
+re-scan that reported itself as interrupted even though it had finished, so the
+next start repeated it. The case that could have cost data never came up in
+practice and is why this is a fix rather than a tidy-up: in in-place mode (no
+`-data`), Drivel reaches its files through an open handle to the mount directory,
+and once that handle is closed a download still writing through it could write
+somewhere else entirely.
+
+Both directions are now waited for, each with its own time limit. Shutdown may
+take a few seconds longer than it did; nothing else about it changes.
+
 ### A Drive folder ID that names nothing is now refused, not mounted — 2026-10-09
 
 `-drive-root` (`root` in a config file) takes a Drive **folder ID**. Drive does

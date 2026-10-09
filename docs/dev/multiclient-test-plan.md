@@ -43,13 +43,37 @@ startable and stoppable on its own, with per-peer logging, manifests and a
 convergence check that includes the remote as a party) and `TestFleet*` covering
 MC-03, MC-12 (its reserved-name half), MC-21, MC-23, MC-25, MC-26, MC-31a,
 MC-31b and MC-32. About 90s for the set.
+`internal/app/faultstore_test.go` adds per-peer fault injection over the same
+shared store — a client cut off from the remote, a transfer that stops partway,
+and an enumeration that can be held open at a page boundary — and
+`internal/app/failure_test.go` is Group V on top of it: MC-41, MC-43 (in two
+shapes), MC-44b, MC-46 and MC-45. About another 100s, most of it MC-44b waiting
+out the product's 30s idle poll cadence.
 `internal/provider/gdrive/changes_test.go` covers the change feed's shape, on a
 `fakeDrive` that now serves a real `changes.list` log, and
 `internal/provider/gdrive/siblings_test.go` covers MC-30 below the seam.
 
 Tier A owns: convergence, echo suppression across clients, conflict-copy
 semantics, rename propagation, delete inference, the reconcile guards, ping-pong
-detection.
+detection, and — since Group V — restart and degradation for every fault that is
+a *provider answering badly* rather than a process dying.
+
+The faults are **per peer and not per fleet**, which is the whole difference
+between "the provider is down" (nobody syncs, nothing to observe) and "this
+client is partitioned" (the fleet moves on without it and has to re-converge
+afterwards). The fleet therefore registers one provider kind per peer, each a
+decorator over the one store they share.
+
+Two traps in the harness itself, both paid for. `testLog.saw` answers "has this
+mount ever logged that?", and a peer's log accumulates across its restarts — so
+every Group V case, which restarts a peer in order to exist, was waiting for a
+line its previous life had already printed. That wait returns on the first poll
+and leaves every assertion after it racing whatever the new process is doing;
+`mark`/`sawSince` is the fix and is what the restart cases must use. And the
+fleet's convergence check hashes the backing tree, so a **lazy** peer's
+placeholders read as content that disagrees with everyone: the two placeholder
+cases assert against the remote and the marker directly and never call
+`waitConverged`.
 
 **Tier B — three real processes against real Drive.** Scripts in
 `scripts/multiclient` (`rig-init.sh`, `workload.sh`, `manifest.sh`, `converge.sh`,
@@ -102,10 +126,16 @@ the expiry through the same door.
    `delete = "permanent"` and the old rule applies instead — gone is gone.
 3. **A throwaway Google account.** The delete and conflict cases are designed to
    destroy data.
-4. **One token per client.** `token.json` is rewritten on refresh; three processes
-   sharing one path race on that write. Give each client its own config directory
-   (`drivel login -account c1|c2|c3`) or its own copy of the token file. MC-45
-   exists to confirm this is actually necessary; assume it is until then.
+4. **One token per client**, and it is tidiness rather than safety. This item used
+   to say `token.json` is rewritten on refresh and that three processes sharing one
+   path race on that write. **That is wrong and MC-45 is why**: nothing in a mount
+   ever writes a token file — `gauth.SaveToken` has one caller, `drivel login` —
+   and the refresh happens in memory inside `oauth2`. Keep giving each client its
+   own config directory (`drivel login -account c1|c2|c3`) anyway, because it is
+   what makes a per-client log, state DB and index obvious from the layout and
+   because a future write-back would reinstate the hazard, but a shared token path
+   does not corrupt anything today. `TestOnlyLoginWritesTheOAuthToken` is what
+   keeps that true.
 
 ### 2.2 Layout
 
@@ -370,15 +400,15 @@ processes will not otherwise line up inside a 300 ms debounce window.
 
 | ID | Setup / action | Expected | Catches |
 |---|---|---|---|
-| **MC-40** | `kill -9` A mid-upload of a 5 GiB file. Restart. | No partial file remotely, no duplicate created on retry, upload resumes or restarts cleanly. Session URIs are deliberately not persisted, so a restart means a fresh upload — confirm it does not leave an orphan. | Crash-consistency of the push path. |
-| **MC-41** | `kill -9` C mid-sweep (during MC-01's initial enumeration). Restart. | `[sweep] resuming the enumeration interrupted at …`; the persistent `seen` marks prevent pages consumed by the dead process from being read as remote deletions. | The M7b resume path — an in-memory seen-set would delete the user's data here. |
-| **MC-42** | Delete C's `drivel-index.db` while stopped; restart. | Degrades to `files.list` name lookups. **No duplicates created, no data lost** — only latency and quota. | M7 invariant 2. Before M7, this produced duplicate uploads beside real files. |
-| **MC-43** | With C in `-lazy` mode holding placeholders, delete C's `drivel-state.db`; restart. | The `user.drivel.placeholder` xattr still identifies them; nothing pushes a placeholder over real remote content. | M5 invariants 1 and 2 — the data-loss guards. Run with `DRIVEL_REQUIRE_TESTENV=xattr` semantics in mind: on a filesystem without user xattrs this case is meaningless, and `app.Mount` warns as much. |
+| **MC-40** | `kill -9` A mid-upload of a 5 GiB file. Restart. | No partial file remotely, no duplicate created on retry, upload resumes or restarts cleanly. Session URIs are deliberately not persisted, so a restart means a fresh upload — confirm it does not leave an orphan. **Still Tier B, and it is the one case in this group that cannot move**: both halves of it — a process that dies rather than one asked to stop, and a resumable upload session to be interrupted — are things a fake has none of. What Tier A does say about the restart is MC-44b's: an in-flight push that cannot complete is *dropped*, not queued, so "restart cleanly" must not be read as "the upload is still pending afterwards". | Crash-consistency of the push path. |
+| **MC-41** | `kill -9` C mid-sweep (during MC-01's initial enumeration). Restart. | **Confirmed in Tier A**, as predicted and with the prediction's mechanism intact: a sweep paged at 2, held at its first page boundary and then stopped, leaves a sweep record carrying the page-two cursor; the next start logs `[sweep] resuming the enumeration interrupted at …` and completes over **exactly the four objects it had not reached**, deleting nothing on either side. That count is the assertion that matters — a sweep that silently restarted would list all six, mark every one of them seen, and never consult a mark. Giving the resumed sweep a fresh generation (an in-memory seen-set, in one line) deletes exactly the two files the dead run had already consumed, locally, reporting `2 deleted locally` as the ordinary resolution of a bulk remote delete. Pinned by `TestFleetResumesAnInterruptedSweepWithoutInferringDeletes`. Still Tier B: the literal `kill -9`, and a sweep large enough for the resume to matter in wall-clock. | The M7b resume path — an in-memory seen-set would delete the user's data here. |
+| **MC-42** | Delete C's `drivel-index.db` while stopped; restart. | Degrades to `files.list` name lookups. **No duplicates created, no data lost** — only latency and quota. **Answered below the seam and not in the fleet**: the index is Drive-private and a path-addressed fake has none to lose, so the regression tests for it are `TestResolutionWorksWithNoIndexAtAll`, `TestResolveFindsExistingRemoteFileWithColdIndex` and `TestStatFindsRemoteFileAfterRestart` in `internal/provider/gdrive`, which are where an index-shaped mistake is visible at all. Still Tier B: what the degradation *costs* against real Drive, which is the half nobody can fake. | M7 invariant 2. Before M7, this produced duplicate uploads beside real files. |
+| **MC-43** | With C in `-lazy` mode holding placeholders, delete C's `drivel-state.db`; restart. | **Confirmed in Tier A, in two shapes, and they do not exercise the same guard.** With the remote intact, the post-loss sweep re-stamps every placeholder and records it a fresh echo: no push, no conflict copy, the remote byte-identical, and a read through the mountpoint still hydrates the real content — so the marker that survived is a working promise and not a label. The guard doing the work there is `applyTo`'s re-stamp branch; removing it manufactures a conflict copy per placeholder and leaves the *placeholder* at the real path with the user's content parked beside it. Removing the **local walk's** placeholder skip changes nothing in that shape, because the sweep applies its pages before it walks, so every placeholder already has a baseline by then — which is why the second shape deletes one file remotely while the client is down. Then the page never mentions it, there is no re-stamp and no echo, and the walk's own check is the only thing in front of a push; without it the sweep offers the placeholder and the engine's M5 gate refuses it, which is two independent guards collapsing into one and a fallback. Pinned by `TestFleetKeepsPlaceholdersSafeWhenTheStateDBIsLost` and `TestFleetNeverPushesAPlaceholderWhoseRemoteIsGone`. | M5 invariants 1 and 2 — the data-loss guards. Run with `DRIVEL_REQUIRE_TESTENV=xattr` semantics in mind: on a filesystem without user xattrs this case is meaningless, and `app.Mount` warns as much. |
 | **MC-44** | Block UDP/443 for A only (`nft add rule … udp dport 443 drop`) for 10 min under load, then restore. | HTTP/3 dial fails, HTTP/2 fallback carries the traffic, sync continues. Compare A's throughput and CPU against B and C for the same workload — that is a free H3-vs-H2 measurement on identical work. | The transport fallback under load rather than at startup, plus the per-client cost of each protocol. |
-| **MC-44b** | Block **all** traffic to Drive for one client for 20 min, then restore. | Retries with backoff, no crash, no local data loss, converges on restore. Cursor should still be valid at 20 min. | Partition tolerance; distinguishes "offline" from "broken". |
-| **MC-45** | Point two clients at the *same* `token.json` and run a workload across a refresh boundary. | Determine whether concurrent refresh-and-rewrite corrupts the file or drops a token. | Validates (or removes) the per-client-token requirement in §2.1. |
-| **MC-46** | Fill C's `data/` filesystem to 100% during a large inbound download. | ENOSPC surfaces as an error, not as a truncated file that then gets pushed back up as the new remote content. | A short local file becoming the canonical remote content is the worst available outcome. |
-| **MC-47** | Cross-process hygiene, deliberately: (a) two processes sharing one state DB; (b) client B's `data/` placed inside client A's `data/`; (c) B's mountpoint inside A's backing tree. | (a) should fail fast with the 5s bbolt flock timeout — safe but opaque. (b) and (c) are **unguarded across processes** and are expected to produce event storms or recursion. | Confirms which cross-process footguns are real, and whether a lock file or a startup check is worth adding. |
+| **MC-44b** | Block **all** traffic to Drive for one client for 20 min, then restore. | **Confirmed in Tier A, and "converges on restore" is wrong.** Three of the four predictions hold: no crash, no local data loss (the write during the outage lands exactly as it would online — §2.1 is what makes the outage invisible to the user, and also what makes the loss invisible), and **inbound recovers on its own**, bounded by the idle cadence rather than by anything about the outage, since one failed poll sets the wait to 30s and the loop then retries indefinitely. Outbound does not: the push in flight gets five attempts over a few seconds of jittered backoff and is then **dropped** — `[sync] push write … failed after 5 attempt(s)` — so after the network returns the file exists only on that client, the feed is demonstrably live again, and nothing ever offers the file to the remote. The repair is a sweep's local walk (`[sweep] push … (local only)`), which with `sweep-interval = "0"` means a restart with `-resync` and nothing else. §3's counter table already said an abandoned push is data not sent; this is that, arriving from an outage of seconds rather than a quota storm. Pinned by `TestFleetAbandonsAPushAcrossAnOutageAndRecoversOnlyBySweeping`. Still Tier B: whether the cursor survives 20 real minutes. | Partition tolerance; distinguishes "offline" from "broken". |
+| **MC-45** | Point two clients at the *same* `token.json` and run a workload across a refresh boundary. | **Answered from the code rather than by running it, and the answer is that the premise does not hold**: nothing in a mount ever writes a token file. `gauth.SaveToken` has exactly one caller, `drivel login`; the provider only `LoadToken`s and hands the token to `oauth2`, which refreshes in memory and never writes back. So there is no concurrent rewrite to corrupt, and §2.1's one-token-per-client rule is belt-and-braces rather than a correctness requirement. The property is an absence and is load-bearing in two directions — it is what makes a shared token path safe, and it is what makes M26's secret-service work small (read at mount, write at login, no write-back across the plugin seam) — so it is pinned by a grep, `TestOnlyLoginWritesTheOAuthToken`, for the same reason the SFTP host-key hatch is: the mistake it guards against is a *new* caller in a package that does not exist yet. | Validates (or removes) the per-client-token requirement in §2.1. |
+| **MC-46** | Fill C's `data/` filesystem to 100% during a large inbound download. | **Confirmed in Tier A for the half that matters, with one finding the case did not predict.** A transfer that stops partway leaves *nothing* at the destination path — the temp-file-plus-rename in `Downloader.download` is what does it, and writing in place instead leaves 8 bytes at the real path, which is the file the next sweep's local walk uploads as the user's content. No temporary is stranded, the remote is untouched, and a sweep after the transfer recovers is the repair. The finding: **an apply failure does not hold the cursor.** The page's error is logged and the cursor advances anyway, so the feed never re-offers that object and the file stays missing until a sweep — on Drive's 24h default that is a day, and at `sweep-interval = "0"` it is until someone restarts the mount. The case's own fault injection fails on the read side; real ENOSPC fails on the write side and stays Tier B, as does whether the error is reported rather than swallowed by the filesystem. Pinned by `TestFleetNeverLandsAPartialDownloadAndNeverPushesItBack`. | A short local file becoming the canonical remote content is the worst available outcome. |
+| **MC-47** | Cross-process hygiene, deliberately: (a) two processes sharing one state DB; (b) client B's `data/` placed inside client A's `data/`; (c) B's mountpoint inside A's backing tree. | (a) should fail fast with the 5s bbolt flock timeout — safe but opaque. (b) and (c) are **unguarded across processes** and are expected to produce event storms or recursion. **Tier A cannot host this one at all**, and the reason is the case itself: all three shapes are refused by `app.Validate` inside one process — the fleet harness runs it over its own specs on every start — so an in-process version would either be asserting the guard it already has a unit test for, or deliberately bypassing it and then measuring something no real process can reach. It needs two real processes, and not real Drive: a local SFTP server (M18's rig) is a remote that two `drivel` processes can share with no quota and no account. | Confirms which cross-process footguns are real, and whether a lock file or a startup check is worth adding. |
 
 ### Group VI — resource, cost, and soak
 
@@ -457,7 +487,7 @@ roughly in descending order of how likely they are to change a decision:
 13. **The rig is code, and it was wrong in two places.** Both were found by running
     the scripts against hand-built trees with no Drive involved, and both would
     have failed *quietly* during a live run: `converge.sh` diffed the mtime column
-    (item 15), so no case would ever have reported convergence; and `logcount.sh`
+    (item 16), so no case would ever have reported convergence; and `logcount.sh`
     passed `[sync] push` to `grep` without `-F`, where `[sync]` is a bracket
     expression matching one character out of `{s,y,n,c}` — so uploads, downloads,
     conflicts and sweeps all silently reported **0**, which is every volume number
@@ -476,7 +506,18 @@ roughly in descending order of how likely they are to change a decision:
     the same names. The narrow fix is to make the two paths agree; the honest one
     is to stop recognising drivel's own artefacts by their names at all, since a
     name is the one thing a user is free to choose.
-15. **mtime is not synchronised, and nothing said so.** Found by exercising
+15. **Two failures are repaired only by a sweep, and nothing schedules one.** A
+    push abandoned after its retry budget (MC-44b) and a download whose apply
+    failed (MC-46) leave the same state: one path out of sync, one log line, and no
+    scheduled event that will notice. Both are reachable from an outage of seconds.
+    The decision this forces is whether either should *schedule* a sweep, and it is
+    not obviously yes — a sweep is the most expensive thing the system does and the
+    most dangerous (MC-25, MC-53), so triggering one from a transient failure trades
+    a known small loss for an unknown large cost. The cheap half of the answer is
+    that `-sweep-interval 0`, which §2.3 sets for every live case, turns off the
+    only repair either one has; a user on the 24h default has it, slowly. Evidence
+    in §5.6.
+16. **mtime is not synchronised, and nothing said so.** Found by exercising
     `converge.sh` offline before spending a live session on it: it compared the
     manifest's mtime column, which no two clients in a fleet will ever agree on
     (§2.6). The behaviour is defensible — the originator's local write time is a
@@ -602,7 +643,46 @@ iterations per second under `-race`, instead of one instance per thousand files 
 1.18 s each. Chase it there. Keep MC-11 as the burst-throughput, quota and
 DB-growth measurement it is specified to be, and let its upload-count ratio be a
 corroborating observation rather than the experiment.
-6. **Failure injection**: Group V.
+6. **Failure injection — Group V, Tier A done.** Five of the eight cases are in
+   `internal/app/failure_test.go` (MC-41, MC-43 in two shapes, MC-44b, MC-46) with
+   MC-45 answered from the code and MC-42 answered below the seam; MC-40, MC-44 and
+   MC-47 are Tier B by mechanism and the matrix rows say which mechanism. Three
+   things came out of it that no case predicted, in descending order of how much
+   they matter.
+
+   **The inbound loop was not part of the shutdown drain, and that is now fixed.**
+   `Mount.Run` waited for the engine's bounded drain and then returned, leaving
+   `down.Run` to finish on its own — so `Close` shut the state DB under a live
+   sweep. It surfaced as `[sweep] delete pass: database not open`, which abandoned
+   the delete pass and skipped `FinishSweep`, so a sweep that had done all its work
+   was parked as interrupted and resumed on the next start. The sharper version
+   never fired here and is why this is a fix rather than a log-noise cleanup: in
+   in-place mode the backing path is `/proc/self/fd/N`, and once `Close` has closed
+   that descriptor the number can be reused — a download still writing through it
+   writes somewhere else entirely. `Run` now waits for the inbound loop before
+   `close(events)`, bounded at 10s (shorter than the engine's 30s: a sweep that
+   does not finish is resumed and a download that does not finish is retried, so
+   neither is worth delaying a shutdown for).
+
+   **An abandoned push and a failed download are both repaired only by a sweep**,
+   and both are reachable from an outage of seconds. MC-44b and MC-46 arrive at
+   this from opposite directions — the push has a five-attempt budget and then
+   drops the event, the download has no budget at all because the cursor advances
+   past a failed apply — and the consequence is the same: one path out of sync,
+   one log line, and nothing scheduled to notice. Which is why §2.3's
+   `sweep-interval = "0"` for the live rig is a *measurement* choice that disables
+   the only repair either one has; a user on Drive's 24h default has it, slowly.
+   Whether a dropped push or a failed apply should schedule a sweep is a design
+   question this exercise is now entitled to ask, and the answer is not obviously
+   yes: a sweep is the most expensive thing the system does and the most dangerous
+   (MC-25, MC-53), so triggering one from a transient failure trades a known small
+   loss for an unknown large cost.
+
+   **A lazy peer is invisible to the fleet's convergence check**, because the check
+   hashes the backing tree and a placeholder holds zeros. Nothing is wrong with
+   either half; it means MC-60's mixed-mode fleet needs a convergence oracle that
+   asks the hydrator, and that is a harness item to build before MC-60 rather than
+   during it.
 7. **Resource and soak**: Group VI, last, because MC-53 wants a stable build.
 
 **Exit criteria.** Every case in Groups I–IV either passes or has a filed issue

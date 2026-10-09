@@ -113,6 +113,81 @@ wants it — but comparing it would mean no case ever converges.
   its own netns and read `nstat`, or derive volume from `logcount.sh` plus the
   known file sizes.
 
+## Group V: injecting failures
+
+Most of Group V is settled in Tier A (`internal/app/failure_test.go`), and what is
+left here is the part that needs a real process, a real transport or a real
+filesystem. Read the matrix rows first: four of the nine cases now have a confirmed
+answer, and two of those answers changed what the live run should look for.
+
+**Before any of it, know what repairs what.** A push that fails for more than a few
+seconds is *dropped* — five attempts, jittered backoff, then `[sync] push … failed
+after 5 attempt(s)` — and a download whose apply fails is never re-offered, because
+the cursor advances past a failed page. Both are repaired only by an M7b sweep. So a
+fault-injection case run with `sweep-interval = "0"` has **no repair path at all**,
+and a run that ends with the fleet diverged may be measuring that rather than
+whatever it meant to measure. Decide per case: leave it at 0 and assert the
+divergence, or set a short interval and measure the recovery.
+
+### MC-40, MC-41 — kill the process
+
+```sh
+kill -9 "$(pgrep -f 'rig/c1/config.toml')"
+```
+
+Two things to check that the Tier A versions cannot. The upload session is not
+persisted, so a restart re-uploads from zero: look for a *duplicate* remote object
+beside the real one rather than a resumed transfer. And since M23 the backend runs
+in its own process — `drivel plugin-serve gdrive`, a child of the host — so after
+the kill, check for an orphan with `pgrep -af plugin-serve`. A child that outlives
+its host is holding the account's credentials with nothing driving it.
+
+### MC-44, MC-44b — take the network away from one client
+
+The hard part is "one client". A plain output rule partitions the whole host, which
+turns MC-44b into "the fleet is offline" and measures nothing. Three ways to scope
+it, cheapest first: run that client as its own user and match `meta skuid`; run it
+under `systemd-run --user --scope` and match its cgroup; or give it its own netns,
+which also answers the per-process byte counts this README says it cannot.
+
+```sh
+sudo nft add table inet drivel-fault
+sudo nft 'add chain inet drivel-fault out { type filter hook output priority 0; }'
+# MC-44: QUIC only, so the HTTP/2 fallback carries the traffic
+sudo nft add rule inet drivel-fault out meta skuid 1001 udp dport 443 drop
+# MC-44b: everything
+sudo nft add rule inet drivel-fault out meta skuid 1001 tcp dport 443 drop
+# ... restore
+sudo nft delete table inet drivel-fault
+```
+
+MC-44's measurement is the point: same workload, one client on H3 and two on the
+H2 fallback, so the CPU and throughput columns of `sample.sh` are a free
+protocol comparison. For MC-44b the one thing Tier A cannot answer is whether the
+change cursor survives 20 real minutes; everything else about that case is already
+pinned, including that inbound recovers and outbound does not.
+
+### MC-46 — fill a client's backing filesystem
+
+Give it a small one rather than filling a real one:
+
+```sh
+sudo mount -t tmpfs -o size=64M tmpfs rig/c3/data     # then sync something larger
+```
+
+Tier A already shows that a transfer stopping partway leaves nothing at the
+destination path. What only a filesystem can show is whether ENOSPC is reported at
+all — the `io.Copy` into the temporary is where it surfaces — and what the mount
+does to a *user* write when the backing store is full.
+
+### MC-47 — cross-process hygiene
+
+This one needs two processes and does **not** need Drive. A local SFTP server is a
+remote two `drivel` processes can share with no quota and no account — see the M18
+rig notes — which also makes the case repeatable. `app.Validate` refuses all three
+shapes inside one process, so the whole question is what happens when nothing is
+checking.
+
 ## Keeping the two tiers honest
 
 Every Tier B failure gets a Tier A regression test before it is fixed. Tier B is

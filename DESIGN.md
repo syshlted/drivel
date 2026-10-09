@@ -457,10 +457,27 @@ and can fail; `Run` serves and then drains; `Close` releases. A function that ow
 the process's signal context and its defers — which is what `runMount` was — cannot
 do this, because bringing up three of five mounts and then failing has to unmount
 and drain the three, not exit holding their dirfds and bbolt locks. The per-mount
-shutdown ordering inside `Run` is unchanged and still load-bearing: unmount (which
-flushes pending FUSE events), then `close(events)`, then wait for the engine's
-bounded drain, with the engine on a detached context (§7). `App` aggregates; it
-must never replace that sequence with one cancellation.
+shutdown ordering inside `Run` is load-bearing: unmount (which flushes pending FUSE
+events), then wait for the inbound loop, then `close(events)`, then wait for the
+engine's bounded drain, with the engine on a detached context (§7). `App`
+aggregates; it must never replace that sequence with one cancellation.
+
+The inbound wait was added after the Group V work (`docs/dev/multiclient-test-plan.md`
+§5.6) and is a correctness fix rather than tidiness. `Run` used to return once the
+engine had drained, leaving `down.Run` to notice the cancelled context on its own —
+so `Close` closed the state DB under a live sweep, which abandoned the delete pass
+and skipped `FinishSweep`, parking a sweep that had in fact finished. The version
+that would have cost data never fired: in in-place mode the backing path is
+`/proc/self/fd/N`, and once `Close` has closed that descriptor its number is
+available for reuse, so a download still writing through it writes into whatever
+took the number. Both waits are bounded; the inbound one is the shorter of the two,
+because an unfinished sweep is resumed and an unfinished download is retried, while
+the engine is holding uploads nothing else will re-offer. `Run` also *cancels* the
+inbound loop itself, on a context of its own derived from the caller's, rather than
+waiting on the caller's: `Serve` returns on a mount that never came up as well as on
+an unmount, and in that first case the caller's context is still live — so a loop
+waiting on it alone would still be polling when `Close` arrives, which is the failure
+this paragraph describes reached by the shorter route.
 
 **The registry is an explicit value, not a package-level map filled by `init()`.**
 The `database/sql` shape would introduce the only process-global mutable state in
@@ -1078,8 +1095,12 @@ are both lossy and racy.
   (parallelizable later).
 - State store guarded by bbolt transactions; the `pending`/echo maps are the only
   shared mutable state between up/down paths — accessed only through the store.
-- `context.Context` threaded everywhere for clean shutdown; on unmount, drain the
-  uploader queue (bounded) before exit.
+- `context.Context` threaded everywhere for clean shutdown; on unmount, wait for
+  the downloader's goroutine and drain the uploader queue, each bounded, before
+  exit. **Cancelling the context is not the same as waiting for the goroutine**: a
+  downloader still running when `Run` returns is still running when `Close` shuts
+  the state DB and the backing dirfd, and in in-place mode that descriptor's number
+  can be reused under it.
 
 ---
 
@@ -1165,7 +1186,9 @@ are both lossy and racy.
    provider-internal path↔ID index stays in-memory (self-rebuilding, §2.5); its bbolt
    persistence lands in M7.
 4. **M4 — Full bidirectional** with debounce, retries, conflict copies (§6), clean
-   shutdown (drain the uploader queue; the downloader stops on ctx cancel). ✅
+   shutdown (drain the uploader queue; the downloader is cancelled *and waited for*
+   — "stops on ctx cancel" was this note's wording, and cancelling without waiting
+   was the gap §2.8 and §7 now describe). ✅
    Outbound: events are coalesced per path behind a debounce window and dispatched
    to a bounded pool of path-hashed workers, each op retried with exponential
    backoff on transient provider errors (`provider.IsRetryable`, classified below

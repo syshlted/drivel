@@ -42,6 +42,15 @@ import (
 // consumer; per mount, since one busy mount must not stall another.
 const eventBuffer = 1024
 
+// inboundDrainTimeout bounds how long Run waits for the inbound loop to stop
+// after the mount has gone away. It is deliberately shorter than the engine's
+// drain: the engine is finishing uploads the user is waiting for, while the pull
+// loop and the sweep have nothing in hand that is worth delaying a shutdown for —
+// a sweep that does not finish is resumed, and a download that does not finish is
+// retried. What the wait buys is that neither of them is still touching the state
+// DB or the backing descriptor when Close takes them away.
+const inboundDrainTimeout = 10 * time.Second
+
 // MountSpec describes one mount to run. It is plain data: whatever produced it —
 // the flag set, a config file, a test — is interchangeable, which is what keeps
 // the single-mount path and the N-mount path from drifting apart.
@@ -365,6 +374,10 @@ func (m *Mount) Run(ctx context.Context) error {
 		close(engineDone)
 	}()
 
+	var (
+		downDone   chan struct{}
+		downCancel context.CancelFunc
+	)
 	if m.down != nil {
 		// Which of the two inbound paths this mount actually has, in its own terms.
 		// "changes.list pull loop" was Drive's name for it and was printed for every
@@ -378,7 +391,19 @@ func (m *Mount) Run(ctx context.Context) error {
 		default:
 			m.logf("inbound sync: one enumeration at startup only (no change feed on this provider, and sweep-interval is 0)")
 		}
-		go m.down.Run(ctx)
+		// Its own cancellation, derived from ctx rather than ctx itself. The normal
+		// shutdown has ctx cancelled already, but Serve also returns on a mount that
+		// never came up — and there ctx is still live, so a loop waiting on it alone
+		// would still be polling when the caller calls Close. The failed mount is the
+		// case most likely to be retried immediately, too.
+		downCtx, cancel := context.WithCancel(ctx)
+		downCancel = cancel
+		defer cancel()
+		downDone = make(chan struct{})
+		go func() {
+			m.down.Run(downCtx)
+			close(downDone)
+		}()
 	}
 
 	backend := vfs.NewBackend()
@@ -401,6 +426,25 @@ func (m *Mount) Run(ctx context.Context) error {
 		// a mount failure, and in the first case the engine may still be holding
 		// buffered uploads. Report the error, drain, then let the caller exit.
 		err = fmt.Errorf("serve: %w", err)
+	}
+	// The inbound loop is part of the drain too, and waiting for it is a fix rather
+	// than tidiness. Run's return is what lets the caller call Close, and Close
+	// shuts the state DB and the backing dirfd — so a sweep still in flight found
+	// its bbolt gone ("[sweep] delete pass: database not open"), which abandoned
+	// the delete pass and skipped FinishSweep, leaving a completed sweep parked as
+	// interrupted. The sharper version is in-place mode, where the backing path is
+	// /proc/self/fd/N: once Close has closed that descriptor the number can be
+	// reused, and a download still writing through it writes somewhere else
+	// entirely. It is bounded for the same reason the engine's drain is — a
+	// shutdown must end — and it goes before close(events) so a sweep's last
+	// pushes are still drained by the engine below.
+	if downDone != nil {
+		downCancel()
+		select {
+		case <-downDone:
+		case <-time.After(inboundDrainTimeout):
+			m.logf("inbound sync did not stop within %s; continuing shutdown without it", inboundDrainTimeout)
+		}
 	}
 	// Unmount has returned, so no more events will be emitted; closing the channel
 	// tells the engine to drain its queue (bounded) and exit. Wait for that drain
