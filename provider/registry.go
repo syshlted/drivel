@@ -47,6 +47,19 @@ type Params struct {
 }
 
 // Factory opens one Store of a single provider kind (M8).
+//
+// ctx bounds *opening* the store and nothing beyond it. A Factory must not
+// retain it, or anything derived from it that inherits its cancellation, for the
+// returned Store to use later: out of process a Factory runs inside the plugin's
+// Open handler, and grpc-go cancels that context as soon as the handler returns,
+// so a retained one is already dead by the time the first operation arrives. A
+// Store that needs a context of its own — one an auth library holds for the
+// token refreshes it will make for the rest of the mount's life — builds it with
+// context.WithoutCancel, which keeps the values and drops the lifetime.
+//
+// The lifetime a caller may rely on runs the other way: each Store method takes
+// its own context, and release is io.Closer (which provider.Store deliberately
+// does not require — most backends have nothing to release).
 type Factory func(ctx context.Context, p Params) (Store, error)
 
 // Registry maps a provider kind name to the Factory that opens it. The zero

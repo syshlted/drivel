@@ -150,6 +150,12 @@ func (f *fake) gate(op string) error {
 		return fmt.Errorf("fake %s: %w", op, provider.ErrCursorExpired)
 	case "retryable":
 		return retryable{fmt.Errorf("fake %s: try again", op)}
+	case "canceled":
+		// A dead context the HOST never cancelled — a backend's own, the shape a
+		// Drive token refresh produced when it held a context that had already
+		// been retired. It travels as codes.Canceled, so it is the case that
+		// proves the message survives the trip.
+		return fmt.Errorf("fake %s: %w", op, context.Canceled)
 	default:
 		return fmt.Errorf("fake %s: no", op)
 	}

@@ -13,6 +13,28 @@ from source with `make build`.
 
 ## Unreleased
 
+### Fixed: a Google Drive mount synced nothing after the first hour — 2026-10-09
+
+A Drive mount started, reported `gdrive sync enabled`, and then synced nothing in
+either direction, logging only:
+
+```
+[pull] initial reconcile failed: context canceled; continuing with the change feed alone
+[pull] cannot start change feed: context canceled
+```
+
+Nothing had been cancelled. Drivel runs each backend in its own process, and the
+Drive backend was keeping the short-lived context it was started with for its
+OAuth token refreshes — so the first API call that needed a fresh access token
+refreshed against a context that had already been retired. A cached access token
+lasts an hour, which made the window after `drivel login` work and everything
+after it fail. Mounting, reading and writing local files were unaffected
+throughout; only sync was dead.
+
+Cancellations crossing the backend boundary also arrived carrying nothing but the
+words `context canceled`, which is what made this almost impossible to diagnose
+from the log. They now keep the backend's own message.
+
 ### See what your config file describes, without mounting it — 2026-10-06
 
 `drivel mount -list` prints the mounts your config file describes and exits,

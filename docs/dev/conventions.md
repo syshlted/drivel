@@ -31,6 +31,18 @@ obvious change is wrong and the tests will not tell you.
   context. With several mounts each runs that sequence itself — `App` waits for
   them, it does not replace it. (`gosec` flags the detached context; the waiver is
   deliberate.)
+- **A `provider.Factory`'s context bounds *opening* the store and nothing after
+  it.** Out of process a Factory runs inside the plugin's gRPC `Open` handler,
+  which grpc-go cancels the moment that handler returns, so a context retained
+  for later use is already dead when the first operation arrives — while in
+  process the same argument is the mount's context, alive for the run. A store
+  needing a long-lived one builds it with `context.WithoutCancel`, which keeps
+  the values and drops the lifetime, and gives it **no deadline either**: one
+  context serving every later call means a deadline breaks all of them rather
+  than bounding one. `gdrive.refreshContext` is the instance, because oauth2
+  holds a context for the life of a token source; inheriting the cancellation
+  there meant a Drive mount synced nothing in either direction, reporting only
+  `context canceled`, on every run outside the hour after `drivel login`.
 - **Logging is per mount** — `e.logf` / `d.logf` / `n.logf`, never `log.Printf`. A
   single mount stays unprefixed, so its output is byte for byte what it was before
   multi-mount support.

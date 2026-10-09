@@ -111,9 +111,9 @@ func decodeError(err error) error {
 	}
 	switch st.Code() {
 	case codes.Canceled:
-		return context.Canceled
+		return cancellation(context.Canceled, st.Message())
 	case codes.DeadlineExceeded:
-		return context.DeadlineExceeded
+		return cancellation(context.DeadlineExceeded, st.Message())
 	}
 
 	var detail *pb.Error
@@ -144,6 +144,30 @@ func decodeError(err error) error {
 		return retryableError{err: out}
 	}
 	return out
+}
+
+// cancellation rebuilds a cancelled or expired call as the sentinel the engine
+// switches on, without discarding what the backend said about it.
+//
+// Keeping the message matters because "the host cancelled this call" is only one
+// of the things that arrives here. encodeError classifies on errors.Is, so any
+// error wrapping a dead context is sent as codes.Canceled — including one the
+// host never cancelled, raised from a context the backend built for itself.
+// Returning the bare sentinel then reported a backend's own failure as a
+// shutdown, in two words, with the diagnosis thrown away: a Drive token refresh
+// against a context that grpc-go had already cancelled surfaced as exactly
+// "context canceled", for a mount nobody had asked to stop (see gdrive's
+// refreshContext for the bug that produced it).
+//
+// The sentinel stays the error's identity, so errors.Is answers as before and
+// neither the engine's retry classification nor a shutdown's own log line
+// changes: a genuine cancellation carries no message beyond the sentinel's own
+// text, which is the case this returns unwrapped.
+func cancellation(sentinel error, msg string) error {
+	if msg == "" || msg == sentinel.Error() {
+		return sentinel
+	}
+	return fmt.Errorf("%w: %s", sentinel, msg)
 }
 
 // transportError wraps a failure of the plugin mechanism itself — the process

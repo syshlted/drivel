@@ -382,6 +382,21 @@ func TestPluginPreservesErrorClassification(t *testing.T) {
 				t.Errorf("IsRetryable = false for %v", err)
 			}
 		}},
+		{"canceled", "canceled", func(t *testing.T, err error) {
+			// The sentinel has to survive, because the engine and the pull loop
+			// both read a cancellation as "we are shutting down" rather than as a
+			// failure to retry...
+			if !errors.Is(err, context.Canceled) {
+				t.Errorf("errors.Is(context.Canceled) = false for %v", err)
+			}
+			// ...and so does the message, because a context the backend cancelled
+			// itself arrives here identically to one the host did, and reporting
+			// the first as a bare "context canceled" is how a Drive mount whose
+			// token refresh had a dead context reported that it was shutting down.
+			if provider.IsRetryable(err) {
+				t.Errorf("IsRetryable = true for a cancellation: %v", err)
+			}
+		}},
 		{"plain", "", func(t *testing.T, err error) {
 			if provider.IsRetryable(err) {
 				t.Errorf("IsRetryable = true for an unclassified %v", err)
