@@ -429,6 +429,16 @@ Drive folder ID mapped to the mount root. Use
 .B root
 for the My Drive root. Default:
 .BR root .
+.IP
+An
+.IR id ,
+not a folder path and not a folder name: the last segment of the folder's address
+in the Drive web interface,
+.IR drive.google.com/drive/folders/ID .
+Drivel verifies it the first time it is used and refuses the mount if it names
+nothing this account can see, a file rather than a folder, or a folder in the
+Drive trash \(em because a root it cannot list is indistinguishable from a Drive
+whose every file was deleted.
 .TP
 .BI -drive-sweep-mode " mode"
 How the enumeration sweep walks Drive.

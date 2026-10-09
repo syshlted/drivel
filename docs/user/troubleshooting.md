@@ -122,6 +122,16 @@ contacting Google. Check the log for `[sync]` lines that never turn into uploads
 download the whole Drive unless you ask: add `-materialize`, or use
 [`-lazy`](lazy-mode.md), where the whole tree appears as placeholders for free.
 
+**`the configured Drive root "…" names nothing this account can see`.**
+[`-drive-root`](configuration.md#google-drive-settings) (`root` in a config file)
+takes a Drive **folder ID**, not a folder path and not a folder name. The ID is
+the last part of the folder's address in the Drive web UI — open the folder and
+copy the segment after `/folders/` in `drive.google.com/drive/folders/ID`. The
+same message appears for a folder belonging to another account, and there are two
+near relatives of it for a root that names a file rather than a folder, or one
+sitting in the Drive trash. Drivel refuses all four rather than mounting, because
+a root it cannot list looks exactly like a Drive where everything was deleted.
+
 **Copying many files in starts fast, then the filesystem itself slows down.**
 Drivel keeps a queue of pending uploads. A bulk copy of many small files can fill
 it faster than they upload, and once it is full the filesystem waits rather than

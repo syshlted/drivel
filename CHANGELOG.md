@@ -13,6 +13,22 @@ from source with `make build`.
 
 ## Unreleased
 
+### A Drive folder ID that names nothing is now refused, not mounted — 2026-10-09
+
+`-drive-root` (`root` in a config file) takes a Drive **folder ID**. Drive does
+not complain about one that names nothing — it answers a listing scoped to it
+with no results — so a typo, a folder belonging to another account, or a folder
+*path* written where an ID belongs produced a mount that came up, reported
+success and stayed empty. Worse on a later run than a first one: an empty remote
+tree makes every file Drivel has already synced look deleted, with
+`-max-deletes` the only thing in the way.
+
+Drivel now checks the folder the first time it needs it and refuses the mount,
+naming the value you wrote and what it should look like. A root that names a file
+rather than a folder, or a folder in the Drive trash, is refused the same way and
+for the same reason. A root that is merely unreachable for now — no network yet,
+Drive returning a 5xx — is not: that one is retried, as before.
+
 ### Fixed: a Google Drive mount synced nothing after the first hour — 2026-10-09
 
 A Drive mount started, reported `gdrive sync enabled`, and then synced nothing in

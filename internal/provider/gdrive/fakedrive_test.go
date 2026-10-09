@@ -17,6 +17,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"regexp"
 	"sort"
 	"strconv"
@@ -126,6 +127,14 @@ type fakeDrive struct {
 	// that path" — Drive has none either, which is exactly the property the
 	// rename cases are about.
 	changeLog []*drive.Change
+
+	// getFail makes the next N metadata Files.Get requests answer getFailStatus.
+	// It exists for the root lookup: resolving a configured root is one Get, and
+	// the whole question there is whether a failure is remembered — which turns on
+	// "this root is wrong" versus "the link is not up yet", and nothing else in
+	// this fake can produce the second.
+	getFail       int
+	getFailStatus int
 
 	// permID is what about.get reports. Two fakes in one test give different
 	// answers, which is how the persistent index tells the accounts apart (M7).
@@ -245,6 +254,23 @@ func folder(id, name, parent string) *drive.File {
 	return f
 }
 
+// fileIDFrom pulls the fileID out of a single-file path, undoing the escaping
+// that kept it in one segment.
+func fileIDFrom(escaped string) string {
+	seg := reFileID.FindStringSubmatch(escaped)[1]
+	if id, err := url.PathUnescape(seg); err == nil {
+		return id
+	}
+	return seg
+}
+
+// failGets makes the next n metadata Files.Get requests answer status.
+func (f *fakeDrive) failGets(n, status int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.getFail, f.getFailStatus = n, status
+}
+
 func (f *fakeDrive) counts() (gets, lists, creates, deletes int) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -295,6 +321,14 @@ func (f *fakeDrive) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	defer f.mu.Unlock()
 	w.Header().Set("Content-Type", "application/json")
 
+	// The single-file routes match the ESCAPED path, because that is the only
+	// place a fileID containing a slash is still one path segment: net/http
+	// decodes %2F into r.URL.Path, so a root configured with a folder *path*
+	// instead of a folder ID arrives there as /files//passss and matches nothing.
+	// Real Drive receives files/%2Fpassss and answers 404, which is the behaviour
+	// drivel's root check is written against — so the fake has to agree.
+	fileIDPath := r.URL.EscapedPath()
+
 	switch {
 	case r.URL.Path == "/about":
 		writeJSON(w, map[string]any{"user": map[string]string{"permissionId": f.permID}})
@@ -340,8 +374,8 @@ func (f *fakeDrive) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case strings.HasPrefix(r.URL.Path, uploadPath):
 		f.serveUpload(w, r)
 
-	case reFileID.MatchString(r.URL.Path) && r.Method == http.MethodGet:
-		id := f.normalize(reFileID.FindStringSubmatch(r.URL.Path)[1])
+	case reFileID.MatchString(fileIDPath) && r.Method == http.MethodGet:
+		id := f.normalize(fileIDFrom(fileIDPath))
 		got, ok := f.files[id]
 		if !ok {
 			writeErr(w, http.StatusNotFound, "File not found: "+id)
@@ -354,10 +388,15 @@ func (f *fakeDrive) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			_, _ = w.Write(f.content[id])
 			return
 		}
+		if f.getFail > 0 {
+			f.getFail--
+			writeErr(w, f.getFailStatus, "the fake is refusing metadata gets")
+			return
+		}
 		f.gets++
 		writeJSON(w, got)
 
-	case reFileID.MatchString(r.URL.Path) && r.Method == http.MethodPatch:
+	case reFileID.MatchString(fileIDPath) && r.Method == http.MethodPatch:
 		// Metadata-only update. The one shape implemented is the trash flag, which
 		// is how a default removal reaches Drive. A move (addParents/removeParents)
 		// is refused outright rather than half-applied: silently ignoring the
@@ -367,7 +406,7 @@ func (f *fakeDrive) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, http.StatusNotImplemented, "fakeDrive: move is not implemented")
 			return
 		}
-		id := f.normalize(reFileID.FindStringSubmatch(r.URL.Path)[1])
+		id := f.normalize(fileIDFrom(fileIDPath))
 		got, ok := f.files[id]
 		if !ok {
 			writeErr(w, http.StatusNotFound, "File not found: "+id)
@@ -387,9 +426,9 @@ func (f *fakeDrive) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		writeJSON(w, got)
 
-	case reFileID.MatchString(r.URL.Path) && r.Method == http.MethodDelete:
+	case reFileID.MatchString(fileIDPath) && r.Method == http.MethodDelete:
 		f.deletes++
-		delete(f.files, f.normalize(reFileID.FindStringSubmatch(r.URL.Path)[1]))
+		delete(f.files, f.normalize(fileIDFrom(fileIDPath)))
 		w.WriteHeader(http.StatusNoContent)
 
 	default:

@@ -155,6 +155,12 @@ The short form:
   case above).
 - Reconcile pushes go through `Engine.Push`, never straight to the store, so they
   get the same gates, echo recording and retries as a write from the mount.
+- **A sweep must not report an empty tree it cannot vouch for.** `gdrive`
+  therefore errors rather than returning nothing when it cannot resolve its root,
+  and *verifies* a configured root ID before using it — Drive answers a listing
+  scoped to a parent that names nothing with no results, so a typo, a folder from
+  another account, or a folder *path* written where an ID belongs all produce the
+  one shape where every synced path looks remotely deleted.
 - A remote deletion should be **recoverable where the provider can make it so**
   (`gdrive` trashes by default; `delete = "permanent"` opts out). It is the last
   guard behind the four above, not a replacement for any of them — the cap still

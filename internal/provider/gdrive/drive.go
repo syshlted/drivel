@@ -113,8 +113,12 @@ type Drive struct {
 	// not say which mount it came from is close to useless (M8).
 	lg *log.Logger
 
-	mu       sync.Mutex
-	rootID   string            // concrete ID of root, which may be the "root" alias
+	mu     sync.Mutex
+	rootID string // concrete ID of root, which may be the "root" alias
+	// rootErr is a PERMANENT failure to resolve the configured root: an ID that
+	// names nothing, a file, a trashed folder. Held because it can never succeed
+	// and resolution is attempted per change-feed entry; see rootFailedLocked.
+	rootErr  error
 	idByPath map[string]string // root-relative slash path -> fileID ("" => root)
 	pathByID map[string]string // reverse, for resolving change-feed entries
 

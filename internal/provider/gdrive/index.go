@@ -126,23 +126,65 @@ func (d *Drive) identityLocked(ctx context.Context) (string, error) {
 	return about.User.PermissionId + "\x00" + d.rootID, nil
 }
 
-// resolveRootLocked pins the concrete folder ID of our root. The configured root
-// is usually the alias "root", which never appears in a file's parents, so
-// verification needs the real ID to compare against.
+// resolveRootLocked pins the concrete folder ID of our root, and proves that a
+// configured one names a folder this account can actually use.
+//
+// Pinning is the original job: the configured root is usually the alias "root",
+// which never appears in a file's parents, so a comparison needs the real ID.
+//
+// Checking a concrete one is the other half, and the reason is the delete pass.
+// Drive does not refuse a parent ID that names nothing — a typo, a folder from
+// another account, an unlinked folder, or a *path* written where an ID belongs —
+// it answers a listing scoped to it with no results. That is the one sweep shape
+// that is genuinely dangerous (M7b row 4): every previously-synced path then
+// looks remotely deleted, with -max-deletes the only thing standing in the way.
+// On a first run it is quieter and no less wrong — the mount simply stays empty,
+// which reads as "sync is broken" rather than as "this setting is wrong". One
+// request at first use turns all of that into an error naming the value.
+//
+// A file ID and a trashed folder are rejected for the same reason rather than as
+// pedantry: a listing scoped to either is empty too, so they produce the shape
+// above, not a diagnosis.
 func (d *Drive) resolveRootLocked(ctx context.Context) error {
+	if d.rootErr != nil {
+		return d.rootErr
+	}
 	if d.rootID != "" {
 		return nil
 	}
-	if d.root != "" && d.root != "root" {
-		d.rootID = d.root
-		return nil
+	// "root" is Drive's own alias for My Drive. Mounting the whole Drive needs no
+	// check beyond the account having one, which the request itself answers.
+	target, configured := "root", d.root != "" && d.root != "root"
+	if configured {
+		target = d.root
 	}
-	got, err := d.svc.Files.Get("root").Fields("id").Context(ctx).Do()
-	if err != nil {
-		return classify(err)
+	got, err := d.svc.Files.Get(target).Fields("id, mimeType, trashed").Context(ctx).Do()
+	switch {
+	case err != nil && configured && isNotFound(err):
+		return d.rootFailedLocked(fmt.Errorf("the configured Drive root %q names nothing this account can see: root is a Drive folder ID — the last segment of the folder's address in the Drive web UI, drive.google.com/drive/folders/ID — not a folder path and not a folder name", d.root))
+	case err != nil:
+		return d.rootFailedLocked(classify(err))
+	case configured && got.Trashed:
+		return d.rootFailedLocked(fmt.Errorf("the configured Drive root %q is in the Drive trash; restore it, or point root at a folder that is not trashed", d.root))
+	case configured && got.MimeType != folderMIME:
+		return d.rootFailedLocked(fmt.Errorf("the configured Drive root %q is a %s, not a folder; root names the folder that becomes the mount root", d.root, got.MimeType))
 	}
 	d.rootID = got.Id
 	return nil
+}
+
+// rootFailedLocked returns err, remembering it when it can never succeed.
+//
+// Caching matters because resolution is attempted from six places, one of them
+// per change-feed entry: a root ID that will 404 forever would otherwise re-ask
+// Drive, and re-log, for every change and every sweep page. A retryable failure
+// — no network yet, a 5xx — is deliberately NOT remembered, so a mount that
+// started before its link came up still recovers on its own.
+func (d *Drive) rootFailedLocked(err error) error {
+	if !provider.IsRetryable(err) {
+		d.rootErr = err
+	}
+	return err
 }
 
 // isRootID reports whether id names our mount root, under either spelling.

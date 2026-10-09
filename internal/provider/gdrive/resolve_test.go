@@ -6,12 +6,15 @@
 package gdrive
 
 import (
+	"net/http"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	drive "google.golang.org/api/drive/v3"
 
 	"github.com/syshlted/drivel/internal/pathindex"
+	"github.com/syshlted/drivel/provider"
 )
 
 // withIndex attaches a persistent index backed by a temp file.
@@ -404,9 +407,14 @@ func TestIndexBindsToAccountAndRoot(t *testing.T) {
 	}
 
 	// Same DB, same account, a different -drive-root: the mappings are meaningless
-	// there and must not be reused.
-	other, _ := newFakeDrive(t, file("id-f", "f.txt", fakeRootID))
-	other.root = "some-other-folder"
+	// there and must not be reused. The second root has to be a folder that really
+	// exists, because resolving a configured root now verifies it — see
+	// resolveRootLocked for why an ID that names nothing cannot be allowed through.
+	other, _ := newFakeDrive(t,
+		file("id-f", "f.txt", fakeRootID),
+		folder("id-other", "other", fakeRootID),
+	)
+	other.root = "id-other"
 	other.idx = idx
 	other.mu.Lock()
 	reboundIdx := other.indexLocked(ctx)
@@ -451,5 +459,66 @@ func TestPathForIDRecognisesTheRootUnderItsRealID(t *testing.T) {
 	d.mu.Unlock()
 	if !ok || p != "top.txt" {
 		t.Fatalf("pathForID(top-level file) = %q, %v; want top.txt, true", p, ok)
+	}
+}
+
+// A configured root that is not a usable folder has to be refused, and the
+// reason is the sweep rather than tidiness: Drive answers a listing scoped to a
+// parent ID that names nothing with no results, so the mount enumerates an empty
+// tree. On a first run that looks like a mount that does not work; on a later one
+// every synced path looks remotely deleted and -max-deletes is all that is left
+// between the mistake and the files.
+func TestEnumerateRefusesARootThatIsNotAUsableFolder(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		root string
+		want string
+	}{
+		{"absent", "no-such-folder", "names nothing this account can see"},
+		{"a path written as an ID", "/passss", "names nothing this account can see"},
+		{"a file", "id-f", "not a folder"},
+		{"trashed", "id-gone", "in the Drive trash"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			trashed := folder("id-gone", "gone", fakeRootID)
+			trashed.Trashed = true
+			d, _ := newFakeDrive(t, file("id-f", "f.txt", fakeRootID), trashed)
+			d.root = tc.root
+
+			_, _, err := d.Enumerate(ctx, "")
+			if err == nil {
+				t.Fatal("Enumerate succeeded; an unusable root must fail rather than report an empty tree")
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("error = %v, want it to say %q", err, tc.want)
+			}
+			// The value the user wrote has to appear, or the message cannot be acted
+			// on: the setting is in a config file this process never names.
+			if !strings.Contains(err.Error(), tc.root) {
+				t.Errorf("error = %v, want it to name the configured root %q", err, tc.root)
+			}
+			if provider.IsRetryable(err) {
+				t.Errorf("a misconfigured root reported itself retryable: %v", err)
+			}
+		})
+	}
+}
+
+// A root that cannot be reached *yet* is a different case from one that is
+// wrong, and must not be cached: a mount can legitimately start before its
+// network does.
+func TestARootResolutionFailureIsOnlyRememberedWhenPermanent(t *testing.T) {
+	d, fake := newFakeDrive(t, folder("id-sub", "sub", fakeRootID))
+	d.root = "id-sub"
+
+	fake.failGets(1, http.StatusServiceUnavailable)
+	if _, _, err := d.Enumerate(ctx, ""); err == nil {
+		t.Fatal("Enumerate succeeded while the remote was refusing")
+	} else if !provider.IsRetryable(err) {
+		t.Fatalf("a 503 on the root lookup was not retryable: %v", err)
+	}
+
+	if _, _, err := d.Enumerate(ctx, ""); err != nil {
+		t.Fatalf("the transient failure was remembered; a recovered remote still failed: %v", err)
 	}
 }
