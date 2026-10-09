@@ -8,7 +8,7 @@ SHELL := /usr/bin/env bash
 BIN   := $(CURDIR)/bin
 
 # Pinned tool versions. Bump here; local hooks and CI follow automatically.
-GOLANGCI_LINT_VERSION ?= v2.13.2
+GOLANGCI_LINT_VERSION ?= v2.14.0
 GOVULNCHECK_VERSION   ?= v1.7.0
 
 # The plugin protocol's codegen (M9). All three are pure Go and install with `go
