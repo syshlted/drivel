@@ -748,7 +748,10 @@ iterations per second under `-race`, instead of one instance per thousand files 
 1.18 s each. Chase it there. Keep MC-11 as the burst-throughput, quota and
 DB-growth measurement it is specified to be, and let its upload-count ratio be a
 corroborating observation rather than the experiment.
-6. **Failure injection — Group V done except MC-40 and MC-44.** Five of the eight
+6. **Failure injection — Group V done except MC-40 and MC-44**, and those two
+   wait on DESIGN.md §9/M27 (queued 2026-10-12), because the group's own finding
+   below is what M27 exists to fix: running MC-40 before it would measure a loss
+   the product is already known to forget. Five of the eight
    cases are in `internal/app/failure_test.go` (MC-41, MC-43 in two shapes,
    MC-44b, MC-46) with MC-45 answered from the code and MC-42 answered below the
    seam. **MC-47 ran for real on 2026-10-10** — two `drivel` processes over a local
@@ -787,7 +790,10 @@ corroborating observation rather than the experiment.
    question this exercise is now entitled to ask, and the answer is not obviously
    yes: a sweep is the most expensive thing the system does and the most dangerous
    (MC-25, MC-53), so triggering one from a transient failure trades a known small
-   loss for an unknown large cost.
+   loss for an unknown large cost. **DESIGN.md §9/M27 part 2 is where that question
+   now lives**, and it keeps this paragraph's objection: none of the three options
+   it weighs starts a sweep on the spot — they re-arm the next one, or record what
+   it owes, which buys the repair without buying the risk.
 
    **A lazy peer is invisible to the fleet's convergence check**, because the check
    hashes the backing tree and a placeholder holds zeros. Nothing is wrong with
@@ -805,6 +811,35 @@ corroborating observation rather than the experiment.
    it governs *everything* inbound, forever. `docs/user/sftp.md` said nothing about
    it; it does now. Worth carrying into M19–M21, which inherit the same shape.
 7. **Resource and soak**: Group VI, last, because MC-53 wants a stable build.
+
+   **The load is wall clock and storage, not API quota**, which is worth settling
+   before the rig is rebuilt for it. Scaling from MC-11's measured 1.09 uploads/s:
+   MC-52's 100 000 files is ~25h of uploading on the writer plus 100 000 downloads
+   on each puller, and enumeration lists the *account* so a cold sweep is ~100+
+   list requests at 1000 objects a page; MC-53 is three clients at ~1 op/10s ≈ 26k
+   ops/day ≈ 78k requests, plus ~700 sweeps per client at `sweep-interval = 2m`.
+   Peak request rate stays around 1–3/s throughout, and **MC-11 recorded zero 403s
+   at that rate** — a single writer cannot burst past ~1 request/s, which is why
+   the quota hunt moved to MC-36/MC-51 in the first place. Read the current
+   per-project limit off the Cloud console rather than trusting a number here, but
+   nothing in this group approaches it.
+
+   **A fresh Cloud project and OAuth client is not required, and is still worth
+   having — for measurement, not capacity.** MC-50 and MC-51 both ask for Drive
+   requests per minute, which the console reports *per project*, directly, instead
+   of inferring it from drivel's logs; and MC-51 is specifically trying to find the
+   N where 403s start, which is a per-user/per-project limit, so sharing a project
+   with a personal dogfood mount means measuring both and racing your own traffic.
+   The rig's existing OAuth client is fine for the identities themselves — a fourth
+   client for MC-52 is `drivel login -account c4` against the same app.
+
+   Two constraints a new API key does nothing about. **Storage quota is per Google
+   account, not per project** — and §2.1's note matters here, because `Remove`
+   trashes by default and trashed objects keep counting until the trash is emptied,
+   so empty it between runs rather than at the end. And MC-11's finding stands:
+   enumeration scales with the account, so 100 000 objects left behind taxes every
+   later scenario's startup. Delete each scenario's folder once its results are
+   recorded.
 
 **Exit criteria.** Every case in Groups I–IV either passes or has a filed issue
 with a Tier A regression test reproducing it; §3's log-derived counters are

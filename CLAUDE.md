@@ -430,6 +430,29 @@ below for why the backing file is opened readable regardless.
 
 Independent of M9, nothing waits on either.
 
+**M27** the sync path's two silences — **next in line** (queued 2026-10-12), not
+started. Both halves are cases of the engine doing the right thing and telling
+nobody, and DESIGN.md §9/M27 has the reasoning. **Back-pressure is invisible**:
+the outbound path is bounded at 1024 (`eventBuffer`) + workers × 64 = 1280 events
+at the defaults, past which `dispatch` waits on a full worker queue, the coalescer
+stops reading `events`, and `vfs.node.emit` blocks the FUSE handler — MC-11
+measured a 1286 backlog against that 1280. The bound is correct and stays; what is
+missing is a line on entering and leaving saturation, measured **where the
+blocking happens** (a depth sampled in `emit` cannot tell a full queue from a slow
+provider), rate-limited on the state *transition* rather than on time, and not
+arriving as a verbosity knob (M25 rule 1). **And an abandoned push is forgotten
+rather than merely abandoned**: `executeWithRetry` drops the event after
+`max: 5`/~7.5s of backoff — or after *one* attempt when the error is
+non-retryable — and nothing marks the path, counts it or schedules the repair,
+which then waits for `-sweep-interval` (24h on Drive, disabled at `0`). Decided:
+do not raise `max`, do not build a persistent outbound queue, and **do not start a
+sweep on the spot** — the options are to re-arm the next sweep or record what it
+owes, which is what keeps the test plan's "a sweep is the most expensive and most
+dangerous thing we do" objection intact. The tempting wrong reading is that five
+transient failures mean something systemic and therefore bound the damage: 7.5s is
+a wifi handoff, and if it *is* systemic then every push in flight and every one
+arriving during the outage is dropped the same way.
+
 **M14** control & status API — a unix socket (`internal/control`, HTTP/JSON,
 `/v1/…`) so third-party tools can read per-path sync status and per-backend stats,
 pause/resume a mount, see whether a backend is reachable, and stop the process,
@@ -834,11 +857,22 @@ V, failure and degradation** (`internal/app/failure_test.go` over the per-peer f
 injection in `faultstore_test.go`): MC-41, MC-43, MC-44b and MC-46 run in-process,
 MC-45's premise turned out not to hold, **MC-47 ran for real on 2026-10-10 over two
 processes and a local sshd** (see M8 rule 2), and only MC-40/MC-44 are left, Tier B
-by mechanism rather than by scheduling. Three of its findings are products of
+by mechanism rather than by scheduling — **and now gated on M27**, since the finding
+below is what M27 fixes and MC-40 would otherwise measure a loss the product is
+already known to forget. Three of its findings are products of
 running it and not of the plan: an **abandoned push and a failed download are both
 repaired only by a sweep**, which `-sweep-interval 0` disables; the shutdown gap in
 M8 rule 1 above; and **an eager SFTP mount without `-materialize` never receives
 anything** (SFTP rule 2).
+
+**The queue is M27, then Group V's remaining two, then Group IV, then Group VI**
+(§5 of the test plan is the authority and carries the Group VI load estimate). Two
+things about that order are worth keeping: Group V is nearly finished rather than
+nearly started, so what looks like a group is two cases; and Group VI's constraint
+is wall clock and storage quota, **not** API rate — MC-11 recorded zero 403s at
+1.09 uploads/s, a single writer cannot burst past ~1 request/s, and storage is
+per Google *account*, so a fresh Cloud project buys per-project request
+attribution for MC-50/MC-51 and nothing else.
 
 Five rules the last rounds left behind. **A commit budget is a disk-cost
 regression gate, and the mistakes it catches are invisible otherwise**: the two

@@ -4278,6 +4278,97 @@ this whole group walks through, so it is a precondition rather than a note.
     confidential by Google's own account and protecting it would imply
     otherwise.
 
+29. **M27 — The sync path's two silences.** **Next in line** (queued 2026-10-12),
+    not started. Two defects that are not bugs in what the engine *does* — it
+    behaves correctly both times — but in what it tells the person depending on
+    it. They are one milestone because the shape of the fix is the same in each:
+    the engine already holds the fact and discards it.
+
+    **Part 1 — back-pressure is invisible.** The outbound path is bounded in two
+    places, and at the defaults the bound is 1280 events: `eventBuffer` (1024,
+    `internal/app/mount.go`) plus `DefaultWorkers` × the 64-slot per-worker queue
+    (`engine.go`). Past it the mount blocks, in this order — `dispatch` sends into
+    a path-hashed worker queue and waits when that queue is full, which stops the
+    coalescer goroutine reading `events`; `events` then fills, and `vfs.node.emit`
+    blocks the FUSE handler that is trying to report a close. MC-11 measured a
+    1286-deep backlog against that 1280, which is exactly this: the queues full
+    and a `write(2)` waiting on Drive.
+
+    **That is correct and must not be removed.** Dropping an event loses a file
+    until a sweep; a larger buffer only defers the stall and lengthens the bounded
+    drain at unmount. What is wrong is that **nothing in the log says it is
+    happening**, so `tar -x` into a mount runs at the provider's upload rate —
+    1.09 uploads/s, measured on Drive — and the only available conclusion is that
+    drivel is broken. Correct back-pressure, invisible to the one person
+    experiencing it.
+
+    The fix is a line on *entering* and *leaving* saturation, naming the depth and
+    the settings that govern it (`-upload-workers`, `-push-delay`), rate-limited
+    so a two-hour copy logs twice rather than ten thousand times. Three things are
+    load-bearing. It must be measured **where the blocking happens**, not where
+    the event was created: a depth sampled in `emit` cannot tell a full worker
+    queue from a slow provider, and those want different advice. The rate limit is
+    on the **state transition**, not on time — "entered saturation at depth N",
+    "left it after T" — because a periodic depth report is M14's job and not a log
+    line's. And it must not arrive as a verbosity knob: M25's first rule is that
+    `-debug` is go-fuse's FUSE protocol trace and must never come to mean two
+    things.
+
+    This is the measurement M14 would report and M25 would format, and it waits
+    for neither — the line is the fact; an API and a level are presentations of it.
+
+    **Part 2 — an abandoned push is forgotten, not merely abandoned.**
+    `executeWithRetry` logs `[sync] push … failed after N attempt(s)` and returns,
+    which **drops the event**. Two paths reach that branch and the second is the
+    one that surprises: `attempt >= e.retry.max` after
+    `defaultRetry{max: 5, base: 500ms, cap: 30s}` — about 7.5s of jittered backoff
+    — and `!provider.IsRetryable(err)`, which drops on the **first attempt with no
+    retry at all**.
+
+    Giving up is right. Retrying a permission error forever is a spin, and an
+    unbounded persistent outbound queue is a second durability surface over the one
+    §12 already prices. **What is wrong is that the knowledge goes with it**:
+    nothing marks the path, nothing counts it, nothing schedules the repair. The
+    repair already exists — M7b's local walk re-pushes a file that diverged from
+    its baseline — but it is never *told*, so recovery waits for
+    `-sweep-interval`, whose Drive default is 24h and which `0` disables outright.
+
+    **A systemic cause does not bound the loss to one file**, which is the
+    tempting reading and the wrong one. Five consecutive transient failures do
+    usually mean something larger than the push — but 7.5s is short enough to be a
+    wifi handoff or a laptop resume, and if the cause really is systemic then every
+    push in flight and every one arriving during the outage is dropped the same
+    way. A copy crossing a 60-second outage loses the whole burst, and the engine
+    goes on accepting events as though nothing had happened.
+
+    Two things are decided. **Do not raise `max`** — more attempts trade a silent
+    loss for a longer stall and leave the forgetting untouched. **Do not build a
+    persistent outbound queue** — the point is to re-arm the existing repair, not
+    to invent a second one. What is left is a choice of three, in increasing cost:
+    abandonment sets a flag that makes the next sweep unconditional, so
+    `-sweep-interval` stops being the only trigger; or the path is recorded in
+    `internal/state` as owed and the sweep's walk consults it; or both, with a
+    count in the sweep summary. The first alone is one key and one bool and is
+    enough to make an abandoned push *recoverable*; the second is what buys
+    repairing one path without polling a whole tree, which is what a sweep costs on
+    a feedless backend (M18 rule 2).
+
+    **None of the three starts a sweep on the spot, and that is deliberate.** The
+    multiclient plan's Group V write-up reaches the same question from the failure
+    side and declines the obvious answer for a good reason: a sweep is the most
+    expensive thing the system does and the most dangerous (MC-25, MC-53), so
+    firing one off a transient failure trades a known small loss for an unknown
+    large cost. Re-arming the *next* sweep, or recording what that sweep owes, buys
+    the repair without buying the risk — which is why the distinction between
+    "schedule a sweep" and "make sure the next one covers this" is the whole design,
+    not a detail of it.
+
+    Unsettled: whether an abandoned push is also a per-path status through M14,
+    where `unknown` as a first-class status already points; and whether
+    `-sweep-interval 0` should honour an abandonment-triggered sweep anyway — the
+    recommendation is **yes**, because `0` means "do not poll", not "never repair".
+
+
 
 ### M0 — Test & CI (cross-cutting, always open)
 
