@@ -13,6 +13,56 @@ from source with `make build`.
 
 ## Unreleased
 
+### Re-syncing a file writes a third as much to your disk — 2026-10-10
+
+Drivel keeps two small bookkeeping databases per mount: what it has already
+synced, and (for Google Drive) which remote object each path refers to. Both are
+written safely — every update is flushed to disk before it is acknowledged — and
+that safety has a cost, because flushing rewrites a few pages of the database each
+time, whatever the size of the record. On a large tree that adds up.
+
+It turned out that updating a file that already existed stored the same
+path-to-object mapping twice over, byte for byte, having already stored it in an
+earlier session. Checking first costs nothing — reading a database does not write
+to it — so Drivel now checks. Updating an existing file went from three database
+writes to one, and starting up against an existing index went from two per path to
+none. Nothing about how safely the data is written has changed.
+
+Creating a *new* file still costs the same, because the mapping it records really
+is new; this is about the repeated writes, not the first one.
+
+You are unlikely to notice it in sync speed, since transfers are limited by the
+network rather than the disk. It matters for SSD wear on large trees, and it will
+matter for speed on faster storage backends later.
+
+### Fixed: a damaged sync database no longer stops Drivel from starting — 2026-10-10
+
+If the file recording what Drivel had already synced became unreadable — a power
+cut at the wrong moment, a failing disk — Drivel refused to mount at all, and the
+only way out was to find the file and delete it by hand. For a mount that comes up
+at boot from `/etc/fstab`, there is nobody to do that.
+
+Drivel now moves the damaged file aside (adding `.corrupt` to its name, so you can
+still look at it) and starts with an empty one, saying so clearly in its log. It
+can do this safely because an empty database is a state it already knows how to
+handle: it is the same situation as a brand-new mount, and **a brand-new mount
+never deletes anything** — without a record of what was synced before, Drivel
+treats every file it finds as new rather than as deleted.
+
+What you will see afterwards: Drivel re-examines the whole remote tree, which
+takes as long as a first sync, and any file that differs between your computer and
+the remote gets a conflict copy alongside it, because with no history there is no
+way to tell which side changed. Lazily-hydrated files are unaffected — what marks
+one is stored on the file itself, not in this database.
+
+The index of which remote object each path refers to is treated the same way, and
+there it has no consequences at all: every entry is re-checked against the remote
+before it is used, so a fresh one costs a few extra lookups. Previously Drivel
+carried on without it for as long as that mount stayed up.
+
+A database that cannot be opened for any other reason behaves as before. In
+particular, one already in use by another Drivel process is never touched.
+
 ### Fixed: unmounting could cut a sync short instead of letting it finish — 2026-10-09
 
 Drivel's two sync directions are not symmetrical on shutdown. The outbound half

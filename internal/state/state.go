@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"sync/atomic"
 	"time"
 
 	bolt "go.etcd.io/bbolt"
@@ -106,29 +107,126 @@ var boltOptions = &bolt.Options{
 // Store is the bbolt-backed sync-state store.
 type Store struct {
 	db *bolt.DB
+
+	// commits counts write transactions. See update.
+	commits atomic.Uint64
+
+	// recovered records that Open replaced an unreadable file. See Recovered.
+	recovered string
 }
+
+// CorruptSuffix is appended to the path of a state DB that Open could not read
+// and had to replace. Only the most recent one is kept.
+const CorruptSuffix = ".corrupt"
 
 // Open opens (creating if needed) the state DB at path and ensures its buckets
 // exist. Callers must Close it.
+//
+// A file bbolt cannot read at all is moved aside and replaced with an empty one.
+// That is a deliberate reversal of the previous behaviour, which failed and took
+// the whole mount down with it, and it is safe for a specific reason rather than
+// as a convenience: **an empty state store is a state this design already
+// defines.** M7b infers a deletion only from a baseline, so no baseline means the
+// path is new on whichever side it is found and nothing is deleted; M5's
+// placeholder marker is an xattr on the backing file, so no placeholder becomes
+// an empty file either; and the hydration bitmaps are a cache. With no cursor the
+// downloader enumerates the whole tree before tailing it, which is precisely the
+// reconstruction that is wanted.
+//
+// What it costs is a full re-sync's worth of requests, and a §6 conflict copy for
+// every path whose local and remote copies genuinely differ — which, with no
+// baseline to say which side moved, is the correct answer rather than a
+// side effect.
+//
+// Refusing instead protects nothing: the file is already unreadable, so there is
+// no state left to preserve, and the operator's only recourse was to delete it by
+// hand — this, with downtime, and without keeping a copy to look at. An
+// unattended boot mount (M16) has nobody to do even that.
 func Open(path string) (*Store, error) {
-	db, err := bolt.Open(path, 0o600, boltOptions)
+	db, aside, err := openOrReplace(path)
 	if err != nil {
-		return nil, fmt.Errorf("open state db %s: %w", path, err)
+		return nil, err
 	}
-	err = db.Update(func(tx *bolt.Tx) error {
+	s := &Store{db: db, recovered: aside}
+	// Through s.update, not db.Update, so Commits() counts every commit this store
+	// has made rather than every one after the first.
+	if err := s.update(func(tx *bolt.Tx) error {
 		for _, b := range [][]byte{bucketCursor, bucketEcho, bucketHydration, bucketSweep, bucketSeen} {
 			if _, err := tx.CreateBucketIfNotExists(b); err != nil {
 				return err
 			}
 		}
 		return nil
-	})
-	if err != nil {
+	}); err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("init state buckets: %w", err)
 	}
-	return &Store{db: db}, nil
+	return s, nil
 }
+
+// Recovered names the file Open moved aside, or "" if the store opened normally.
+// The caller logs it: this package has no logger, and the message belongs to the
+// mount whose state was discarded.
+func (s *Store) Recovered() string { return s.recovered }
+
+// openOrReplace opens path, replacing it if and only if bbolt reports that it is
+// not a readable database. It returns the path the old file was moved to.
+func openOrReplace(path string) (*bolt.DB, string, error) {
+	db, err := bolt.Open(path, 0o600, boltOptions)
+	if err == nil {
+		return db, "", nil
+	}
+	if !unreadable(err) {
+		return nil, "", fmt.Errorf("open state db %s: %w", path, err)
+	}
+	aside := path + CorruptSuffix
+	if rerr := os.Rename(path, aside); rerr != nil {
+		return nil, "", fmt.Errorf("open state db %s: %w (moving it aside failed: %w)", path, err, rerr)
+	}
+	db, oerr := bolt.Open(path, 0o600, boltOptions)
+	if oerr != nil {
+		return nil, "", fmt.Errorf("replacing unreadable state db %s: %w", path, oerr)
+	}
+	return db, aside, nil
+}
+
+// unreadable reports whether err means the file is not a bbolt database we can
+// read, as against any of the other reasons an open fails.
+//
+// Narrowing it to these three is the whole safety of the replacement above, and
+// ErrTimeout is the one that must never be included: it means another process
+// holds the file lock. app.Validate refuses two mounts sharing a state DB, but a
+// hand-written command line still reaches it, and moving *that* file aside would
+// discard a live mount's state from underneath it.
+func unreadable(err error) bool {
+	return errors.Is(err, bolterrors.ErrInvalid) ||
+		errors.Is(err, bolterrors.ErrVersionMismatch) ||
+		errors.Is(err, bolterrors.ErrChecksum)
+}
+
+// update runs fn in a write transaction and counts the commit.
+//
+// The count exists because a bbolt commit is the unit of disk cost here, and it
+// is a much larger unit than it looks: a commit fdatasyncs twice (once for the
+// data pages, once for the meta page that makes them reachable) and so rewrites
+// every page it touched, measured at ~36 KB on a 10k-entry DB regardless of how
+// small the key and value are, and flat as the DB grows. "Commits per synced
+// file" is therefore the number that decides what a sync costs on disk — and it
+// is deterministic, where a byte count depends on the filesystem underneath.
+// That makes it the thing a regression test can pin; see
+// syncengine's TestPushCommitsPerFile.
+//
+// It is not test-only scaffolding: M14's per-backend stats wants this number too.
+func (s *Store) update(fn func(*bolt.Tx) error) error {
+	if err := s.db.Update(fn); err != nil {
+		return err
+	}
+	s.commits.Add(1)
+	return nil
+}
+
+// Commits reports how many write transactions this store has committed.
+func (s *Store) Commits() uint64 { return s.commits.Load() }
 
 // Close flushes and closes the DB.
 func (s *Store) Close() error { return s.db.Close() }
@@ -148,7 +246,7 @@ func (s *Store) Cursor() (cursor string, ok bool, err error) {
 
 // SetCursor persists the cursor to resume from next poll.
 func (s *Store) SetCursor(cursor string) error {
-	return s.db.Update(func(tx *bolt.Tx) error {
+	return s.update(func(tx *bolt.Tx) error {
 		return tx.Bucket(bucketCursor).Put(keyCursor, []byte(cursor))
 	})
 }
@@ -177,14 +275,14 @@ func (s *Store) SetEcho(path string, e Echo) error {
 	if err != nil {
 		return err
 	}
-	return s.db.Update(func(tx *bolt.Tx) error {
+	return s.update(func(tx *bolt.Tx) error {
 		return tx.Bucket(bucketEcho).Put([]byte(path), v)
 	})
 }
 
 // DeleteEcho drops the echo record for path (e.g. after the object is removed).
 func (s *Store) DeleteEcho(path string) error {
-	return s.db.Update(func(tx *bolt.Tx) error {
+	return s.update(func(tx *bolt.Tx) error {
 		return tx.Bucket(bucketEcho).Delete([]byte(path))
 	})
 }
@@ -212,7 +310,7 @@ func (s *Store) ForgetMany(paths []string) error {
 	if len(paths) == 0 {
 		return nil
 	}
-	return s.db.Update(func(tx *bolt.Tx) error {
+	return s.update(func(tx *bolt.Tx) error {
 		echo, hydration := tx.Bucket(bucketEcho), tx.Bucket(bucketHydration)
 		for _, p := range paths {
 			k := []byte(p)
@@ -252,14 +350,14 @@ func (s *Store) Hydration(path string) (v []byte, ok bool, err error) {
 
 // SetHydration stores the range bitmap for path.
 func (s *Store) SetHydration(path string, v []byte) error {
-	return s.db.Update(func(tx *bolt.Tx) error {
+	return s.update(func(tx *bolt.Tx) error {
 		return tx.Bucket(bucketHydration).Put([]byte(path), v)
 	})
 }
 
 // DeleteHydration drops the range bitmap for path (fully hydrated, or removed).
 func (s *Store) DeleteHydration(path string) error {
-	return s.db.Update(func(tx *bolt.Tx) error {
+	return s.update(func(tx *bolt.Tx) error {
 		return tx.Bucket(bucketHydration).Delete([]byte(path))
 	})
 }
@@ -309,7 +407,7 @@ func (s *Store) SetSweep(sw Sweep) error {
 	if err != nil {
 		return err
 	}
-	return s.db.Update(func(tx *bolt.Tx) error {
+	return s.update(func(tx *bolt.Tx) error {
 		return tx.Bucket(bucketSweep).Put(keySweep, v)
 	})
 }
@@ -327,7 +425,7 @@ func (s *Store) FinishSweep(done time.Time) error {
 	if err != nil {
 		return err
 	}
-	return s.db.Update(func(tx *bolt.Tx) error {
+	return s.update(func(tx *bolt.Tx) error {
 		sweep := tx.Bucket(bucketSweep)
 		if err := sweep.Delete(keySweep); err != nil {
 			return err
@@ -380,7 +478,7 @@ func (s *Store) MarkSeen(gen string, paths []string) error {
 	if gen == "" || len(paths) == 0 {
 		return nil
 	}
-	return s.db.Update(func(tx *bolt.Tx) error {
+	return s.update(func(tx *bolt.Tx) error {
 		b := tx.Bucket(bucketSeen)
 		for _, p := range paths {
 			if err := b.Put(seenKey(gen, p), []byte{1}); err != nil {

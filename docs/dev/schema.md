@@ -183,3 +183,58 @@ is free to have moved, renamed, replaced or trashed that object since — the ID
 still resolves, just to the wrong file. `verifyLocked` re-checks name, parent and
 not-trashed before an entry is believed, and a failed directory drops its whole
 subtree. That check is the price of persistence, not an optimisation to remove.
+
+## Durability, and what losing either file costs
+
+Both files are written with bbolt's default durability: every write transaction
+fdatasyncs twice, once for the data pages and once for the meta page that makes
+them reachable. Nothing is buffered, and no write is acknowledged before it is on
+disk.
+
+That is a deliberate position rather than a default nobody looked at, because it
+is not free. A commit rewrites every page it touched — measured at **~36 KB on a
+10 000-entry DB regardless of how small the record is, and flat as the DB grows** —
+so disk cost is *commits × a constant*, and the fsyncs are essentially all of it
+(opening with `NoSync` and syncing after every commit reproduces the same total;
+removing the syncs leaves 1.5% of the bytes). `DESIGN.md §12` has the measurements,
+the reason group commit is not used, and what would have to be true to change that.
+
+The practical rule for anyone adding a store write: **count the commits on a
+per-file path.** `state.Store.Commits` and `pathindex.Store.Commits` report them,
+and `TestPushCommitsPerFile` in `internal/syncengine` pins the budget at one
+commit per pushed file. Redundant index writes were removed by comparing before
+writing, in a read transaction — bbolt advances the meta page on every commit
+whether a data page changed or not, so re-storing a byte-identical value costs a
+full commit while a `View` costs nothing. Re-pushing a file went from three
+commits to one; creating a new one still costs two, because its path↔ID mapping
+genuinely is new.
+
+**Losing either file is recoverable, and the two are recoverable for different
+reasons.**
+
+| | what is lost | what happens next | what it costs |
+|---|---|---|---|
+| `drivel-index.db` | path↔fileID hints | an unknown path falls through to a `files.list` name query, which is the authority anyway | latency and API quota |
+| `drivel-state.db` | cursor, §4 echoes, hydration bitmaps, sweep marks | no cursor means the downloader enumerates the whole tree before tailing it | a full re-sync's requests, and a §6 conflict copy per genuinely divergent path |
+| either, unreadable | as above | the file is renamed `.corrupt` and an empty one takes its place | as above, plus a line in the log |
+
+Neither loses data, and the state DB's case rests on a specific rule: M7b infers a
+deletion **only** from a baseline, so a store with no echoes reads every path as
+new on whichever side it is found and deletes nothing — the first-ever-run rule.
+M5's placeholder marker is an xattr on the backing file, not a row here, so no
+placeholder turns into an empty file either.
+
+Because of that, **a database bbolt cannot read is moved aside and replaced** —
+renamed with a `.corrupt` suffix, only the most recent one kept. For the state DB
+that replaces failing the mount, which protected nothing (the file is already
+unreadable) and left an unattended fstab mount with nobody to delete it by hand;
+the mount logs it loudly, because the re-enumeration and conflict copies that
+follow are visible and would otherwise look like a bug. For the index it replaces
+running from memory, which was correct but permanent for the life of the process,
+so one bad write cost every later session a cold index; that one logs briefly,
+because nothing follows but name lookups.
+
+A file that fails to open for any *other* reason is unchanged — fatal for state,
+run-from-memory for the index. In particular **a lock held by another process is
+never treated as corruption**, since replacing that file would pull the database
+out from under a running mount.

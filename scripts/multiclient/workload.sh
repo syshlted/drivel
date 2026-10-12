@@ -22,12 +22,22 @@ shift 2
 case $case_name in
   many)
     n=${1:-10000}
+    # 4 KiB apiece, which is what MC-11 specifies. This wrote ~19-byte files until
+    # 2026-10-10, and the recorded run's "190 KB of content" is that: it made the
+    # case's write-amplification ratio a function of the rig rather than of the
+    # product (see the plan, §4.17).
+    #
+    # The pad is built once — 10 000 subshells to generate it per file is slower
+    # than the uploads. The per-file header keeps every file's content distinct, so
+    # nothing downstream can make the transfer cheaper than the case measures.
+    pad=$(head -c 4096 /dev/zero | tr '\0' x)
     for i in $(seq 1 "$n"); do
       d=$dir/many/$(printf '%02d' $((i % 100)))
       mkdir -p "$d"
-      printf 'file %d of %d\n' "$i" "$n" > "$d/f$i.txt"
+      hdr=$(printf 'file %d of %d\n' "$i" "$n")
+      printf '%s%s' "$hdr" "${pad:${#hdr}}" > "$d/f$i.txt"
     done
-    echo "wrote $n files under $dir/many"
+    echo "wrote $n files of 4 KiB under $dir/many"
     ;;
 
   large)

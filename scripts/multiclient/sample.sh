@@ -11,6 +11,15 @@
 #                     shows up here and nowhere else
 #   fds / threads     handle leaks under the M6 write capture, go-fuse pool growth
 #
+# SINCE M9 A CLIENT IS TWO PROCESSES. The host holds the mount, the engine and the
+# state DB; the backend runs as a child (`drivel plugin-serve <kind>`) and holds
+# the path index. Sampling only the host therefore under-reports disk and CPU by
+# the backend's whole share — which is how MC-11's write-amplification figure came
+# to be attributed to one process. Pass both:
+#
+#   host=$(pgrep -f 'config rig/c1')
+#   sample.sh "$host:c1" "$(pgrep -P "$host" -f plugin-serve):c1-backend"
+#
 # Goroutines and heap need in-process instrumentation: start each client with its
 # own -pprof port and scrape /debug/pprof alongside this. See README.md.
 set -euo pipefail
@@ -21,8 +30,8 @@ while getopts ":i:o:h" opt; do
   case $opt in
     i) interval=$OPTARG ;;
     o) out=$OPTARG ;;
-    h) sed -n '2,18p' "$0"; exit 0 ;;
-    *) sed -n '2,18p' "$0"; exit 2 ;;
+    h) sed -n '2,24p' "$0"; exit 0 ;;
+    *) sed -n '2,24p' "$0"; exit 2 ;;
   esac
 done
 shift $((OPTIND - 1))

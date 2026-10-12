@@ -360,7 +360,7 @@ is not worth its wall-clock.
 |---|---|---|---|
 | **MC-10** | 1 GiB then 5 GiB of random data written on A. | Byte-identical on all three + oracle. **Peak RSS must not scale with file size** — uploads and downloads stream. | A buffering regression that OOMs a fleet on one big file. Also exercises resumable chunking with `ChunkTransferTimeout` unset. |
 | **MC-10b** | While A is still uploading the 5 GiB file, poll for it on B and C. | The file is either absent or complete — never short and never mid-write. Hash any snapshot that appears. | The atomic temp-file + rename in `Downloader.download`; a partial file served as content is silent corruption. |
-| **MC-11** | 10 000 × 4 KiB files across 100 directories, created on A. | All three converge. Record: wall clock, API request count, 403/retry count, peak RSS, state DB and index DB size per client. **PASS live** (§5): 10 000 uploads, 10 000 downloads each on c2/c3, 0 conflicts, 0 duplicates, 0 abandoned pushes, **0 403s**; 2 h 32 m at a flat 1.09 uploads/s, converging 6.9 s after the last upload; peak RSS 112 MB on the writer and 39 MB on each puller; both DBs 32 KiB → 4 MiB (~416 B/entry). A cold oracle rebuilt the same tree from `Enumerate` and agrees. Four findings the case did not predict: **the FUSE write path blocks at the upload rate** once a burst exceeds the 1024-slot buffer plus 4 × 64 worker queues (measured backlog 1286 against a capacity of 1280, so `tar -x` runs at Drive's upload rate and nothing says why); **write amplification ≈ 6000×** (190 KB of content, 1175 MB to disk) from per-operation bbolt commits, with the oracle's bulk `SetMany` reconcile 2.8× cheaper for identical content; **enumeration scales with the account, not the mount** (the oracle listed 11 129 objects to keep 10 101, discarding 1028 belonging to another rig's folder — so delete a scenario's folder once recorded); and **MC-01's duplicate upload did not reproduce** — 10 000 lines for 10 000 distinct paths. | Debounce/worker-pool behaviour under burst; the first realistic chance of hitting user rate limits. **It is not that chance**: drivel's serialised upload path caps a writing client near 1 request/s, so a single-writer case cannot burst hard enough to trip a quota. That question moves to MC-36 and MC-51. |
+| **MC-11** | 10 000 × 4 KiB files across 100 directories, created on A. | All three converge. Record: wall clock, API request count, 403/retry count, peak RSS, state DB and index DB size per client. **PASS live** (§5): 10 000 uploads, 10 000 downloads each on c2/c3, 0 conflicts, 0 duplicates, 0 abandoned pushes, **0 403s**; 2 h 32 m at a flat 1.09 uploads/s, converging 6.9 s after the last upload; peak RSS 112 MB on the writer and 39 MB on each puller; both DBs 32 KiB → 4 MiB (~416 B/entry). A cold oracle rebuilt the same tree from `Enumerate` and agrees. Four findings the case did not predict: **the FUSE write path blocks at the upload rate** once a burst exceeds the 1024-slot buffer plus 4 × 64 worker queues (measured backlog 1286 against a capacity of 1280, so `tar -x` runs at Drive's upload rate and nothing says why); **write amplification ≈ 6000×** (190 KB of content, 1175 MB to disk) from per-operation bbolt commits, with the oracle's bulk `SetMany` reconcile 2.8× cheaper for identical content — **but read that ratio in per-commit terms, not as 6000×**, because neither half of it means what it looks like (see §4.17); **enumeration scales with the account, not the mount** (the oracle listed 11 129 objects to keep 10 101, discarding 1028 belonging to another rig's folder — so delete a scenario's folder once recorded); and **MC-01's duplicate upload did not reproduce** — 10 000 lines for 10 000 distinct paths. | Debounce/worker-pool behaviour under burst; the first realistic chance of hitting user rate limits. **It is not that chance**: drivel's serialised upload path caps a writing client near 1 request/s, so a single-writer case cannot burst hard enough to trip a quota. That question moves to MC-36 and MC-51. |
 | **MC-12** | Hostile names, all created on A: depth-40 nesting · 5000 entries in one directory (forces Drive paging) · unicode and emoji · `'` and `\` (`escapeQuery`) · spaces, `%`, newline · 255-byte names · a file legitimately named `report (conflict 2024-01-01 00-00-00).pdf` · a file named `.drivel-notes`. | Everything round-trips. **The reserved-name half is answered in Tier A and the two paths disagree:** `skipLocal` guards only reconcile's local walk, so a user file of either shape written *through a mount* is pushed and fans out like anything else, while the same file created with the engine not watching is stepped over by the sweep that exists to catch up on exactly that — silently, and for as long as the file exists. Pinned by `TestFleetSyncsAReservedNameFromTheMountButNeverFromASweep`. Still Tier B: the escaping, paging, unicode and length cases, which need real Drive. | Query-escaping bugs; paging bugs; the conflict-name regex catching real user files. |
 | **MC-13** | Empty files · sparse file with holes · hardlinked pair · symlink (relative and absolute) · fifo · device node · setuid bit · a file with user xattrs · non-UTC mtimes. | Define the behaviour and write it down. Drive has no representation for most of these; what matters is that drivel fails predictably rather than corrupting or looping. **Mostly answered by M15 items 1–3 (shipped 2026-09-08), and answered in code rather than in prose**: the hardlinked pair is now impossible (`EPERM` at `Link`, where before both names were pushed as two diverging remote objects); symlinks, fifos, sockets and device nodes stay local and log one line per path at both the mount and the sweep; the mountpoint is `nodev,nosuid` compulsorily, so a setuid bit or device node arriving from a remote is inert there; user xattrs were already never synced. Pinned by `internal/vfs/special_test.go` and `TestSweepLogsTheLocalFilesItCannotSync`. **Still Tier B:** empty and sparse files, non-UTC mtimes, and the setuid bit's *round trip* — the mount option makes it inert locally, it says nothing about what Drive stores. **Still open by decision:** POSIX mode/ownership/ACLs, which is M15 item 4 and needs a provider-metadata capability. | Undefined behaviour becoming a support question. §10 territory. |
 | **MC-14** | Create a Google Doc, a Sheet and a Slide in the Drive web UI inside the folder. | All three clients log `skip … Google-native document`, never materialise them, and — critically — **never infer them as deleted** in a later sweep. | The `ExportOnly` seen-marking. A regression here deletes the user's real Drive documents. |
@@ -528,6 +528,63 @@ roughly in descending order of how likely they are to change a decision:
     Worth deciding whether it stays undocumented, gets documented, or gets fixed
     by writing the provider's stamp back over the originator's copy after a push
     (which is a new local mutation and would have to be suppressed as an echo).
+17. **Write amplification is real, but "≈ 6000×" is the wrong way to carry it, and
+    both halves of the ratio mislead.** The numerator is an artefact of the rig:
+    `workload.sh many` wrote `printf 'file %d of %d\n'`, about 19 bytes, where
+    MC-11 specifies 4 KiB — so the recorded 190 KB should have been 40 MB, and the
+    same run would have reported ≈29×. A ratio that moves by two orders of
+    magnitude with the test's own file size settles no argument. (`many` now writes
+    4 KiB per the spec; the recorded result stands as what happened, against
+    19-byte files.)
+
+    The denominator is the finding, and it decomposes exactly. **A bbolt commit
+    costs ~36 KB of disk writes on a 10k-entry DB, whatever the key and value are,
+    and stays flat as the DB grows** (measured 36.0 KB/commit at 20 000 keys, 36.3
+    at 40 000). Disk cost is therefore *commits × a constant*, and **it is the
+    fsync that costs, not the data**: opening with `NoSync` and then calling
+    `Sync()` after every commit reproduces the default's total byte for byte, while
+    one `Sync()` at the end writes 5.4 MB instead of 365. Each commit fdatasyncs
+    twice — once for the data pages, once for the meta page that makes them
+    reachable — and so rewrites the same handful of hot pages (leaf, branch, root,
+    freelist, meta) every time. `NoFreelistSync` is worth 11% and nothing else:
+    page size, freelist type and value size are all noise.
+
+    So the number to carry is **commits per synced file**. It is deterministic,
+    independent of the filesystem underneath, and it is what moves when somebody
+    adds a store write to a per-file path. `pathindex.Set` and `SetMany` now
+    compare in a read transaction before writing — bbolt advances the meta page on
+    every commit whether a data page changed or not, so storing a byte-identical
+    value cost a full commit, while a `View` costs nothing. That takes a re-push
+    from 3 commits to 1 and a cold resolve off a warm index from 2 to 0.
+
+    **It does not help this case, and that is worth being precise about rather
+    than claiming a win here.** MC-11 creates 10 000 files that do not exist
+    remotely, and a new path's mapping genuinely is new, so its one index commit
+    stays. A create-only burst is the single workload the guard does nothing for;
+    what it fixes is the ordinary steady state — editing a file that already
+    exists re-stored its mapping twice per push — and every restart, which
+    re-stores whatever the index already held. MC-11's remaining per-file cost is
+    the `state.SetEcho`, and the only lever for that one is group commit, which
+    DESIGN.md §12.3 measures and deliberately does not take.
+
+    Note also that **1175 MB cannot be attributed per-operation from the recorded
+    run**, which is why no "it would now be N MB" number appears here: the figure
+    is a single process total from before M9 split the two stores across two
+    processes, and `results/mc11/` holds no per-store breakdown. A re-run with the
+    sampler fixed (below) is what would produce one.
+
+    §5.3's rule is why this is settled in Tier A rather than by another live run:
+    the whole thing is reachable in-process, and `TestPushCommitsPerFile`,
+    `TestStatThenPutCommitsTheMappingOnce` and `TestIndexHitDoesNotRewriteWhatItRead`
+    pin the budgets. What is *not* settled is whether the remaining commit should
+    keep its two fsyncs; DESIGN.md §12 has that decision and why it is held.
+
+    One measurement caveat for any re-run, and it is a rig bug rather than a
+    footnote: **MC-11 predates M9 by six days**, so both bbolt stores were in one
+    process when the 1175 MB was recorded. Since M9 the index DB belongs to the
+    plugin process and the state DB to the host, and §2.7's sampler is pointed at
+    the host — so a re-run would silently under-report by roughly the index's
+    share. Sample the plugin child too.
 
 ---
 

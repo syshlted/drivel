@@ -6,6 +6,7 @@
 package pathindex
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
 )
@@ -333,5 +334,175 @@ func TestSetManyBatchesAndEvictsStaleHalves(t *testing.T) {
 
 	if err := s.SetMany([]string{"x"}, []string{"id-x", "id-y"}); err == nil {
 		t.Fatal("mismatched batch lengths accepted")
+	}
+}
+
+// Re-storing a mapping the store already holds must not commit. A bbolt commit
+// costs two fdatasyncs and rewrites every page it touched whatever the value is,
+// so storing a byte-identical value is as expensive as a real write — and the
+// provider does exactly that on every index hit and on every Stat-before-Put.
+//
+// The count, not the content, is the assertion: the content was already correct
+// before this guard existed, which is why the bug was invisible.
+func TestSetSkipsTheCommitWhenNothingChanges(t *testing.T) {
+	s := newStore(t, "acct|root")
+
+	mustSet(t, s, "a/b.txt", "id-1")
+	after := s.Commits()
+
+	for i := 0; i < 5; i++ {
+		mustSet(t, s, "a/b.txt", "id-1")
+	}
+	if got := s.Commits(); got != after {
+		t.Errorf("re-storing an identical mapping committed %d time(s); want 0", got-after)
+	}
+
+	// A changed value must still commit, or the guard has broken the store.
+	mustSet(t, s, "a/b.txt", "id-2")
+	if got := s.Commits(); got != after+1 {
+		t.Errorf("storing a new id committed %d times; want 1", got-after)
+	}
+	if id, ok := lookup(t, s, "a/b.txt"); !ok || id != "id-2" {
+		t.Errorf("lookup = %q, %v; want id-2, true", id, ok)
+	}
+}
+
+// A half-match is not a match. setLocked evicts the stale halves a rewrite leaves
+// behind, so skipping the write when only one direction agrees would leave the
+// two buckets as non-inverses — the state that later resolves an ID to a path it
+// no longer occupies.
+func TestSetCommitsWhenOnlyOneDirectionAgrees(t *testing.T) {
+	s := newStore(t, "acct|root")
+
+	// old/p -> id-1 both ways. Now claim id-1 for a different path: byID agrees
+	// with neither, so the write must happen and must vacate old/p.
+	mustSet(t, s, "old/p.txt", "id-1")
+	before := s.Commits()
+	mustSet(t, s, "new/p.txt", "id-1")
+	if got := s.Commits(); got != before+1 {
+		t.Fatalf("re-pointing an id committed %d times; want 1", got-before)
+	}
+	if _, ok := lookup(t, s, "old/p.txt"); ok {
+		t.Error("old path still resolves; the stale half was not evicted")
+	}
+	if p, ok := pathFor(t, s, "id-1"); !ok || p != "new/p.txt" {
+		t.Errorf("reverse lookup = %q, %v; want new/p.txt, true", p, ok)
+	}
+}
+
+// SetMany is the sweep's batch, and a periodic re-enumeration of an unchanged
+// tree re-offers every mapping it already stored. That must cost nothing.
+func TestSetManySkipsTheCommitWhenNothingChanges(t *testing.T) {
+	s := newStore(t, "acct|root")
+	paths := []string{"d/1.txt", "d/2.txt", "d/3.txt"}
+	ids := []string{"id-1", "id-2", "id-3"}
+
+	if err := s.SetMany(paths, ids); err != nil {
+		t.Fatalf("setmany: %v", err)
+	}
+	after := s.Commits()
+
+	if err := s.SetMany(paths, ids); err != nil {
+		t.Fatalf("setmany again: %v", err)
+	}
+	if got := s.Commits(); got != after {
+		t.Errorf("re-offering an unchanged page committed %d time(s); want 0", got-after)
+	}
+
+	// One changed entry in the page must still commit the page.
+	ids[1] = "id-2b"
+	if err := s.SetMany(paths, ids); err != nil {
+		t.Fatalf("setmany changed: %v", err)
+	}
+	if got := s.Commits(); got != after+1 {
+		t.Errorf("a page with one change committed %d times; want 1", got-after)
+	}
+	if id, ok := lookup(t, s, "d/2.txt"); !ok || id != "id-2b" {
+		t.Errorf("lookup = %q, %v; want id-2b, true", id, ok)
+	}
+}
+
+// An index bbolt cannot read is replaced rather than left disabled. The caller's
+// fallback — run from memory — is correct but permanent, so one bad write would
+// otherwise cost every later session a cold index.
+func TestOpenReplacesAnUnreadableFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "index.db")
+	if err := os.WriteFile(path, []byte("not a bolt database"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	s := openAt(t, path)
+	if s.Recovered() != path+CorruptSuffix {
+		t.Errorf("Recovered() = %q; want %q", s.Recovered(), path+CorruptSuffix)
+	}
+	if _, err := os.Stat(path + CorruptSuffix); err != nil {
+		t.Errorf("the corrupt file was not kept aside: %v", err)
+	}
+
+	// The replacement is a working index.
+	if _, err := s.Bind("acct|root"); err != nil {
+		t.Fatalf("bind after replacement: %v", err)
+	}
+	mustSet(t, s, "a.txt", "id-1")
+	if id, ok := lookup(t, s, "a.txt"); !ok || id != "id-1" {
+		t.Errorf("lookup = %q, %v; want id-1, true", id, ok)
+	}
+}
+
+// A lock held by another process is not corruption, and replacing that file would
+// pull the index out from under a live mount.
+func TestOpenDoesNotReplaceALockedFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "index.db")
+	first := openAt(t, path)
+	if _, err := first.Bind("acct|root"); err != nil {
+		t.Fatal(err)
+	}
+	mustSet(t, first, "live.txt", "id-live")
+
+	second, err := Open(path)
+	if err == nil {
+		_ = second.Close()
+		t.Fatal("a second Open on a locked index succeeded; it must not")
+	}
+	if _, serr := os.Stat(path + CorruptSuffix); serr == nil {
+		t.Fatal("a locked index was moved aside; that discards a live mount's cache")
+	}
+	if id, ok := lookup(t, first, "live.txt"); !ok || id != "id-live" {
+		t.Errorf("the live index lost its entry: %q, %v", id, ok)
+	}
+}
+
+// Re-binding an index to the identity it already carries must not commit. It is
+// once per mount rather than once per file, so the saving is small — but a write
+// transaction that changes nothing still costs two fdatasyncs, and the rule is the
+// same one Set follows.
+func TestBindSkipsTheCommitWhenTheIdentityMatches(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "index.db")
+	s := openAt(t, path)
+
+	if reused, err := s.Bind("acct|root"); err != nil || reused {
+		t.Fatalf("first bind: reused=%v err=%v; want false, nil", reused, err)
+	}
+	mustSet(t, s, "a.txt", "id-1")
+	after := s.Commits()
+
+	// Same identity again: nothing to write.
+	if reused, err := s.Bind("acct|root"); err != nil || !reused {
+		t.Fatalf("re-bind: reused=%v err=%v; want true, nil", reused, err)
+	}
+	if got := s.Commits(); got != after {
+		t.Errorf("re-binding the same identity committed %d time(s); want 0", got-after)
+	}
+	// And the fast path must leave the store usable and its contents intact.
+	if id, ok := lookup(t, s, "a.txt"); !ok || id != "id-1" {
+		t.Errorf("lookup after re-bind = %q, %v; want id-1, true", id, ok)
+	}
+
+	// A different identity still wipes and commits.
+	if reused, err := s.Bind("other|root"); err != nil || reused {
+		t.Fatalf("rebind to a new identity: reused=%v err=%v; want false, nil", reused, err)
+	}
+	if _, ok := lookup(t, s, "a.txt"); ok {
+		t.Error("an identity change did not wipe the store")
 	}
 }

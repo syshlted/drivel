@@ -7,6 +7,7 @@ package state
 
 import (
 	"errors"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -275,5 +276,107 @@ func TestForgetClearsOnePath(t *testing.T) {
 	}
 	if _, ok, _ := s.Hydration("x"); ok {
 		t.Error("hydration survived Forget")
+	}
+}
+
+// A state DB bbolt cannot read is replaced rather than fatal, because an empty
+// state store is a state the design already defines: no baseline means M7b
+// deletes nothing, the M5 marker lives on the backing file, and no cursor means
+// the downloader enumerates before tailing. Before this, any corruption bricked
+// the mount.
+func TestOpenReplacesAnUnreadableFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.db")
+
+	// Not a bbolt file at all: bbolt reports ErrInvalid.
+	if err := os.WriteFile(path, []byte("this is not a bolt database, not even close"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	s, err := Open(path)
+	if err != nil {
+		t.Fatalf("open over a corrupt file: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+
+	if s.Recovered() != path+CorruptSuffix {
+		t.Errorf("Recovered() = %q; want %q", s.Recovered(), path+CorruptSuffix)
+	}
+	// The evidence is kept, not deleted.
+	if _, err := os.Stat(path + CorruptSuffix); err != nil {
+		t.Errorf("the corrupt file was not kept aside: %v", err)
+	}
+	// And the replacement works.
+	if err := s.SetCursor("tok"); err != nil {
+		t.Fatalf("replacement store is not writable: %v", err)
+	}
+	if c, ok, err := s.Cursor(); err != nil || !ok || c != "tok" {
+		t.Errorf("cursor = %q, %v, %v; want tok, true, nil", c, ok, err)
+	}
+}
+
+// A healthy store reports no recovery, so the caller's log line stays quiet.
+func TestOpenReportsNoRecoveryForAHealthyFile(t *testing.T) {
+	s := openTestStore(t)
+	if s.Recovered() != "" {
+		t.Errorf("Recovered() = %q for a fresh store; want empty", s.Recovered())
+	}
+}
+
+// The lock-held case must NOT be treated as corruption. Two mounts sharing a
+// state DB is refused by app.Validate but reachable from a hand-written command
+// line, and replacing the file there would discard a running mount's state.
+func TestOpenDoesNotReplaceALockedFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.db")
+
+	first, err := Open(path)
+	if err != nil {
+		t.Fatalf("first open: %v", err)
+	}
+	defer first.Close()
+	if err := first.SetCursor("live-mount"); err != nil {
+		t.Fatal(err)
+	}
+
+	// The second open must fail (bbolt's flock times out), and must leave the
+	// first mount's file exactly where it is.
+	second, err := Open(path)
+	if err == nil {
+		_ = second.Close()
+		t.Fatal("a second Open on a locked state DB succeeded; it must not")
+	}
+	if _, serr := os.Stat(path + CorruptSuffix); serr == nil {
+		t.Fatal("a locked state DB was moved aside; that discards a live mount's state")
+	}
+	if c, ok, err := first.Cursor(); err != nil || !ok || c != "live-mount" {
+		t.Errorf("the live store lost its cursor: %q, %v, %v", c, ok, err)
+	}
+}
+
+// Commits counts write transactions and nothing else, so a regression test can
+// pin disk cost without depending on the filesystem underneath.
+func TestCommitsCountsWritesNotReads(t *testing.T) {
+	s := openTestStore(t)
+
+	base := s.Commits()
+	if err := s.SetCursor("a"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetEcho("f.txt", Echo{Hash: "h"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := s.Commits() - base; got != 2 {
+		t.Errorf("two writes counted %d commits; want 2", got)
+	}
+
+	// Reads must not count.
+	after := s.Commits()
+	if _, _, err := s.Cursor(); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := s.GetEcho("f.txt"); err != nil {
+		t.Fatal(err)
+	}
+	if got := s.Commits() - after; got != 0 {
+		t.Errorf("two reads counted %d commits; want 0", got)
 	}
 }

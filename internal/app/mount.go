@@ -287,6 +287,17 @@ func Open(ctx context.Context, spec MountSpec, reg *provider.Registry) (*Mount, 
 		if err != nil {
 			return nil, fmt.Errorf("open state db: %w", err)
 		}
+		// Loud, because the consequences are visible to the user even though none
+		// of them loses data: with no echo records nothing has a §4 baseline, so
+		// the next sweep enumerates the whole tree, re-pushes and re-pulls what it
+		// finds, and writes a §6 conflict copy for every path whose two sides
+		// genuinely differ. Silence here would leave that looking like a bug.
+		if aside := st.Recovered(); aside != "" {
+			m.logf("state db %s was unreadable and has been replaced; the old file is at %s. "+
+				"This mount has no sync history: it will re-enumerate the remote tree, and paths that "+
+				"differ on both sides get a conflict copy. Nothing is deleted on the strength of a missing baseline.",
+				spec.StateDB, aside)
+		}
 		m.state = st
 	} else {
 		m.logf("no provider configured: running log-only (no cloud sync)")

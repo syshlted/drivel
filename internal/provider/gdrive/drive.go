@@ -241,6 +241,13 @@ func open(ctx context.Context, cfg Config, lg *log.Logger) (*Drive, error) {
 		if err != nil {
 			lg.Printf("[drive] path index: disabled: %v", err)
 		} else {
+			// Quiet by comparison with the state DB's equivalent, because nothing
+			// follows from it: the index is a cache whose every entry is re-verified
+			// before use, so a cold one costs name lookups and nothing else.
+			if aside := idx.Recovered(); aside != "" {
+				lg.Printf("[drive] path index: %s was unreadable and has been replaced (old file kept at %s); "+
+					"paths will be resolved against the provider until it warms up again", cfg.IndexPath, aside)
+			}
 			d.idx = idx
 		}
 	}

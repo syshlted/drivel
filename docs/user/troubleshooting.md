@@ -27,6 +27,30 @@ backing store through the mountpoint path, which recurses into Drivel's own
 handler. Nothing in a normal setup does this; it usually means a script or backup
 tool is pointed at the mounted directory *as if* it were the backing directory.
 
+**`state db … was unreadable and has been replaced`.** The sync-state database was
+damaged — typically a power cut mid-write, or a disk going bad. Drivel kept the old
+file with `.corrupt` appended and started with an empty one, which is safe:
+**nothing is deleted**, because a deletion is only ever inferred from a record of
+what was previously synced and there are now none.
+
+Expect a full re-enumeration of the remote tree, and a conflict copy beside any
+file whose local and remote copies differ — with no history, keeping both is the
+only honest answer. Lazily hydrated files are unaffected. See
+[Data safety](data-safety.md#the-databases-are-caches).
+
+If this recurs, the disk is the suspect, not Drivel. The `.corrupt` file is kept
+for inspection and is safe to delete.
+
+**`path index: … was unreadable and has been replaced`.** The same thing, to the
+Drive path index, and with nothing to do about it: that file is purely a cache of
+which remote object each path refers to, and every entry is re-checked before use.
+Expect a few extra lookups while it warms up.
+
+**`open state db …: timeout`.** Another process already has that database open —
+almost always a second Drivel still running against the same mount. Check with
+`pgrep -a drivel`. Drivel deliberately does *not* treat this as damage; replacing
+the file would destroy the running mount's state.
+
 ## Backends
 
 Drivel runs a backend as a separate process. The two that ship with it are

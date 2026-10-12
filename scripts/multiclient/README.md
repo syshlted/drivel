@@ -58,11 +58,20 @@ scripts/multiclient/logcount.sh rig/c*/logs/run.log
 Resource cost, sampled alongside:
 
 ```sh
-scripts/multiclient/sample.sh -o rig/metrics/mc20.csv \
-  "$(pgrep -f 'config rig/c1'):c1" \
-  "$(pgrep -f 'config rig/c2'):c2" \
-  "$(pgrep -f 'config rig/c3'):c3"
+args=()
+for n in 1 2 3; do
+  host=$(pgrep -f "config rig/c$n")
+  args+=("$host:c$n" "$(pgrep -P "$host" -f plugin-serve):c$n-backend")
+done
+scripts/multiclient/sample.sh -o rig/metrics/mc20.csv "${args[@]}"
 ```
+
+**Sample the backend child as well as the host, or the numbers are wrong.** Since
+M9 a client is two processes: the host owns the mount, the engine and the state DB,
+and `drivel plugin-serve <kind>` owns the path index. Disk and CPU for "a client"
+is the sum. MC-11's write-amplification figure was recorded before M9, when both
+bbolt stores were in one process, so it is not comparable to a host-only sample
+taken today (see the plan, §4.17).
 
 ## Checking against Drive, not against each other
 

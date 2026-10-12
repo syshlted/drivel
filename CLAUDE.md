@@ -838,7 +838,11 @@ and not of the plan: an **abandoned push and a failed download are both repaired
 only by a sweep**, which `-sweep-interval 0` disables; and the shutdown gap in M8
 rule 1 above.
 
-Four rules the last rounds left behind. **A property test nobody has seen fail is a
+Five rules the last rounds left behind. **A commit budget is a disk-cost
+regression gate, and the mistakes it catches are invisible otherwise**: the two
+redundant `pathindex.Set` calls per re-push stored exactly the right value, so no
+correctness test could ever have failed on them — see "Store durability & write
+amplification". **A property test nobody has seen fail is a
 property test nobody knows the strength of**: `ranges/property_test.go` and
 `syncengine/coalescer_property_test.go` were each checked by mutating the code they
 cover (round `Mark` outward, let a known event revive a poisoned accumulator, …) and
@@ -851,7 +855,7 @@ a tree the code under test is mutating must skip `fs.ErrNotExist`, not fail on i
 — `peer.manifest`/`peer.conflicts` in `multiclient_test.go` did the latter and made
 `TestFleetPropagatesABulkDelete` fail two runs in three, with the product innocent.
 A sampler in a poll loop is waiting out exactly that race; every *other* error still
-fails. And the fourth, from Group V: **a predicate that answers "has this ever
+fails. And the last, from Group V: **a predicate that answers "has this ever
 happened?" cannot be used to wait for it happening again.** `testLog.saw` searches a
 peer's whole log, which accumulates across that peer's restarts — so every case that
 restarts a peer and then waits for a line its previous life already printed gets a
@@ -1125,6 +1129,78 @@ seen (so their absence is never read as a delete) but **never materialised and
 never given an echo** — they have no byte stream, so there is no honest size for a
 placeholder and no digest to compare. Cursor expiry (`provider.ErrCursorExpired`,
 Drive's 410) recovers through this same path: fresh token, then a sweep.
+
+## Store durability & write amplification
+
+Both bbolt stores (`internal/state`, engine-level and in the host; `internal/pathindex`,
+provider-private and in the backend process since M9) keep bbolt's **default
+durability** — two fdatasyncs per write transaction, nothing buffered. `DESIGN.md
+§12` is the decision record; `docs/dev/conventions.md` has the short rules. Four
+things carry it.
+
+1. **A commit is the unit of disk cost, and it is a constant.** ~36 KB of disk
+   writes per commit on a 10k-entry DB however small the record, **flat as the DB
+   grows** (36.0 KB at 20k keys, 36.3 at 40k). So cost is *commits × a constant*,
+   and **the fsync is the cost, not the data**: `NoSync` plus a `Sync()` after
+   every commit reproduces the default total byte for byte, while one `Sync()` at
+   the end leaves 1.5% of the bytes. There is no tuning answer — page size is
+   already the 4 KiB minimum, the hashmap freelist is already chosen, and
+   `NoFreelistSync` is worth 11%. Don't spend a day on those.
+2. **Count commits, never bytes.** `state.Store.Commits` / `pathindex.Store.Commits`
+   report them; `syncengine.TestPushCommitsPerFile` pins one commit per pushed
+   file and the gdrive/pathindex tests pin the rest. A byte count depends on the
+   filesystem underneath and is not assertable. These budgets are a ratchet:
+   lowering one is an improvement, raising one needs a reason in the message.
+3. **Compare before writing, in a *read* transaction — never an early return
+   inside the write one.** bbolt advances the meta page on every commit whether a
+   data page changed or not, so an `Update` storing a byte-identical value costs
+   the full ~36 KB and an `Update` that touches nothing still costs ~20 KB; a
+   `View` costs zero. That is why `pathindex.Set`/`SetMany` check first. **A
+   half-match is not a match** — `setLocked` evicts the stale halves a rewrite
+   leaves behind, so both directions must already agree or the buckets stop being
+   inverses, which is what resolves an ID to a path it no longer occupies.
+   **What this does and does not buy**: a re-push went 3 commits → 1 and a cold
+   resolve off a warm index 2 → 0, but **a genuinely new path still costs its one
+   commit, so a create-only burst gains nothing** — which is precisely MC-11's
+   workload, so don't cite it as the fix for that measurement.
+4. **An unreadable DB is replaced, not fatal — both of them** — `.corrupt` suffix,
+   most recent kept, `Store.Recovered()` reported so the caller logs it: loudly
+   from `app.Mount` for state, briefly from `gdrive` for the index (where the old
+   fallback, run-from-memory, was correct but permanent and nearly silent).
+   Safe for a *specific* reason and not as a convenience: M7b infers a deletion
+   only from a baseline, so no echoes ⇒ every path reads as new ⇒ **nothing is
+   deleted**; M5's marker is an xattr on the backing file, so no placeholder
+   becomes an empty file; no cursor ⇒ the downloader enumerates before tailing,
+   which is the reconstruction wanted and needs no wiring. It costs a full
+   re-sync's requests and a §6 conflict copy per genuinely divergent path — the
+   correct answer with no baseline, not a side effect. **Only `ErrInvalid`,
+   `ErrVersionMismatch` and `ErrChecksum` count as unreadable**; `ErrTimeout`
+   means another process holds the lock and replacing that file would discard a
+   live mount's state (`TestOpenDoesNotReplaceALockedFile`).
+
+**Group commit (`NoSync` + a periodic `Sync`) is measured, coherent and
+deliberately NOT built** — 8× fewer bytes at a 100-commit interval, 67× at
+close-only, and transparent to §4 because bbolt readers see committed-but-unsynced
+transactions, so deferring the *fsync* is invisible where deferring the *commit*
+is not. Three things hold it, and the second is the one that grew the prerequisite
+past what the win justifies. The failure mode is **corruption, not a lost tail**
+(the meta page can reach disk before the pages it references), and it needs power
+loss — a process crash, panic or OOM kill is harmless, the page cache survives.
+**bbolt does not checksum data pages, so the failure can be a panic rather than an
+error**: open-time validation covers only the two meta pages, `db.meta()` panics
+outright if both fail (its comment says that is unreachable "because we do fsync()
+on every write" — the assumption `NoSync` removes), and a never-written page reads
+as zeros whose page type matches nothing. For the index that is worse than for
+state, because M9 rule 6 relaunches a dead backend, so a panicking index DB is a
+crash loop. And **`Close()` does not sync** — bbolt munmaps and closes the fd, so
+any such design must fsync explicitly at `Close` and at the existing barriers.
+Revisit when a backend makes commits the rate limiter rather than a wear cost:
+Drive at ~1.09 uploads/s hides them entirely, but M11, M17 `localfs` and M18 SFTP
+over a LAN all beat 749 commits/s. **The cheaper thing first** is batching the
+*inbound* echo writes at the page boundary the downloader already has
+(`flushForget`/`SetCursor` are there and already ordered) — full durability, no
+panic handling, but it needs its own reasoning about a path appearing twice in one
+page.
 
 ## Special files & mount safety (M15 items 1–3)
 

@@ -91,6 +91,27 @@ new property.
 same helpers.** An oracle sharing the implementation's helpers agrees with it
 about the bugs too.
 
+## Commit-budget tests
+
+Three tests assert how many bbolt write transactions an operation makes, not what
+it stores: `syncengine.TestPushCommitsPerFile` and `TestUnlinkCommitsPerFile`,
+`gdrive.TestStatThenPutCommitsTheMappingOnce` and friends, and the
+`pathindex` guard tests. `state.Store.Commits` and `pathindex.Store.Commits` are
+what they read.
+
+**They exist because the mistake they catch is invisible to every other kind of
+test.** A commit costs ~36 KB of disk writes and two fdatasyncs whatever the
+record size, and two of the three commits a re-push used to make were storing
+exactly the right value — already stored, byte for byte. Nothing about the data
+was wrong, so no correctness assertion could ever have failed. Only the count
+showed it.
+
+Two rules. **Count commits, not bytes**: a byte count depends on the filesystem
+underneath and cannot be asserted, while a commit count is deterministic. And
+**the budgets are a ratchet** — lowering one is an improvement, raising one is a
+decision that needs a reason in the commit message, because it is a per-file disk
+cost multiplied by every file a user syncs. `DESIGN.md §12` is the background.
+
 ## Helpers that walk a live tree
 
 A helper that walks a tree the code under test is mutating **must skip

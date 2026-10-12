@@ -4585,3 +4585,193 @@ direction of everything in §10 — and does it one layer lower, where the check
 - What `listxattr` reports for a file whose sidecar has not been hydrated yet in
   lazy mode. Faulting content in to answer a metadata question would make `ls -l`
   with a `getfattr` in the loop download the tree.
+
+---
+
+## 12. Durability of the two bbolt stores (decision record)
+
+Written 2026-10-10, after MC-11's write-amplification finding (multi-client plan
+§4.17) turned out to be a question about fsync policy rather than about bbolt
+tuning. §12.1 and §12.2 are the measurements and what shipped; §12.3 is the part
+that is deliberately *not* built, and why.
+
+### 12.1 What a commit actually costs
+
+There are two stores. `internal/state` is engine-level (the change-feed cursor,
+the §4 echo records, the M5 hydration bitmaps, the M7b sweep record and its `seen`
+marks) and lives in the host process. `internal/pathindex` is provider-private
+(Drive's path↔fileID map, §2.5) and since M9 lives in the backend process. Neither
+is shared between mounts; `app.Validate` refuses that.
+
+Measured on bbolt 1.5.0 with the options the tree uses, 10 000 single-key write
+transactions, bytes read from `/proc/self/io`:
+
+| configuration | written | txn/s |
+|---|---|---|
+| default (one commit per key) | **365 MB** — 36 KB/commit | 749 |
+| `NoFreelistSync` | 324 MB (−11%) | 746 |
+| `NoSync`, `Sync()` after every commit | **362 MB** | 1 304 |
+| `NoSync`, `Sync()` every 100 commits | 47 MB | 23 446 |
+| `NoSync`, one `Sync()` at close | **5.4 MB** | 35 686 |
+| batched 100 keys/commit, full durability | 45 MB | — |
+| batched 1000 keys/commit, full durability | 7.7 MB | — |
+
+Three things follow, and the third is the one that decides the design.
+
+**Per-commit cost is a constant, not a function of the data.** 36 KB per commit
+for a ~60-byte record, flat as the DB grows (36.0 KB/commit at 20 000 keys, 36.3
+at 40 000). Disk cost is *commits × a constant*, so the only lever that matters is
+the number of commits — which is why the regression gate counts commits and not
+bytes. A byte count also depends on the filesystem underneath and is not
+assertable in a unit test.
+
+**It is the fsync, not the write.** Row 3 is the control: forcing one fsync per
+commit reproduces the default's total exactly, and removing the fsyncs leaves 1.5%
+of the bytes. A commit fdatasyncs twice — data pages, then the meta page that
+makes them reachable — so the same handful of hot pages (leaf, branch, root,
+freelist, meta) is rewritten every time. Page size is already the 4 KiB minimum,
+the hashmap freelist is already chosen (§2.4), and `NoFreelistSync` is worth 11%.
+There is no tuning answer here.
+
+**A commit that changes nothing costs nearly as much as one that does.** bbolt
+advances the meta page on every commit regardless, so an `Update` storing a
+byte-identical value costs the full 36 KB, and an `Update` that touches nothing at
+all still costs 20 KB. A `View` costs zero. That asymmetry is what §12.2 exploits.
+
+### 12.2 What shipped: fewer commits, unchanged durability
+
+Both stores keep bbolt's default two-fsyncs-per-commit. What changed is the number
+of commits, and **only the redundant ones** — which is a narrower claim than it
+first looked, so the table below is the honest version rather than a headline.
+
+Measured against the fake Drive, per operation:
+
+| operation | state | index before | index after |
+|---|---|---|---|
+| create a path that does not exist remotely | 1 | 1 | **1** |
+| re-push an existing path (Stat for the M6 gates, then Put) | 1 | 2 | **0** |
+| resolve a path off a warm index (every restart) | 0 | 2 | **0** |
+| a sweep page over an unchanged tree | 0 | 1 per page | **0** |
+
+1. **`pathindex.Set` and `SetMany` compare before writing, in a read
+   transaction.** Not an early return inside the `Update` — that still costs
+   20 KB. A *re-push* stored the same mapping twice for nothing, because both of
+   its resolutions end in `rememberLocked`; an index *hit* verifies the stored
+   entry and then re-stores exactly what it read; and a periodic sweep re-offers a
+   whole page it already holds. A genuinely new path still costs its one commit,
+   because that mapping genuinely is new. Both directions of the map must already
+   agree before a write is skipped, because `setLocked` evicts the stale halves a
+   rewrite leaves behind and a half-match still has work to do.
+
+   **So a create-only burst is the one workload this does not help** — which is
+   exactly MC-11's, every file being new. Its remaining per-file cost is the
+   `SetEcho`, and the only lever left for that is §12.3's, which is held. The
+   workloads this *does* help are the ordinary ones: editing a file that already
+   exists, and every cold start against a warm index.
+2. **`pathindex.Bind` takes the same read-first path.** Once per mount rather than
+   once per file, so the saving is negligible — but re-binding an index to the
+   identity it already carries wrote nothing and still cost a commit, and leaving
+   the one obvious instance of the rule unapplied inside the package that defines
+   it invites the next reader to conclude the rule is optional.
+3. **Commits are counted** (`state.Store.Commits`, `pathindex.Store.Commits`) so
+   the budget is assertable. M14's per-backend stats is the other consumer.
+4. **An unreadable DB is replaced instead of fatal, in both stores** — see §12.4.
+
+The remaining commit is one `state.SetEcho` per push, and it cannot be deduplicated
+the way a mapping can: `Echo.At` is when the baseline was taken, which M7b compares
+against the sweep's start token to decide whether a local copy predates the sweep.
+Holding that timestamp still to save a write would break the delete guard.
+
+### 12.3 What is NOT built: group commit, and why it is held
+
+The obvious remaining lever is `NoSync` plus a periodic `db.Sync()`: 8× fewer
+bytes at a 100-commit interval, 67× at close-only, and it needs no call-site
+changes, because deferring the *fsync* is invisible to §4 while deferring the
+*commit* is not — bbolt readers see committed-but-unsynced transactions, so an
+echo is visible to the downloader the moment it commits whether or not it has
+reached disk.
+
+It is held, and the reason is sharper than "NoSync is risky".
+
+**The failure mode is corruption, not a lost tail.** With `NoSync` the kernel may
+write the meta page before the data pages it points at, so a crash in the sync
+window can leave a DB whose valid, checksummed meta page references pages that
+were never written. A *process* crash is harmless — the page cache survives
+SIGKILL, a panic and an OOM kill. Only power loss, a kernel panic or a VM reset
+reaches this.
+
+**bbolt does not checksum data pages, so the failure can be a panic rather than an
+error.** Open-time validation covers only the two meta pages, and `db.meta()`
+panics outright if both fail (its comment says this is unreachable "because we do
+fsync() on every write" — which is exactly the assumption `NoSync` removes). A
+page that was never written reads as zeros, whose page type matches nothing, and
+bbolt panics on it during a later read. So the prerequisite is not just
+"recreate a file that fails to open" — which §12.4 now does — but surviving a
+panic from *inside* a read. For the state DB that is a crashed mount; for the path
+index it is worse, because M9 rule 6 relaunches a dead backend, so a panicking
+index DB is a crash loop rather than a single failure.
+
+**`Close()` does not sync.** bbolt's `Close` munmaps and closes the fd; under
+`NoSync` nothing fsyncs on a clean unmount either. Any group-commit design has to
+add that explicitly, at `Close` and at the barriers that already exist (the pull
+loop's page boundary before `SetCursor`, and sweep completion).
+
+So group commit is a coherent design whose prerequisite — a recover-from-panic
+wrapper around every store access, loudly logged, discarding the store — is a
+bigger and more invasive piece of work than the amplification it removes
+currently justifies, now that the commit count is down to 1 per file. Revisit it
+when a backend makes commits the rate limiter rather than a wear cost: against
+Drive at ~1.09 uploads/s the fsyncs are invisible in wall clock, but M11's
+content-addressed store, M17 `localfs` and M18 SFTP over a LAN all push far faster
+than 749 commits/s.
+
+**The cheaper thing to do first, if more is needed:** batch the *inbound* path's
+echo writes at the page boundary the downloader already has. `flushForget` and
+`SetCursor` are already there and already ordered — echoes durable before the
+cursor advances. That keeps full durability and needs no panic handling. It is not
+built either, because it is a change to the pull loop's ordering and wants its own
+reasoning about what a page means when a path appears in it twice.
+
+### 12.4 Why discarding a store is a defined state
+
+Both stores are reconstructible by design, and the recovery path for each already
+existed before this note; what was missing was taking it when the file is
+corrupt rather than merely absent.
+
+- **The path index is explicitly non-load-bearing** (§2.5, M7 invariant 2):
+  deleting it costs latency and quota, never correctness, because an unknown path
+  falls through to a name query against the provider, and a stored entry is
+  verified before it is believed. `gdrive` already treated an open failure as
+  non-fatal and ran from memory — but that fallback is *permanent* for the life of
+  the process and silent beyond one log line, so a single bad write cost every
+  later session a cold index. `pathindex.Open` now replaces the file too, on the
+  same narrow predicate, and `Bind` was already emptying the store outright on an
+  identity change, so nothing new is being claimed about safety here.
+- **The state DB's loss is bounded and fails safe.** M7b infers a deletion only
+  from a baseline, so no baseline means the path is new on whichever side it is
+  found and **nothing is deleted** — the first-ever-run rule, applied to a
+  recovered store. M5's placeholder marker is an xattr on the backing file, so no
+  placeholder becomes an empty file (the note in §9/M10 corrects an earlier claim
+  to the contrary). The hydration bitmaps are a cache. With no cursor the
+  downloader enumerates the whole tree before tailing it, which is the
+  reconstruction that is wanted, and nothing has to ask for it.
+
+  What it costs is a full re-sync's worth of requests and a §6 conflict copy for
+  every path whose two sides genuinely differ — which, with no baseline to say
+  which side moved, is the correct answer and not a side effect.
+
+Both stores therefore move an unreadable file aside and start empty, reporting the
+fact through `Store.Recovered` so the caller can log it — loudly for the state DB,
+because a re-enumeration and conflict copies follow, and briefly for the index,
+because nothing follows but name lookups. Refusing protected
+nothing: the file is already unreadable, so there is no state left to lose, and
+the operator's only recourse was to delete it by hand — the same outcome with
+downtime and without a copy kept for diagnosis. An unattended boot mount (§9/M16)
+has nobody to do even that.
+
+**The predicate is narrow on purpose.** Only `ErrInvalid`, `ErrVersionMismatch`
+and `ErrChecksum` count as unreadable. `ErrTimeout` must never be included: it
+means another process holds the file lock, which `app.Validate` refuses but a
+hand-written command line still reaches, and moving *that* file aside would
+discard a live mount's state from underneath it. `TestOpenDoesNotReplaceALockedFile`
+is what says so.

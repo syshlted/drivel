@@ -165,6 +165,23 @@ What is *not* recoverable is the [lazy-mode placeholder
 marker](lazy-mode.md#the-one-rule-the-backing-filesystem-must-support-extended-attributes),
 which lives on the file itself and has no database fallback by design.
 
+### A damaged sync-state database is replaced, not fatal
+
+Because an empty sync-state database is a state Drivel already handles, it does
+not need you to intervene when the file is unreadable — after a power cut
+mid-write, say, or a failing disk. Drivel renames it by appending `.corrupt`,
+starts with an empty one, and says so in its log. It used to refuse to mount,
+which left an `/etc/fstab` mount with nobody to fix it.
+
+Everything in the paragraph above applies: nothing is deleted, because a deletion
+is only ever inferred from a baseline and there are now none. What you will see is
+a full re-enumeration, and **a conflict copy for every path whose local and remote
+copies differ** — with no baseline there is nothing to say which side changed, so
+keeping both is the only honest answer.
+
+A database that fails to open for some *other* reason is still an error, and one
+already in use by another Drivel process is never touched.
+
 ## What Drivel never does
 
 - Upload a placeholder over your remote file.

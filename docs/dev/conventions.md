@@ -214,6 +214,57 @@ backing-tree/mountpoint overlap, shared mountpoints, duplicate names, and a stat
 DB inside a backing tree. That last one needs no second mount to be wrong — the DB
 would sync itself, and its own writes would generate more events.
 
+## bbolt commits are the unit of disk cost
+
+A write transaction in either store fdatasyncs twice and rewrites every page it
+touched — **~36 KB on a 10 000-entry DB however small the record is, and flat as
+the DB grows**. Disk cost is therefore *commits × a constant*, and the fsyncs are
+nearly all of it, so there is no tuning answer: page size is already minimal and
+the freelist type is already chosen.
+
+Three rules follow.
+
+**Count commits, not bytes.** `state.Store.Commits` and `pathindex.Store.Commits`
+report them; `TestPushCommitsPerFile` pins the budget at one commit per pushed
+file, and the per-store tests pin the rest. A byte count depends on the filesystem
+underneath and cannot be asserted; a commit count is deterministic. Adding a store
+write to a per-file path is a budget change that needs a reason.
+
+**Compare before writing, in a read transaction — never an early return inside the
+write one.** bbolt advances the meta page on every commit whether a data page
+changed or not, so an `Update` storing a byte-identical value costs the full
+~36 KB and an `Update` that touches nothing still costs ~20 KB. A `View` costs
+zero. This is why `pathindex.Set` and `SetMany` check first: a re-push stored the
+same mapping twice for nothing (both of its resolutions end in `rememberLocked`),
+an index hit re-stored what it had just read, and a periodic sweep re-offered a
+page it already held. A genuinely new path still costs its one commit, so a
+create-only burst is the one workload this does not help.
+
+**A half-match is not a match.** `setLocked` evicts the two stale halves a rewrite
+leaves behind, so the guard skips the write only when *both* directions of the map
+already agree. Skipping on a half-match would leave the buckets as non-inverses,
+which is the state that later resolves an ID to a path it no longer occupies.
+
+`DESIGN.md §12` is the decision record, including why group commit (`NoSync` plus a
+periodic `Sync`) is measured, coherent and deliberately not built.
+
+## Losing a store is a defined state, and only one of them is fatal
+
+Both databases are derived, and an unreadable one is **moved aside and replaced**
+rather than failing — the state DB instead of failing the mount, the index instead
+of running from memory for the life of the process. For the index that needs no
+argument beyond `pathindex`'s own contract; for the state DB it does. That is safe for a specific reason,
+not as a convenience: M7b infers a deletion only from a baseline, so a store with
+no echoes reads every path as new and deletes nothing, and M5's marker is an xattr
+on the backing file rather than a row in the DB. The cost is a full re-enumeration
+and a §6 conflict copy per genuinely divergent path — the correct answer when no
+baseline says which side moved.
+
+**Only `ErrInvalid`, `ErrVersionMismatch` and `ErrChecksum` count as unreadable.**
+`ErrTimeout` means another process holds the lock, and moving that file aside would
+discard a live mount's state; both packages have a
+`TestOpenDoesNotReplaceALockedFile` keeping it out.
+
 ## Secrets
 
 `credentials.json`, `token.json`, `*.local.json` and the databases are gitignored.

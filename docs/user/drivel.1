@@ -1363,10 +1363,70 @@ Cached OAuth token from
 .BR "drivel login" .
 .TP
 .I drivel-state.db
-bbolt sync-state database (change-feed cursor + echo records).
+bbolt sync-state database (change-feed cursor + echo records). Deleting it loses
+the record of what has already been synced, which is recoverable but not free: see
+.BR "RECOVERING FROM A DAMAGED DATABASE" .
+.TP
+.I drivel-state.db.corrupt
+The previous
+.I drivel-state.db
+when
+.B drivel
+found it unreadable and replaced it. Kept for inspection; only the most recent one
+is kept, and nothing reads it.
 .TP
 .I drivel-index.db
 bbolt path\(->ID index for the provider. A cache; safe to delete.
+.TP
+.I drivel-index.db.corrupt
+The previous
+.I drivel-index.db
+when
+.B drivel
+found it unreadable and replaced it. Kept for inspection; safe to delete.
+.SH RECOVERING FROM A DAMAGED DATABASE
+.PP
+If
+.I drivel-state.db
+cannot be read \(em a power cut mid-write, a failing disk \(em
+.B drivel
+renames it with a
+.B .corrupt
+suffix, starts with an empty one, and logs that it did so. It does not refuse to
+mount, because an unattended mount from
+.I /etc/fstab
+has nobody to intervene, and because an empty database is a state
+.B drivel
+already handles: it is the same position as a first-ever mount.
+.PP
+No file is deleted as a result. A deletion is only ever inferred from a record
+that the path was previously synced, so with no records
+.B drivel
+reads every file it finds as new rather than as deleted. Lazily hydrated files are
+also unaffected, because what marks a file as a placeholder is stored on the file
+itself and not in this database.
+.PP
+Two things follow, and both are visible:
+.IP \(bu 2
+The remote tree is enumerated in full before the change feed is tailed again,
+which costs what a first sync costs.
+.IP \(bu 2
+Any path whose local and remote copies differ gets a conflict copy, because with
+no history there is nothing to say which side changed \(em see
+.I data-safety.md
+for what a conflict copy is named and where it lands.
+.PP
+The same happens to
+.IR drivel-index.db ,
+with no consequences at all beyond some extra requests while it warms up again:
+every entry in it is re-checked against the provider before it is used, so a cold
+index costs lookups rather than correctness.
+.PP
+A database that fails to open for any other reason is unchanged \(em fatal for the
+sync state, and for the index a warning followed by running without it. A database
+already locked by another
+.B drivel
+process is never replaced.
 .SH EXAMPLES
 .PP
 Authenticate:

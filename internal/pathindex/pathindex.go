@@ -38,8 +38,10 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	bolt "go.etcd.io/bbolt"
@@ -77,18 +79,39 @@ var boltOptions = &bolt.Options{
 type Store struct {
 	db *bolt.DB
 
+	// commits counts write transactions. See update.
+	commits atomic.Uint64
+
+	// recovered records that Open replaced an unreadable file. See Recovered.
+	recovered string
+
 	mu    sync.RWMutex
 	bound bool
 }
 
+// CorruptSuffix is appended to the path of an index DB that Open could not read
+// and had to replace. Only the most recent one is kept.
+const CorruptSuffix = ".corrupt"
+
 // Open opens (creating if needed) the index DB at path and ensures its buckets
 // exist. The caller must Bind it before it returns anything, and must Close it.
+//
+// A file bbolt cannot read at all is moved aside and replaced with an empty one.
+// Nothing about that needs justifying beyond this package's own contract: the
+// contents are a cache that must be rebuildable from scratch, and Bind already
+// empties the store outright whenever the identity it was built against changes.
+// The alternative is worse than it looks — the caller's fallback is to run from
+// memory, which is correct but permanent, so a single bad write would cost every
+// later session a cold index with only a log line to say why.
 func Open(path string) (*Store, error) {
-	db, err := bolt.Open(path, 0o600, boltOptions)
+	db, aside, err := openOrReplace(path)
 	if err != nil {
-		return nil, fmt.Errorf("open index db %s: %w", path, err)
+		return nil, err
 	}
-	err = db.Update(func(tx *bolt.Tx) error {
+	s := &Store{db: db, recovered: aside}
+	// Through s.update, not db.Update, so Commits() counts every commit this store
+	// has made rather than every one after the first.
+	err = s.update(func(tx *bolt.Tx) error {
 		for _, b := range [][]byte{bucketMeta, bucketByPath, bucketByID} {
 			if _, err := tx.CreateBucketIfNotExists(b); err != nil {
 				return err
@@ -100,7 +123,7 @@ func Open(path string) (*Store, error) {
 		_ = db.Close()
 		return nil, fmt.Errorf("init index buckets: %w", err)
 	}
-	return &Store{db: db}, nil
+	return s, nil
 }
 
 // Bind ties the store to an identity — the provider's account plus the root it
@@ -111,7 +134,18 @@ func Open(path string) (*Store, error) {
 // account's mappings would resolve paths to IDs that are not ours.
 func (s *Store) Bind(identity string) (reused bool, err error) {
 	want := []byte(schema + "\x00" + identity)
-	err = s.db.Update(func(tx *bolt.Tx) error {
+	// The overwhelmingly common case is an index being reused by the same account
+	// and root, where there is nothing to write — and a write transaction that
+	// changes nothing still costs ~20 KB and two fdatasyncs, because bbolt advances
+	// the meta page regardless. Checking in a read transaction costs nothing. The
+	// Update below re-checks, so this is a fast path and not the decision.
+	if s.boundTo(want) {
+		s.mu.Lock()
+		s.bound = true
+		s.mu.Unlock()
+		return true, nil
+	}
+	err = s.update(func(tx *bolt.Tx) error {
 		meta := tx.Bucket(bucketMeta)
 		if got := meta.Get(keyIdentity); bytes.Equal(got, want) {
 			reused = true
@@ -134,6 +168,74 @@ func (s *Store) Bind(identity string) (reused bool, err error) {
 	s.bound = true
 	s.mu.Unlock()
 	return reused, nil
+}
+
+// update runs fn in a write transaction and counts the commit.
+//
+// A bbolt commit is the unit of disk cost, and a far bigger one than it looks: it
+// fdatasyncs twice and rewrites every page it touched — ~36 KB on a 10k-entry DB
+// however small the key is, and flat as the DB grows. Counting commits is what
+// makes that cost assertable in a test, deterministically, where a byte count
+// would depend on the filesystem underneath. See Set for what the count bought.
+func (s *Store) update(fn func(*bolt.Tx) error) error {
+	if err := s.db.Update(fn); err != nil {
+		return err
+	}
+	s.commits.Add(1)
+	return nil
+}
+
+// Commits reports how many write transactions this store has committed.
+func (s *Store) Commits() uint64 { return s.commits.Load() }
+
+// Recovered names the file Open moved aside, or "" if the store opened normally.
+// The caller logs it: this package has no logger.
+func (s *Store) Recovered() string { return s.recovered }
+
+// openOrReplace opens path, replacing it if and only if bbolt reports that it is
+// not a readable database. It returns the path the old file was moved to.
+func openOrReplace(path string) (*bolt.DB, string, error) {
+	db, err := bolt.Open(path, 0o600, boltOptions)
+	if err == nil {
+		return db, "", nil
+	}
+	if !unreadable(err) {
+		return nil, "", fmt.Errorf("open index db %s: %w", path, err)
+	}
+	aside := path + CorruptSuffix
+	if rerr := os.Rename(path, aside); rerr != nil {
+		return nil, "", fmt.Errorf("open index db %s: %w (moving it aside failed: %w)", path, err, rerr)
+	}
+	db, oerr := bolt.Open(path, 0o600, boltOptions)
+	if oerr != nil {
+		return nil, "", fmt.Errorf("replacing unreadable index db %s: %w", path, oerr)
+	}
+	return db, aside, nil
+}
+
+// unreadable reports whether err means the file is not a bbolt database we can
+// read, as against any of the other reasons an open fails. The same three
+// sentinels, for the same reason, as state.unreadable — kept separate because
+// these are two independent leaf packages and the predicate is five lines.
+//
+// ErrTimeout must never be included: it means another process holds the file
+// lock, and moving *that* file aside would pull the index out from under a live
+// mount.
+func unreadable(err error) bool {
+	return errors.Is(err, bolterrors.ErrInvalid) ||
+		errors.Is(err, bolterrors.ErrVersionMismatch) ||
+		errors.Is(err, bolterrors.ErrChecksum)
+}
+
+// boundTo reports whether the stored identity already equals want. A read error
+// reports false, so Bind takes the write path — the safe direction.
+func (s *Store) boundTo(want []byte) bool {
+	same := false
+	_ = s.db.View(func(tx *bolt.Tx) error {
+		same = bytes.Equal(tx.Bucket(bucketMeta).Get(keyIdentity), want)
+		return nil
+	})
+	return same
 }
 
 // Close flushes and closes the DB.
@@ -189,13 +291,49 @@ func (s *Store) PathFor(id string) (path string, ok bool, err error) {
 
 // Set records path↔id, displacing whatever either side previously mapped to so
 // the two directions stay exact inverses.
+//
+// Storing a mapping that is already stored is skipped, and the check is a read
+// transaction rather than an early return inside the write one. That is not a
+// micro-optimisation and the distinction is the whole point: bbolt advances the
+// meta page on every commit whether or not a data page changed, so an Update
+// that stores a byte-identical value costs the same ~36 KB and two fdatasyncs as
+// a real write, and an Update that does nothing at all still costs ~20 KB. A
+// View costs no disk writes at all.
+//
+// It pays off because the common case here is a mapping we already hold: every
+// index *hit* goes through verify-then-remember, which re-stores exactly what it
+// just read, and a provider that Stats a path before writing it resolves the
+// same mapping twice per push.
+//
+// Both directions must already agree before the write can be skipped. setLocked
+// evicts the two stale halves a rewrite leaves behind, so a half-match still has
+// work to do; skipping it would leave the buckets as non-inverses, which is the
+// state that later resolves an ID to a path it no longer occupies.
 func (s *Store) Set(path, id string) error {
 	if !s.usable() {
 		return nil
 	}
-	return s.db.Update(func(tx *bolt.Tx) error {
-		return setLocked(tx, pathKey(path), []byte(id))
+	pk, idb := pathKey(path), []byte(id)
+	if s.holds(pk, idb) {
+		return nil
+	}
+	return s.update(func(tx *bolt.Tx) error {
+		return setLocked(tx, pk, idb)
 	})
+}
+
+// holds reports whether both buckets already record pk↔id exactly, in both
+// directions. A read error reports false, so the caller writes — the safe
+// direction, since a redundant write costs disk and a skipped one costs
+// correctness.
+func (s *Store) holds(pk, id []byte) bool {
+	same := false
+	_ = s.db.View(func(tx *bolt.Tx) error {
+		same = bytes.Equal(tx.Bucket(bucketByPath).Get(pk), id) &&
+			bytes.Equal(tx.Bucket(bucketByID).Get(id), pk)
+		return nil
+	})
+	return same
 }
 
 // setLocked writes one mapping inside tx, first evicting the two stale halves a
@@ -234,7 +372,13 @@ func (s *Store) SetMany(paths []string, ids []string) error {
 	if len(paths) != len(ids) {
 		return fmt.Errorf("pathindex: %d paths vs %d ids", len(paths), len(ids))
 	}
-	return s.db.Update(func(tx *bolt.Tx) error {
+	// Same reasoning as Set, and it matters most here: a periodic -sweep-interval
+	// re-enumeration of an unchanged tree re-offers every mapping it already
+	// stored, one ~750 KB commit per page, for nothing.
+	if s.holdsAll(paths, ids) {
+		return nil
+	}
+	return s.update(func(tx *bolt.Tx) error {
 		for i, p := range paths {
 			if err := setLocked(tx, pathKey(p), []byte(ids[i])); err != nil {
 				return err
@@ -244,12 +388,30 @@ func (s *Store) SetMany(paths []string, ids []string) error {
 	})
 }
 
+// holdsAll reports whether every pair is already recorded in both directions, in
+// one read transaction. A read error reports false, so the caller writes.
+func (s *Store) holdsAll(paths, ids []string) bool {
+	all := false
+	_ = s.db.View(func(tx *bolt.Tx) error {
+		byPath, byID := tx.Bucket(bucketByPath), tx.Bucket(bucketByID)
+		for i, p := range paths {
+			pk, id := pathKey(p), []byte(ids[i])
+			if !bytes.Equal(byPath.Get(pk), id) || !bytes.Equal(byID.Get(id), pk) {
+				return nil
+			}
+		}
+		all = true
+		return nil
+	})
+	return all
+}
+
 // Forget drops path and, if it names a directory, everything beneath it.
 func (s *Store) Forget(path string) error {
 	if !s.usable() {
 		return nil
 	}
-	return s.db.Update(func(tx *bolt.Tx) error {
+	return s.update(func(tx *bolt.Tx) error {
 		byPath, byID := tx.Bucket(bucketByPath), tx.Bucket(bucketByID)
 		for _, e := range subtree(tx, path) {
 			if err := byPath.Delete(e.key); err != nil {
@@ -269,7 +431,7 @@ func (s *Store) Rename(oldPath, newPath string) error {
 	if !s.usable() {
 		return nil
 	}
-	return s.db.Update(func(tx *bolt.Tx) error {
+	return s.update(func(tx *bolt.Tx) error {
 		byPath := tx.Bucket(bucketByPath)
 		moved := subtree(tx, oldPath)
 		// Delete every old key before writing the new ones: the two key ranges can
