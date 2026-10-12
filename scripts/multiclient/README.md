@@ -191,11 +191,55 @@ does to a *user* write when the backing store is full.
 
 ### MC-47 — cross-process hygiene
 
-This one needs two processes and does **not** need Drive. A local SFTP server is a
-remote two `drivel` processes can share with no quota and no account — see the M18
-rig notes — which also makes the case repeatable. `app.Validate` refuses all three
+**Run 2026-10-10; the results are in the plan's matrix row and §4 item 18.** This
+is the recipe, because the shape is worth being able to re-pose.
+
+It needs two processes and does **not** need Drive. A local SFTP server is a remote
+two `drivel` processes can share with no quota and no account — see the M18 rig
+notes — which also makes the case repeatable. `app.Validate` refuses all four
 shapes inside one process, so the whole question is what happens when nothing is
 checking.
+
+An unprivileged `sshd` on a high port, with `internal-sftp` (an external
+`Subsystem` runs through the login shell, and anything that shell prints corrupts
+the stream — see the M18 notes, it costs an hour to rediagnose):
+
+```sh
+ssh-keygen -q -t ed25519 -f host_ed25519 -N ''
+ssh-keygen -q -t ed25519 -f client_ed25519 -N '' && cp client_ed25519.pub authorized_keys
+cat > sshd_config <<EOF
+Port 2247
+ListenAddress 127.0.0.1
+HostKey      $PWD/host_ed25519
+AuthorizedKeysFile $PWD/authorized_keys
+StrictModes no
+UsePAM no
+PasswordAuthentication no
+AllowUsers $(id -un)
+Subsystem sftp internal-sftp
+EOF
+/usr/sbin/sshd -f $PWD/sshd_config -E sshd.log
+ssh-keyscan -H -p 2247 127.0.0.1 > known_hosts     # the provider fails closed; not optional
+```
+
+Then one config per client, each with its **own** mountpoint, backing dir and
+state file, both pointing at one `root`. Two settings are not optional:
+`sweep-interval` of a few seconds (SFTP has no feed, so this is the poll interval)
+and **`materialize = true`** — without it each client uploads and neither receives,
+which looks exactly like a broken rig and is not.
+
+Then break one thing at a time, restoring between shapes:
+
+| Shape | Change | What to watch |
+|---|---|---|
+| (a) shared state DB | B's `state` = A's `state` | B must refuse in ~5s naming the other process; A must keep pushing and its file must not gain a `.corrupt` sibling |
+| (b) nested backing | B's `data` inside A's `data` | `find A/data -type f` and the path depth, sampled every few seconds — both grow without bound |
+| (c) nested mountpoint | B's `path` inside A's `data` | the same growth, plus A's downloads landing in B's backing tree; then stop B and confirm the delete pass still infers nothing |
+| (d) nested state DB | B's `state` inside A's `data` | A uploads B's live bbolt file to the shared remote |
+
+(b) and (c) grow one copy per sweep interval per direction, so a 3s interval makes
+them obvious in under a minute and a tiny seed file keeps the mess small. Stop both
+clients before the depth gets long enough to annoy your filesystem.
 
 ## Keeping the two tiers honest
 

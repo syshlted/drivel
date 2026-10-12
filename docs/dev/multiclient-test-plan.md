@@ -408,7 +408,7 @@ processes will not otherwise line up inside a 300 ms debounce window.
 | **MC-44b** | Block **all** traffic to Drive for one client for 20 min, then restore. | **Confirmed in Tier A, and "converges on restore" is wrong.** Three of the four predictions hold: no crash, no local data loss (the write during the outage lands exactly as it would online — §2.1 is what makes the outage invisible to the user, and also what makes the loss invisible), and **inbound recovers on its own**, bounded by the idle cadence rather than by anything about the outage, since one failed poll sets the wait to 30s and the loop then retries indefinitely. Outbound does not: the push in flight gets five attempts over a few seconds of jittered backoff and is then **dropped** — `[sync] push write … failed after 5 attempt(s)` — so after the network returns the file exists only on that client, the feed is demonstrably live again, and nothing ever offers the file to the remote. The repair is a sweep's local walk (`[sweep] push … (local only)`), which with `sweep-interval = "0"` means a restart with `-resync` and nothing else. §3's counter table already said an abandoned push is data not sent; this is that, arriving from an outage of seconds rather than a quota storm. Pinned by `TestFleetAbandonsAPushAcrossAnOutageAndRecoversOnlyBySweeping`. Still Tier B: whether the cursor survives 20 real minutes. | Partition tolerance; distinguishes "offline" from "broken". |
 | **MC-45** | Point two clients at the *same* `token.json` and run a workload across a refresh boundary. | **Answered from the code rather than by running it, and the answer is that the premise does not hold**: nothing in a mount ever writes a token file. `gauth.SaveToken` has exactly one caller, `drivel login`; the provider only `LoadToken`s and hands the token to `oauth2`, which refreshes in memory and never writes back. So there is no concurrent rewrite to corrupt, and §2.1's one-token-per-client rule is belt-and-braces rather than a correctness requirement. The property is an absence and is load-bearing in two directions — it is what makes a shared token path safe, and it is what makes M26's secret-service work small (read at mount, write at login, no write-back across the plugin seam) — so it is pinned by a grep, `TestOnlyLoginWritesTheOAuthToken`, for the same reason the SFTP host-key hatch is: the mistake it guards against is a *new* caller in a package that does not exist yet. | Validates (or removes) the per-client-token requirement in §2.1. |
 | **MC-46** | Fill C's `data/` filesystem to 100% during a large inbound download. | **Confirmed in Tier A for the half that matters, with one finding the case did not predict.** A transfer that stops partway leaves *nothing* at the destination path — the temp-file-plus-rename in `Downloader.download` is what does it, and writing in place instead leaves 8 bytes at the real path, which is the file the next sweep's local walk uploads as the user's content. No temporary is stranded, the remote is untouched, and a sweep after the transfer recovers is the repair. The finding: **an apply failure does not hold the cursor.** The page's error is logged and the cursor advances anyway, so the feed never re-offers that object and the file stays missing until a sweep — on Drive's 24h default that is a day, and at `sweep-interval = "0"` it is until someone restarts the mount. The case's own fault injection fails on the read side; real ENOSPC fails on the write side and stays Tier B, as does whether the error is reported rather than swallowed by the filesystem. Pinned by `TestFleetNeverLandsAPartialDownloadAndNeverPushesItBack`. | A short local file becoming the canonical remote content is the worst available outcome. |
-| **MC-47** | Cross-process hygiene, deliberately: (a) two processes sharing one state DB; (b) client B's `data/` placed inside client A's `data/`; (c) B's mountpoint inside A's backing tree. | (a) should fail fast with the 5s bbolt flock timeout — safe but opaque. (b) and (c) are **unguarded across processes** and are expected to produce event storms or recursion. **Tier A cannot host this one at all**, and the reason is the case itself: all three shapes are refused by `app.Validate` inside one process — the fleet harness runs it over its own specs on every start — so an in-process version would either be asserting the guard it already has a unit test for, or deliberately bypassing it and then measuring something no real process can reach. It needs two real processes, and not real Drive: a local SFTP server (M18's rig) is a remote that two `drivel` processes can share with no quota and no account. | Confirms which cross-process footguns are real, and whether a lock file or a startup check is worth adding. |
+| **MC-47** | Cross-process hygiene, deliberately: (a) two processes sharing one state DB; (b) client B's `data/` placed inside client A's `data/`; (c) B's mountpoint inside A's backing tree. | **Run 2026-10-10**, two real `drivel` processes over a local sshd, and the three shapes do not grade the same. **(a) is already guarded and the guard is the right one**: bbolt's flock refuses the second mount in 5.0s, the live mount's file is not touched and not moved aside, and the live mount keeps pushing throughout — so the answer to "is a lock file worth adding" is no, there already is one. What was wrong was the sentence: `mount b: open state db: open state db /path: timeout` names the operation twice and the cause not at all, and "timeout" is the one word that sends an operator to look at the network. Fixed, and pinned by `TestOpenOnALockedStateDBSaysWhyAndSaysItOnce`. **(b) is real, unbounded, and no component is malfunctioning** — A's walk finds B's backing tree "local only" and pushes it, B materialises it one level deeper inside A's tree, and that repeats once per sweep interval in each direction: one seeded 2-byte file became 12 local and 11 remote copies in 30s at a 3s interval, `bdata/bdata/bdata/…`. **(c) is (b) plus a broken cardinal rule**: A reads and writes *through* B's live FUSE mount, so one write became three remote paths and A's downloads landed in B's backing store — §2.7's rule generalised across processes, which is the mechanism behind the multiplication rather than a separate hazard. It does **not** deadlock (two FUSE connections, so A never re-enters its own handler). **The feared delete storm does not happen, and the reason is structural rather than lucky**: `applyDeletes` walks `EachUnseenEcho` — baselines the *remote* did not list — so a mountpoint going empty hides files *locally*, which is the "new remotely / would materialise" row and never a delete row. Verified both ways, with `materialize` on (the paths are re-downloaded, `13 reconciled locally`) and off (`2 not fetched`, remote untouched). A fourth shape, not in the original case: **B's state DB inside A's backing tree uploads one client's entire sync history to the shared remote**, torn, where every other client then materialises it. | Confirms which cross-process footguns are real, and whether a lock file or a startup check is worth adding. Answered: (a) needs no mechanism, only words; (b)/(c) need a guard that does not exist, and §4's cross-process item has the options. |
 
 ### Group VI — resource, cost, and soak
 
@@ -471,7 +471,10 @@ roughly in descending order of how likely they are to change a decision:
    scales with N before any user does any work.
 7. **Cross-process guards do not exist (MC-47).** `app.Validate` cannot see other
    processes. Worth deciding whether a lock file or a startup probe is warranted
-   now that "run several drivels" is a supported shape.
+   now that "run several drivels" is a supported shape. **Answered by running it —
+   see the cross-process item below and MC-47's row.** The short form: the shared state DB already has
+   its lock and needed only a better sentence, and the two overlapping-directory
+   shapes are the ones with nothing in front of them.
 8. **Token file contention (MC-45).**
 9. **Google-native documents (MC-14).** Any regression in `ExportOnly` seen-marking
    deletes real Drive documents, and three clients means three chances per sweep.
@@ -585,6 +588,51 @@ roughly in descending order of how likely they are to change a decision:
     plugin process and the state DB to the host, and §2.7's sampler is pointed at
     the host — so a re-run would silently under-report by roughly the index's
     share. Sample the plugin child too.
+
+18. **Two drivel processes can be pointed at overlapping directories, and nothing
+    anywhere can see it.** `app.Validate` is the guard, and it is an
+    *intra*-process one by construction: it compares the specs it was handed.
+    MC-47 (b) and (c) are the same mistake made across two processes, and the
+    result is unbounded content multiplication — one file becoming a dozen copies
+    at `bdata/bdata/bdata/…` in thirty seconds, growing by one level per sweep
+    interval, forever, on the local disk and on the shared remote.
+
+    **What makes it hard to spot is that no component is misbehaving.** A's walk
+    correctly finds a file local-only and pushes it; B's sweep correctly
+    materialises a remote file it does not have; the engine correctly records a
+    baseline for each. The defect is the absence of a question nobody is in a
+    position to ask. The two sweeps also hide it from the operator: each log line
+    is an ordinary push or download, and the only tell is that the paths keep
+    getting longer.
+
+    **The options, in order of what they cost.** A *marker file* at a backing
+    tree's root naming its mount, checked by walking **up** from the backing root
+    at open (O(depth), cheap, and it refuses before any damage) — but it only
+    catches the nested-child direction, since the parent cannot discover a marker
+    below it without a full walk. The complement is free: **the sweep's local walk
+    already visits every file**, so recognising a foreign marker there and pruning
+    that subtree costs nothing and is also simply correct — another drivel's
+    backing store is not content. Together those cover (b) in both directions.
+    Neither covers (c), where the thing inside A's tree is a *mountpoint*: that
+    needs the walk to notice it crossed a device boundary, which is a policy call
+    about backing trees spanning filesystems and is not obviously ours to make.
+
+    **And a fourth shape the case did not list is worse than either**: B's *state
+    DB* inside A's backing tree. A uploads it — a live bbolt file, read without a
+    transaction, so torn and useless as a backup — and on a shared account every
+    other client then materialises a copy of one client's entire sync history,
+    which is a record of every path it has ever synced with sizes and digests.
+    `app.Validate` refuses exactly this in-process ("a state DB inside a backing
+    tree") precisely because it is the shape that needs no second mount to be
+    wrong; across processes it is unguarded. A marker file does not catch it,
+    because the state DB is an ordinary file with a configurable name. The cheap
+    half is that drivel knows its own state and index paths at open and can refuse
+    the ones inside *its own* backing tree already — what it cannot see is
+    someone else's.
+
+    Nothing here is scheduled. It is recorded so the next session does not have to
+    rediscover which of the three shapes is actually dangerous, and so that
+    "unguarded across processes" is not mistaken for "undetectable".
 
 ---
 
@@ -700,12 +748,18 @@ iterations per second under `-race`, instead of one instance per thousand files 
 1.18 s each. Chase it there. Keep MC-11 as the burst-throughput, quota and
 DB-growth measurement it is specified to be, and let its upload-count ratio be a
 corroborating observation rather than the experiment.
-6. **Failure injection — Group V, Tier A done.** Five of the eight cases are in
-   `internal/app/failure_test.go` (MC-41, MC-43 in two shapes, MC-44b, MC-46) with
-   MC-45 answered from the code and MC-42 answered below the seam; MC-40, MC-44 and
-   MC-47 are Tier B by mechanism and the matrix rows say which mechanism. Three
-   things came out of it that no case predicted, in descending order of how much
-   they matter.
+6. **Failure injection — Group V done except MC-40 and MC-44.** Five of the eight
+   cases are in `internal/app/failure_test.go` (MC-41, MC-43 in two shapes,
+   MC-44b, MC-46) with MC-45 answered from the code and MC-42 answered below the
+   seam. **MC-47 ran for real on 2026-10-10** — two `drivel` processes over a local
+   sshd, which is a shared remote with no quota and no account — and its row has
+   what the three shapes actually do; the one thing it changed in the product is
+   the message a locked state DB produces, and §4's cross-process item holds the
+   guard options it declined to build. MC-40 and MC-44 remain Tier B by mechanism (a process that
+   dies rather than one asked to stop; a packet filter), and
+   `scripts/multiclient/README.md` has the procedure for each. Four things came out
+   of the group that no case predicted, in descending order of how much they
+   matter.
 
    **The inbound loop was not part of the shutdown drain, and that is now fixed.**
    `Mount.Run` waited for the engine's bounded drain and then returned, leaving
@@ -740,6 +794,16 @@ corroborating observation rather than the experiment.
    either half; it means MC-60's mixed-mode fleet needs a convergence oracle that
    asks the hydrator, and that is a harness item to build before MC-60 rather than
    during it.
+
+   **An eager SFTP mount without `materialize` is upload-only, permanently**, and
+   MC-47's rig found it by being configured the way the docs describe. Two
+   processes pushed their files and neither received the other's; the sweep said
+   `1 not fetched (add -materialize to download them)` every three seconds, which
+   is the product reporting itself correctly. The setting gates the sweep's
+   "new remotely" row only, so on a backend with a live feed it governs the content
+   that was already there at first mount and nothing else — and on a feedless one
+   it governs *everything* inbound, forever. `docs/user/sftp.md` said nothing about
+   it; it does now. Worth carrying into M19–M21, which inherit the same shape.
 7. **Resource and soak**: Group VI, last, because MC-53 wants a stable build.
 
 **Exit criteria.** Every case in Groups I–IV either passes or has a filed issue

@@ -832,11 +832,13 @@ numbered list. The live testing work is now Tier B of the multi-client campaign
 (`docs/dev/multiclient-test-plan.md`), whose Tier A covers Groups I–IV plus **Group
 V, failure and degradation** (`internal/app/failure_test.go` over the per-peer fault
 injection in `faultstore_test.go`): MC-41, MC-43, MC-44b and MC-46 run in-process,
-MC-45's premise turned out not to hold, and MC-40/MC-44/MC-47 are Tier B by
-mechanism rather than by scheduling. Two of its findings are products of running it
-and not of the plan: an **abandoned push and a failed download are both repaired
-only by a sweep**, which `-sweep-interval 0` disables; and the shutdown gap in M8
-rule 1 above.
+MC-45's premise turned out not to hold, **MC-47 ran for real on 2026-10-10 over two
+processes and a local sshd** (see M8 rule 2), and only MC-40/MC-44 are left, Tier B
+by mechanism rather than by scheduling. Three of its findings are products of
+running it and not of the plan: an **abandoned push and a failed download are both
+repaired only by a sweep**, which `-sweep-interval 0` disables; the shutdown gap in
+M8 rule 1 above; and **an eager SFTP mount without `-materialize` never receives
+anything** (SFTP rule 2).
 
 Five rules the last rounds left behind. **A commit budget is a disk-cost
 regression gate, and the mistakes it catches are invisible otherwise**: the two
@@ -1267,6 +1269,19 @@ makes it different from `gdrive` follows from that plus one absence, so most of
    that as "already tailing this remote", and every mount after the first would
    skip its startup sweep, i.e. skip inbound sync entirely. `runSweep` guards the
    `SetCursor` with `hasFeed()` for exactly that reason.
+
+   **The second consequence is `-materialize`, and it changes meaning on a feedless
+   backend**: `wouldMaterialize` gates the sweep's "new remotely" row *only*, so
+   with a feed the flag governs the content that predates the first cursor and
+   nothing else — anything created later arrives through `d.apply` regardless. With
+   no feed it governs **everything inbound, forever**, so an eager SFTP mount
+   without it is permanently upload-only. Found by running two of them (MC-47's
+   rig, 2026-10-10): both pushed, neither received, and the sweep said
+   `1 not fetched (add -materialize to download them)` every three seconds — the
+   product reporting itself correctly against docs that had never mentioned the
+   flag. `docs/user/sftp.md` owns that fact now. M19–M21 inherit it; it is not a
+   reason to change the default, because a flag that means "download the whole
+   remote tree" must stay a decision rather than a side effect of mounting.
 3. **`RangePutter` is real, and this is the milestone's point.** SSH_FXP_WRITE takes
    an offset, so M6's gate 2 finally runs against a server rather than a fake. The
    contract is re-checked in `PutRange` and not merely trusted: `O_WRONLY` with no
@@ -1395,6 +1410,23 @@ composition — and about the ways several mounts can corrupt each other.
    rule, generalised), shared mountpoints, duplicate names, and **a state DB inside
    a backing tree** — the one that needed no second mount to be wrong, since the DB
    syncs itself and its own writes generate more events.
+
+   **Every one of those guards is intra-process, and MC-47 measured what that
+   costs** (2026-10-10, two real processes over a local sshd). The shared state DB
+   is the one shape with a second line of defence: bbolt's flock refuses the
+   newcomer in 5s, the live file is untouched, and `state.unreadable` excludes
+   `ErrTimeout` so it is never moved aside — the fix there was the *message*, which
+   named the operation twice and the cause not at all. The overlap shapes have
+   nothing: two drivels whose backing trees nest multiply content without bound,
+   one level per sweep interval in each direction, with **no component
+   misbehaving** — A's walk correctly pushes a local-only file, B correctly
+   materialises a remote one, and the paths just keep getting longer. What does
+   *not* happen is a delete storm, and the reason is structural: `applyDeletes`
+   walks `EachUnseenEcho`, so a path hidden *locally* (an emptied mountpoint) is
+   the "would materialise" row and never a delete row. Options for a real guard are
+   in the test plan's §4 (the cross-process item) and none is scheduled; don't reach for a lock file
+   without reading it, because the cheap half is that the sweep's walk already
+   visits every file.
 3. **The registry is a value, not a package-global.** No `init()` registration, no
    import for side effect. It would be the only process-global mutable state in the
    tree, in the milestone whose premise is that there isn't any — and the explicit

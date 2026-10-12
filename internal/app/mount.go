@@ -285,7 +285,10 @@ func Open(ctx context.Context, spec MountSpec, reg *provider.Registry) (*Mount, 
 		}
 		st, err := state.Open(spec.StateDB)
 		if err != nil {
-			return nil, fmt.Errorf("open state db: %w", err)
+			// Unwrapped: every error state.Open returns already names the operation
+			// and the file, and App prefixes the mount's name on top, so a wrap here
+			// produced "mount b: open state db: open state db /path: timeout".
+			return nil, err
 		}
 		// Loud, because the consequences are visible to the user even though none
 		// of them loses data: with no echo records nothing has a §4 baseline, so

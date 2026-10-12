@@ -13,6 +13,35 @@ from source with `make build`.
 
 ## Unreleased
 
+### Two mounts sharing one sync database now say so — 2026-10-10
+
+Each mount keeps its own small database of what it has already synced, and two
+mounts must not share one. Drivel already refused to start in that case — the
+second one stopped, and the first was left completely untouched — but it reported
+the refusal as `open state db: open state db /path/to/state.db: timeout`, which
+names the problem twice and the cause not once. "Timeout" reads like a network
+problem, and this is the one failure that cannot be: the file is on your disk, and
+what is holding it is another copy of Drivel.
+
+It now says the file is already in use by another process, that two mounts need
+separate ones, and that nothing in the file was changed. Only the message changed;
+the protection was already working.
+
+### Clearer documentation for SFTP mounts that receive nothing — 2026-10-10
+
+An SFTP server has no way to tell Drivel that something changed, so Drivel finds
+out by walking the tree on a schedule. That means a second setting matters on this
+backend that barely matters elsewhere: in the default mode, Drivel downloads a file
+that exists only on the server **only** if you ask it to, with `materialize = true`
+(or `-materialize`, or by using lazy mode). On Google Drive that setting governs
+the files that were already there when you first mounted, and nothing else. On
+SFTP it governs everything arriving from the server, for as long as the mount
+exists — so without it, a mount uploads and never receives.
+
+Drivel already said so in its sweep summary (`1 not fetched (add -materialize to
+download them)`). The [SFTP page](docs/user/sftp.md) now says it too, which is
+where someone setting a mount up would look first.
+
 ### Re-syncing a file writes a third as much to your disk — 2026-10-10
 
 Drivel keeps two small bookkeeping databases per mount: what it has already

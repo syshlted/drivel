@@ -108,6 +108,34 @@ Outbound is unaffected — a local change is uploaded within seconds, as always.
 `sweep-interval = 0` disables the sweep entirely, which on this backend means
 disabling inbound sync entirely.
 
+### In the default mode, add `materialize`
+
+Because the sweep is the *only* way anything arrives here, one more setting is
+effectively required on this backend:
+
+```toml
+materialize = true     # or -materialize, or use lazy mode
+```
+
+Without it a file that exists on the server and not on your machine is listed and
+left alone, and the sweep says so every time:
+
+```
+[sweep] reconcile complete in 5ms: 4 remote object(s) listed, 3 reconciled locally,
+0 pushed, 1 not fetched (add -materialize to download them)
+```
+
+On a backend with a live feed that setting only governs the content that was
+*already* there when you first mounted — anything created afterwards arrives
+through the feed regardless. SFTP has no feed, so it governs everything inbound,
+forever: without it a colleague's upload will not appear today and will not appear
+next week. A mount in that state is upload-only, and the sweep summary is the one
+place that says so.
+
+[Lazy mode](lazy-mode.md) does not need it — a placeholder is metadata, so a lazy
+mount makes the whole server tree visible for the price of a sweep and downloads a
+file when you read it.
+
 ## Deletion has no undo here
 
 On Google Drive a removal goes to the trash, so a deletion drivel got wrong is

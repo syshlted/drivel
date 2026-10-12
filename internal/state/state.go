@@ -176,6 +176,18 @@ func openOrReplace(path string) (*bolt.DB, string, error) {
 	if err == nil {
 		return db, "", nil
 	}
+	if errors.Is(err, bolterrors.ErrTimeout) {
+		// bbolt's flock is the only cross-process guard in the program: app.Validate
+		// sees the mounts in its own process and nothing else, so two drivels aimed
+		// at one state file meet here or nowhere. The guard works — the file is not
+		// touched, and unreadable() deliberately excludes this error so it is never
+		// moved aside — but the bare word "timeout" sends an operator to look at the
+		// network, which is the one thing this is not: the file is local and another
+		// process is holding it. Verified against two real processes (MC-47 (a)).
+		return nil, "", fmt.Errorf("state db %s is already in use by another process "+
+			"(two mounts must not share one state file: give this mount its own, "+
+			"and note that nothing was changed in the file): %w", path, err)
+	}
 	if !unreadable(err) {
 		return nil, "", fmt.Errorf("open state db %s: %w", path, err)
 	}
