@@ -104,7 +104,7 @@ Every key mirrors a flag. Both are listed together below; `drivel mount -h` and
 | `-resync` | `resync` | off | Force a full enumeration and reconcile at startup. |
 | `-materialize` | `materialize` | off | In eager mode, download remote files that have no local copy. Implied by `-lazy`, where it costs only a placeholder. |
 | `-max-deletes N` | `max-deletes` | `100` | Cap on deletions one reconcile may infer, in either direction. `0` is unlimited. See [Data safety](data-safety.md#deletion). |
-| `-sweep-interval D` | `sweep-interval` | `24h` | How often to re-enumerate. `0` disables it. On a backend with no change feed — [SFTP](sftp.md#how-changes-reach-you) — this is the *poll interval*, and the default is far too slow. |
+| `-sweep-interval D` | `sweep-interval` | `24h` | How often to re-enumerate. `0` disables the *schedule*, not the [repair sweep](#when-an-upload-is-abandoned). On a backend with no change feed — [SFTP](sftp.md#how-changes-reach-you) — this is the *poll interval*, and the default is far too slow. |
 | `-push-delay D` | `push-delay` | `300ms` | How long a file must go unchanged before it is uploaded. See [When a change is pushed](#when-a-change-is-pushed). |
 | `-upload-workers N` | `upload-workers` | `4` | How many files this mount uploads at once. See [Transfer concurrency](#transfer-concurrency). |
 | `-hydrate-workers N` | `hydrate-workers` | `8` | How many placeholders this mount fetches at once under `-lazy`. See [Transfer concurrency](#transfer-concurrency). |
@@ -153,6 +153,42 @@ What it will **not** do:
 
 Anything still queued when you unmount is flushed before Drivel exits, and
 anything lost to a crash is found again by the next sweep.
+
+## When an upload is abandoned
+
+Every push is retried with a growing delay between attempts, five attempts over
+roughly seven seconds; an error the backend says is permanent — a permission
+failure, a quota refusal — is not retried at all. Past that Drivel gives up on
+that event and logs it:
+
+```
+[sync] push write notes/todo.md failed after 5 attempt(s): … (recorded for repair by the next sweep)
+```
+
+Giving up is deliberate. Retrying a rejected upload forever would spin, and
+keeping a durable queue of unsent work would be a second copy of your data to
+keep safe. What Drivel does instead is **remember the path**, and bring the next
+enumeration forward to a few minutes' time so that it re-sends the file from
+whatever is on disk by then:
+
+```
+[sweep] a push was abandoned: a repair sweep falls due in 5m0s
+[sweep] repush  notes/todo.md (an earlier push was abandoned)
+```
+
+Three things follow from that, and the last one is the one worth knowing:
+
+- It is the **next** sweep, not an immediate one. A sweep is the most expensive
+  thing Drivel does, so one transient failure does not buy you one; the delay
+  also folds a whole outage's worth of failures into a single sweep.
+- Repeated failures back off, doubling out to 80 minutes, so a backend that is
+  genuinely broken is not swept every five minutes while it stays broken.
+- **`-sweep-interval 0` does not switch this off.** `0` means "do not poll on a
+  schedule"; a file that failed to upload is still repaired.
+
+A *deletion* that is abandoned is the exception: there is no local file to
+re-send, so Drivel does not retry it and does not infer it later. Delete it
+again if you see one fail.
 
 ## Transfer concurrency
 

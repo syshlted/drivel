@@ -170,7 +170,9 @@ already mirrors Drive). They are reached by different evidence and both matter.
 The change feed only reports what changed *after* a cursor was taken, so a Drive
 that existed before the first mount is invisible to it. A sweep is what makes the
 tree present. It runs off the FUSE path, on a first run, a resumed sweep, a dead
-cursor, an elapsed `-sweep-interval`, or `-resync`.
+cursor, an elapsed `-sweep-interval`, `-resync`, or — since M27 — **a push the
+outbound path gave up on**, which is the one trigger that fires with
+`-sweep-interval 0` as well.
 
 ```mermaid
 sequenceDiagram
@@ -254,6 +256,16 @@ The four guards on the delete rows are each load-bearing:
    count means the premise is broken, not that there are 4000 real deletions. A
    refused pass still counts as *completed*, so recovery is `-resync` **and** a
    higher cap.
+
+The sweep has one more pass, and it runs **before** the local walk above:
+`pushOwedRepairs` re-sends every path the outbound path gave up on (M27). It
+cannot be folded into the walk, and the reason is the whole shape of the feature:
+the walk is the *new locally* row and skips any path with a baseline, while an
+abandoned push is almost always a **rewrite of a file that has one** — whose
+baseline still describes exactly what the remote holds, so the remote rows match
+the echo and correctly do nothing. Before M27 such a file stayed local forever.
+A repair that succeeds writes a fresh echo, so the walk then skips it for the
+ordinary reason and nothing is sent twice.
 
 Three implementation notes. The marks are **persistent**, because an in-memory
 seen-set would report every page a *previous* process consumed as remotely

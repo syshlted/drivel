@@ -470,9 +470,9 @@ func TestFleetAbandonsAPushAcrossAnOutageAndRecoversOnlyBySweeping(t *testing.T)
 	// and the file c1 wrote during the outage is still nowhere but c1.
 	settle(quietWait)
 	if _, ok := f.store.content("during.txt"); ok {
-		t.Error("during.txt reached the remote without a sweep. That is better than this test was " +
-			"written against: an abandoned push is now retried from somewhere, so update the case " +
-			"and the plan's §3 counter table with where")
+		t.Error("during.txt reached the remote without a sweep. M27 schedules a repair sweep, but " +
+			"only after repairDelay — minutes, far longer than this wait — so something else is " +
+			"retrying the push and the case and the plan's §3 counter table both need updating")
 	}
 	if why := f.disagreement(); why == "" {
 		t.Error("the fleet converged; the abandoned push did not reproduce")
@@ -481,15 +481,41 @@ func TestFleetAbandonsAPushAcrossAnOutageAndRecoversOnlyBySweeping(t *testing.T)
 		t.Error("c2 holds during.txt, which never reached the remote")
 	}
 
-	// The repair. A sweep's local walk is the only thing that ever finds a file
-	// whose push was dropped: it has no baseline and the remote has never heard of
-	// it, which is the "new locally" row.
+	// M27: giving up now leaves a record behind. Before it, this file was
+	// forgotten outright and the only repair was a sweep nobody had scheduled.
+	if !c1.logw.saw("recorded for repair by the next sweep") {
+		t.Error("the abandoned push was not recorded for repair; the file is forgotten, not merely unsent")
+	}
+
+	// The repair, and the thing that changed. This used to need -resync: the
+	// abandoned path has no baseline here, so the sweep's local walk would
+	// eventually find it, but nothing ever asked for a sweep. Now the record
+	// itself is a sweep trigger, so an ordinary restart is enough — no flag, and
+	// with sweep-interval still 0.
 	c1.stop()
-	c1.spec.Resync = true
+	// The record outlives the process, which is the whole point of it being in
+	// bbolt rather than in the engine's memory. Readable only now, because the
+	// running mount holds the file's lock.
+	st, err := state.Open(c1.spec.StateDB)
+	if err != nil {
+		t.Fatalf("reopening c1's state DB: %v", err)
+	}
+	var owed []string
+	if err := st.EachRepair(func(p string, _ time.Time) error { owed = append(owed, p); return nil }); err != nil {
+		t.Fatal(err)
+	}
+	_ = st.Close()
+	if len(owed) != 1 || owed[0] != "during.txt" {
+		t.Fatalf("repair list across the restart = %v; want [during.txt]", owed)
+	}
+
 	c1.start()
 	f.waitConverged(2 * fanoutWait)
 	if body, ok := f.store.content("during.txt"); !ok || string(body) != "written while c1 was partitioned" {
-		t.Errorf("a sweep did not recover the abandoned push; content = %q, ok = %v", body, ok)
+		t.Errorf("a restart did not recover the abandoned push; content = %q, ok = %v", body, ok)
+	}
+	if !c1.logw.saw("[sweep] repush  during.txt") {
+		t.Error("the file arrived, but not through the repair pass; something else re-sent it")
 	}
 }
 

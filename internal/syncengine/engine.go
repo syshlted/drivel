@@ -89,6 +89,44 @@ const maxWaitFactor = 10
 // tuning up is the user's call, per mount.
 const DefaultWorkers = 4
 
+// workerQueue is how many events may wait in front of ONE upload worker.
+//
+// It and eventBuffer (internal/app) are the two bounds on the outbound path, and
+// together they are what the mount can absorb before a write(2) through the
+// mountpoint has to wait: 1024 + 4*64 = 1280 events at the defaults. MC-11
+// measured a 1286-deep backlog against that, which is the bound doing its job.
+// It is named here rather than written inline because the saturation report has
+// to quote it.
+//
+// **That sum is the best case, not the bound a given workload meets.** Paths are
+// hashed to workers, so a burst concentrated on one worker blocks once *its* 64
+// slots are full while the other three sit idle — the practical bound is then
+// eventBuffer + 64. Which is why the saturation line reports the depth it
+// actually reached rather than asserting the queue is full: with four workers it
+// first reported 646 of 1280.
+const workerQueue = 64
+
+// defaultSatSample is how often a saturated outbound path is re-examined to see
+// whether it still is.
+//
+// It is a sampling period, not a reporting period: nothing is logged on a tick,
+// only on the transition it detects. The sampler exists at all because the event
+// that ends an episode is the one that never arrives — a bulk copy finishes, the
+// queues drain, and no further dispatch happens to notice. It runs only while
+// saturated, so an idle mount arms no timer.
+const defaultSatSample = time.Second
+
+// satLowWater is the fraction of the outbound bound at which saturation is
+// declared over, as a divisor: the backlog must fall to a quarter of capacity.
+//
+// Hysteresis is not a refinement here, it is the feature. In steady saturation
+// every dispatch finds room the instant a worker frees a slot and then refills
+// it, so "did this send block?" flips thousands of times a minute and a report
+// keyed on it would be the ten-thousand-line log this exists to avoid. A quarter
+// is low enough that the refill dynamics never reach it and high enough that a
+// mount with a trickle of ongoing writes still gets told the episode ended.
+const satLowWater = 4
+
 // retryPolicy bounds the per-op backoff loop.
 type retryPolicy struct {
 	max  int           // total attempts before giving up
@@ -122,6 +160,12 @@ type Engine struct {
 	workers      int
 	drainTimeout time.Duration
 	retry        retryPolicy
+
+	// satSample is the saturation sampler's period. Not a Config field and not a
+	// flag: M25's first rule is that drivel has no verbosity control of its own,
+	// and a knob for how often an internal state machine looks at itself would be
+	// one in all but name. Tests shorten it.
+	satSample time.Duration
 }
 
 // logf writes one line for this engine.
@@ -171,6 +215,7 @@ func New(cfg Config) *Engine {
 		workers:      cfg.Workers,
 		drainTimeout: cfg.DrainTimeout,
 		retry:        defaultRetry,
+		satSample:    defaultSatSample,
 	}
 	if e.debounce <= 0 {
 		e.debounce = DefaultPushDelay
@@ -215,7 +260,7 @@ func (e *Engine) Run(ctx context.Context, events <-chan fsevent.Event) {
 	in := make([]chan fsevent.Event, e.workers)
 	var wg sync.WaitGroup
 	for i := range in {
-		in[i] = make(chan fsevent.Event, 64)
+		in[i] = make(chan fsevent.Event, workerQueue)
 		wg.Add(1)
 		go func(ch <-chan fsevent.Event) {
 			defer wg.Done()
@@ -224,7 +269,52 @@ func (e *Engine) Run(ctx context.Context, events <-chan fsevent.Event) {
 			}
 		}(in[i])
 	}
-	dispatch := func(ev fsevent.Event) { in[workerFor(ev.Path, len(in))] <- ev }
+
+	// Back-pressure reporting (M27). bp is touched only by this goroutine — from
+	// dispatch, which this goroutine calls, and from the sampler case below — so
+	// it needs no lock.
+	bp := &backpressure{
+		e:     e,
+		bound: cap(events) + e.workers*workerQueue,
+		depth: func() int {
+			n := len(events)
+			for _, ch := range in {
+				n += len(ch)
+			}
+			return n
+		},
+	}
+	// The sampler ticks only while an episode is open; a nil channel blocks
+	// forever, which is what an idle mount should cost.
+	var satTick *time.Ticker
+	var satC <-chan time.Time
+	satStop := func() {
+		if satTick != nil {
+			satTick.Stop()
+			satTick, satC = nil, nil
+		}
+	}
+	defer satStop()
+
+	// dispatch hands an event to its worker, and is the one place that can
+	// observe the outbound path running out of room: it is where the send blocks,
+	// which is what then stops the coalescer reading events and ultimately blocks
+	// vfs.node.emit inside a FUSE handler. A depth sampled anywhere upstream
+	// cannot tell a full worker queue from a slow provider, and those two want
+	// different advice.
+	dispatch := func(ev fsevent.Event) {
+		ch := in[workerFor(ev.Path, len(in))]
+		select {
+		case ch <- ev:
+			return
+		default:
+		}
+		if bp.blocked() && satTick == nil {
+			satTick = time.NewTicker(e.satSample)
+			satC = satTick.C
+		}
+		ch <- ev
+	}
 
 	// Debounce state: coalesce content writes per path behind a trailing timer.
 	// Structural ops flush the affected path(s) first so per-path order is kept.
@@ -294,6 +384,10 @@ loop:
 			for _, t := range c.flush(p) {
 				dispatch(t)
 			}
+		case <-satC:
+			if !bp.sample() {
+				satStop()
+			}
 		}
 	}
 
@@ -318,6 +412,79 @@ loop:
 		<-done
 	}
 	opCancel()
+	// An episode open at shutdown would otherwise never be closed in the log, and
+	// an unterminated "queue full" is exactly the kind of thing that gets read as
+	// a hang. The drain above has ended it one way or the other by now.
+	bp.end()
+}
+
+// backpressure reports, once each way, that the outbound path has begun making
+// the filesystem wait — and that it has stopped.
+//
+// The bound it watches is correct and is not what M27 changes: dropping an event
+// loses a file until a sweep, and a larger buffer only defers the stall and
+// lengthens the drain at unmount. What was wrong is that a mount could spend two
+// hours uploading at the provider's rate with nothing in the log to say the
+// filesystem was being held back on purpose, so the only conclusion available to
+// the person watching it was that drivel had broken.
+//
+// Both lines are keyed on the state TRANSITION rather than on a timer. A
+// periodic depth report is a status API's job (M14) and would be a worse version
+// of one; what a log can say that an API cannot is "this started here, and
+// stopped here".
+type backpressure struct {
+	e     *Engine
+	bound int        // what depth() can reach before everything upstream blocks
+	depth func() int // events queued in front of the uploader, right now
+
+	on    bool
+	since time.Time
+	at    int // depth when the episode opened
+	waits int // dispatches that had to wait during it
+}
+
+// blocked records that a dispatch is about to wait for room, and reports whether
+// that opened a new episode.
+func (b *backpressure) blocked() bool {
+	b.waits++
+	if b.on {
+		return false
+	}
+	b.on, b.since, b.at = true, time.Now(), b.depth()
+	// Not "the queue is full": what filled is ONE worker's inbox, and because
+	// paths are hashed to workers the aggregate can be well short of the bound
+	// when that happens — measured at 646 of 1280 with four workers. Leading
+	// with the consequence is both shorter and true.
+	b.e.logf("[sync] back-pressure: writes through the mount are now waiting on uploads "+
+		"(%d of %d event(s) queued; -upload-workers %d, -push-delay %s)",
+		b.at, b.bound, b.e.workers, b.e.debounce)
+	return true
+}
+
+// sample reports whether the episode is still open, ending it if the backlog has
+// receded far enough to say so.
+func (b *backpressure) sample() bool {
+	if !b.on {
+		return false
+	}
+	left := b.depth()
+	if left > b.bound/satLowWater {
+		return true
+	}
+	b.e.logf("[sync] back-pressure: cleared after %s — %d write(s) waited, %d event(s) still queued",
+		time.Since(b.since).Round(time.Millisecond), b.waits, left)
+	b.on, b.waits = false, 0
+	return false
+}
+
+// end closes an episode that was still open when the engine stopped.
+func (b *backpressure) end() {
+	if !b.on {
+		return
+	}
+	b.e.logf("[sync] back-pressure: cleared at shutdown after %s — %d write(s) waited",
+		time.Since(b.since).Round(time.Millisecond), b.waits)
+	b.on, b.waits = false, 0
 }
 
 // runLogOnly is the M1 no-store path: just log each observed mutation.
@@ -427,7 +594,11 @@ func (e *Engine) executeWithRetry(ctx context.Context, ev fsevent.Event) {
 			return // cancelled: give up quietly (drain deadline or shutdown)
 		}
 		if !provider.IsRetryable(err) || attempt >= e.retry.max {
-			e.logf("[sync] push %s %s failed after %d attempt(s): %v", ev.Op, ev.Path, attempt, err)
+			// One line, not two: the shape that abandons the most pushes is a
+			// non-retryable error, which gives up after a single attempt, so a
+			// permission failure over a large tree writes one of these per file.
+			e.logf("[sync] push %s %s failed after %d attempt(s): %v%s",
+				ev.Op, ev.Path, attempt, err, e.oweRepair(ev))
 			return
 		}
 		e.logf("[sync] push %s %s attempt %d failed, retrying: %v", ev.Op, ev.Path, attempt, err)
@@ -438,6 +609,59 @@ func (e *Engine) executeWithRetry(ctx context.Context, ev fsevent.Event) {
 			delay = e.retry.cap
 		}
 	}
+}
+
+// oweRepair records that this event was abandoned, so the next sweep re-pushes
+// the path instead of the repair waiting for -sweep-interval — 24 hours away on
+// Drive, and never at all when it is 0. It returns the clause to append to the
+// failure line, so that giving up still costs exactly one line (M27).
+//
+// Giving up is right: retrying a permission error forever is a spin, and an
+// unbounded persistent outbound queue would be a second durability surface over
+// the one DESIGN.md §12 already prices. What was wrong is that the knowledge
+// went with it — nothing marked the path, so nothing could put it right.
+func (e *Engine) oweRepair(ev fsevent.Event) string {
+	if e.state == nil {
+		return ""
+	}
+	rel, ok := repairPathOf(ev)
+	if !ok {
+		return ""
+	}
+	if err := e.state.OweRepair(rel, time.Now()); err != nil {
+		// Worth its own clause: this is the path losing its last chance of being
+		// repaired before the next scheduled sweep, which may be a day away.
+		return fmt.Sprintf(" (and recording %s for repair failed: %v)", rel, err)
+	}
+	return " (recorded for repair by the next sweep)"
+}
+
+// repairPathOf names the local path whose current contents a later sweep should
+// send for an abandoned event, and reports whether there is one at all.
+//
+// It is the path and not the operation on purpose. The record is not a queued
+// request to replay — the sweep re-derives what to send from the backing file as
+// it stands then, which is the only honest answer once an arbitrary amount of
+// time has passed.
+func repairPathOf(ev fsevent.Event) (string, bool) {
+	switch ev.Op {
+	case fsevent.OpRename:
+		// The bytes are at the destination; the source no longer exists locally,
+		// so a re-push of it would find nothing. Re-sending the file under its new
+		// name is what a Move was going to achieve anyway.
+		return ev.NewPath, ev.NewPath != ""
+	case fsevent.OpUnlink, fsevent.OpRmdir:
+		// Nothing local to send. An abandoned deletion is therefore NOT repaired
+		// by this record, and M27 does not close that case: the remote object is
+		// still there and still marked seen by the sweep, so the delete pass never
+		// considers it. Undoing it needs the deletion to go back through
+		// -max-deletes, which is the delete pass's own machinery rather than a
+		// re-push — see DESIGN.md §9, M27.
+		return "", false
+	case fsevent.OpSetattr:
+		return "", false // metadata-only; push does nothing for it, so it cannot fail
+	}
+	return ev.Path, ev.Path != ""
 }
 
 // handle applies one event synchronously (log-only mode logs; otherwise push with

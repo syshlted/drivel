@@ -13,6 +13,50 @@ from source with `make build`.
 
 ## Unreleased
 
+### An upload Drivel gave up on is now repaired, not forgotten — 2026-10-12
+
+When an upload fails, Drivel retries it a few times over about seven seconds and
+then stops — and an error the backend calls permanent, such as a permission
+refusal, is not retried at all. Stopping is right; retrying a rejected upload
+forever would spin. What was wrong is that Drivel then *forgot about the file*.
+Nothing recorded it, nothing counted it, and the only thing that could ever put
+it right was the next full re-scan of the remote tree, which is a day away by
+default and which `sweep-interval = 0` switches off entirely.
+
+Drivel now remembers the path and brings the next re-scan forward a few minutes
+to re-send it, logging both halves — `(recorded for repair by the next sweep)` on
+the failure, and `[sweep] repush  PATH` when it goes out. **This works with
+`sweep-interval = 0`**, which means "do not poll on a schedule", not "never
+repair". Repeated failures back the repair off, doubling out to 80 minutes, so a
+backend that is genuinely broken is not re-scanned every five minutes while it
+stays that way.
+
+Two things this does not do. It does not retry an abandoned *deletion* — there is
+no local file to re-send, so delete it again if you see one fail. And it is not a
+queue of unsent work: Drivel records the path and nothing else, then re-sends
+whatever is on disk when it gets there.
+
+### Drivel now says when writes are waiting on uploads — 2026-10-12
+
+Copying a lot of files into a mount can fill the queue of pending uploads, and
+once it is full the filesystem waits rather than dropping anything — so the copy
+runs at the speed of your uplink, which on Google Drive is about one file per
+second. That is correct behaviour and it stays: dropping a change would lose a
+file. But nothing said it was happening, so from the outside a working mount
+under load and a broken one looked identical.
+
+There are now two log lines, one when the queue fills and one when it drains,
+naming how deep it is and the two settings that govern it:
+
+```
+[sync] back-pressure: writes through the mount are now waiting on uploads
+       (646 of 1280 event(s) queued; -upload-workers 4, -push-delay 300ms)
+[sync] back-pressure: cleared after 41m12s — 8104 write(s) waited, 12 event(s) still queued
+```
+
+Two lines per episode, not two per second: they mark the start and the end of the
+condition however long it lasts. A mount that is keeping up prints neither.
+
 ### Two mounts sharing one sync database now say so — 2026-10-10
 
 Each mount keeps its own small database of what it has already synced, and two

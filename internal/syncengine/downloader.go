@@ -71,6 +71,17 @@ type Downloader struct {
 	// only by the Run goroutine (and by runSweep, which that goroutine drives), so
 	// it needs no lock. Zero means never.
 	nextSweep time.Time
+
+	// repairDue is when a sweep owed to an abandoned push falls due, and
+	// repairFails counts the consecutive repair sweeps that left the debt
+	// standing. Same goroutine, same absence of a lock. See armRepairSweep.
+	//
+	// repairBase is repairDelay, as a field only so that a test can ask for the
+	// behaviour without waiting five minutes for it. It is not a Config knob: see
+	// repairDelay for why the delay is not the user's to set.
+	repairDue   time.Time
+	repairFails int
+	repairBase  time.Duration
 }
 
 // Materializer is the OPTIONAL lazy-hydration hook (M5), satisfied by
@@ -123,7 +134,7 @@ func NewDownloader(src provider.ChangeSource, store provider.Store, dataDir stri
 	if cad.Slow < cad.Fast {
 		cad.Slow = DefaultCadence.Slow
 	}
-	return &Downloader{src: src, store: store, dataDir: dataDir, state: st, cad: cad}
+	return &Downloader{src: src, store: store, dataDir: dataDir, state: st, cad: cad, repairBase: repairDelay}
 }
 
 // Run polls until ctx is cancelled. It resumes from the persisted cursor, or
@@ -256,15 +267,29 @@ func (d *Downloader) runWithoutFeed(ctx context.Context) {
 	}
 
 	if d.nextSweep.IsZero() {
-		// -sweep-interval 0 disables the only inbound path there is. That is a
-		// legitimate thing to ask for (a push-only mirror), and it is also the
-		// shape someone lands in by copying a Drive config, so say it once.
-		d.logf("[sweep] no change feed and -sweep-interval is 0: nothing will be pulled until the next restart")
-		return
+		// -sweep-interval 0 disables the only *scheduled* inbound path there is.
+		// That is a legitimate thing to ask for (a push-only mirror), and it is
+		// also the shape someone lands in by copying a Drive config, so say it
+		// once. The loop below still runs, because an abandoned push can put a
+		// repair sweep on the schedule from the outbound side: 0 means "do not
+		// poll", not "never repair" (DESIGN.md §9, M27).
+		d.logf("[sweep] no change feed and -sweep-interval is 0: nothing will be pulled unless an abandoned push asks for a repair sweep")
 	}
 
 	for {
-		wait := time.Until(d.nextSweep)
+		// Capped at the repair delay rather than sleeping straight through to
+		// nextSweep, because the other thing that can make a sweep due is written
+		// to the state store by the engine, in another goroutine, with no way to
+		// wake us. At a 24h interval that is a timer and one read transaction
+		// every few minutes, which is why this is a poll and not a notification:
+		// the two halves already share the state store and nothing else, and the
+		// record has to be consulted after a restart regardless.
+		wait := d.repairBase
+		if !d.nextSweep.IsZero() {
+			if w := time.Until(d.nextSweep); w < wait {
+				wait = w
+			}
+		}
 		if wait < time.Second {
 			wait = time.Second
 		}

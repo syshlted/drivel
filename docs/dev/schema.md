@@ -52,10 +52,15 @@ erDiagram
         bytes key PK "gen + NUL + path"
         bytes present "single byte 1; the value is unused"
     }
+    REPAIR {
+        string path PK "root-relative slash path"
+        timestamp at "when the outbound path first gave up on it"
+    }
 
     SWEEP ||--o{ SEEN : "gen namespaces the marks of one sweep"
     ECHO ||--o| SEEN : "a baseline with no mark is a delete candidate"
     ECHO ||--o| HYDRATION : "same path key; both dropped together by Forget"
+    REPAIR ||--o| ECHO : "an owed path usually HAS a baseline; that is why the walk misses it"
 ```
 
 What each bucket costs if the file is lost:
@@ -67,6 +72,7 @@ What each bucket costs if the file is lost:
 | `hydration` | M5 present-ranges cache over the xattr marker | one stat |
 | `sweep` | resume point of an interrupted enumeration, plus when the last one finished | the sweep restarts, and the next mount treats a periodic sweep as overdue |
 | `seen` | which paths one sweep observed remotely | a resumed sweep would infer false deletes — which is why these are on disk and not in memory |
+| `repair` | paths the uploader gave up on, for the next sweep to re-send (M27) | those files wait for `-sweep-interval` again, and are not repaired at all if it is `0` |
 
 `local-size` / `local-mtime` fingerprint the **backing** file, not the remote one,
 and they exist for providers that publish no content checksum — every filesystem
@@ -85,6 +91,23 @@ Reading it as a match would delete a file somebody had edited. Before these fiel
 existed a hashless provider answered "no baseline to compare against" for every
 file, so a deletion made on the remote was undone on the very next sweep — found
 against a live OpenSSH server, not in a test.
+
+`repair` is the only bucket written by the *failure* path, and it is deliberately
+not a queue: it holds a path and a time, never an operation and never content.
+The sweep re-derives what to send from the backing file as it stands when it gets
+there, which is the only honest answer once an arbitrary amount of time has
+passed — and it is what keeps this from becoming the persistent outbound queue
+DESIGN.md §9/M27 declines to build, with a second durability surface over the one
+§12 already prices.
+
+Two things about it are load-bearing. `OweRepair` **compares before writing**, so
+re-recording a path already owed costs no commit: the shape that abandons the
+most pushes is a non-retryable error, which gives up after one attempt with no
+backoff, so a permission failure over a large tree would otherwise fsync twice
+per file per retry round. And the sweep **clears a record before re-pushing it,
+never after** — `Push` is synchronous and records a fresh debt of its own if it
+gives up again, so clearing afterwards would erase the one thing saying the file
+is still unsent.
 
 The `echo` bucket is the one that grows: a baseline is dropped when the path is
 gone on **both** sides, and only a sweep can establish that. Deletes seen while

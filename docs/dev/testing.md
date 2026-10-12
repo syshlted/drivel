@@ -93,11 +93,17 @@ about the bugs too.
 
 ## Commit-budget tests
 
-Three tests assert how many bbolt write transactions an operation makes, not what
-it stores: `syncengine.TestPushCommitsPerFile` and `TestUnlinkCommitsPerFile`,
-`gdrive.TestStatThenPutCommitsTheMappingOnce` and friends, and the
-`pathindex` guard tests. `state.Store.Commits` and `pathindex.Store.Commits` are
-what they read.
+Several tests assert how many bbolt write transactions an operation makes, not
+what it stores: `syncengine.TestPushCommitsPerFile` and
+`TestUnlinkCommitsPerFile`, `gdrive.TestStatThenPutCommitsTheMappingOnce` and
+friends, the `pathindex` guard tests, and `state.TestOweRepairCommitsOncePerPath`
+(M27). `state.Store.Commits` and `pathindex.Store.Commits` are what they read.
+
+The M27 one is the clearest example of why the budget is worth asserting at all:
+the record it writes is correct however many times it is written, and the shape
+that writes it most is a **non-retryable** push error, which gives up after one
+attempt with no backoff — so a permission failure over a large tree would fsync
+twice per file per round, and only a count could say so.
 
 **They exist because the mistake they catch is invisible to every other kind of
 test.** A commit costs ~36 KB of disk writes and two fdatasyncs whatever the

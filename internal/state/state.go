@@ -35,6 +35,7 @@ var (
 	bucketHydration = []byte("hydration")
 	bucketSweep     = []byte("sweep")
 	bucketSeen      = []byte("seen")
+	bucketRepair    = []byte("repair")
 	keyCursor       = []byte("changefeed")
 	keySweep        = []byte("current")
 	keySweepDone    = []byte("done")
@@ -151,7 +152,7 @@ func Open(path string) (*Store, error) {
 	// Through s.update, not db.Update, so Commits() counts every commit this store
 	// has made rather than every one after the first.
 	if err := s.update(func(tx *bolt.Tx) error {
-		for _, b := range [][]byte{bucketCursor, bucketEcho, bucketHydration, bucketSweep, bucketSeen} {
+		for _, b := range [][]byte{bucketCursor, bucketEcho, bucketHydration, bucketSweep, bucketSeen, bucketRepair} {
 			if _, err := tx.CreateBucketIfNotExists(b); err != nil {
 				return err
 			}
@@ -564,4 +565,102 @@ func (s *Store) HasEchoes() (has bool, err error) {
 // invisible to the next one even before FinishSweep empties the bucket.
 func seenKey(gen, path string) []byte {
 	return []byte(gen + "\x00" + path)
+}
+
+// --- abandoned pushes (M27) -------------------------------------------------
+//
+// The repair bucket is what the outbound path leaves behind when it gives up.
+// syncengine's executeWithRetry drops an event after its retries are exhausted —
+// or, for a non-retryable error, after one attempt — which is the right thing to
+// do and was, until M27, done silently: nothing marked the path, so the only
+// thing that could ever put that file right was the next enumeration sweep,
+// whose Drive default is 24 hours away and which -sweep-interval 0 disables
+// outright.
+//
+// A record here says "the local copy of this path is ahead of the remote and
+// nobody is still trying". It is deliberately NOT a persistent outbound queue:
+// it holds a path, not an operation and not content, and the only thing that
+// consumes it is the sweep, which re-derives what to send from the backing file
+// as it stands then. See DESIGN.md §9, M27.
+
+// OweRepair records that the outbound path abandoned a push for path, so the
+// next sweep re-pushes it. at is when it was abandoned, kept for the log.
+//
+// Re-recording a path already owed costs no commit. That is not a micro
+// optimisation: the shape that produces the most abandonments is a non-retryable
+// error, which gives up after a single attempt with no backoff at all, so a
+// permission failure over a large tree can abandon as fast as the engine can
+// push. The first record of a path is worth its ~36 KB; the hundredth is not,
+// and a blind Put would pay for every one of them (DESIGN.md §12).
+func (s *Store) OweRepair(path string, at time.Time) error {
+	if path == "" {
+		return nil
+	}
+	already := false
+	if err := s.db.View(func(tx *bolt.Tx) error {
+		already = tx.Bucket(bucketRepair).Get([]byte(path)) != nil
+		return nil
+	}); err != nil {
+		return err
+	}
+	if already {
+		// Keep the FIRST time it was abandoned: that is when the local copy
+		// started being ahead of the remote, which is what the log wants to say.
+		return nil
+	}
+	stamp, err := at.UTC().MarshalText()
+	if err != nil {
+		return err
+	}
+	return s.update(func(tx *bolt.Tx) error {
+		return tx.Bucket(bucketRepair).Put([]byte(path), stamp)
+	})
+}
+
+// RepairsOwed reports whether any abandoned push is waiting to be repaired.
+//
+// It is a read transaction over one bucket's first key, so the inbound loop can
+// afford to ask on every poll — which is how an abandoned push reaches the sweep
+// schedule without the engine and the downloader having to know about each
+// other. They share this store and nothing else.
+func (s *Store) RepairsOwed() (owed bool, err error) {
+	err = s.db.View(func(tx *bolt.Tx) error {
+		k, _ := tx.Bucket(bucketRepair).Cursor().First()
+		owed = k != nil
+		return nil
+	})
+	return owed, err
+}
+
+// EachRepair calls fn for every owed path, in path order.
+//
+// fn runs inside a read transaction and must not write to this store: the caller
+// collects first and clears as it pushes, because clearing a record is a write
+// and because the clear has to happen per path rather than per pass (see
+// ClearRepair).
+func (s *Store) EachRepair(fn func(path string, at time.Time) error) error {
+	return s.db.View(func(tx *bolt.Tx) error {
+		return tx.Bucket(bucketRepair).ForEach(func(k, v []byte) error {
+			var at time.Time
+			if err := at.UnmarshalText(v); err != nil {
+				// An unparseable stamp is not a reason to skip the repair — the path
+				// is the load-bearing half. Hand the zero time over and let the
+				// caller's log say "unknown".
+				at = time.Time{}
+			}
+			return fn(string(k), at)
+		})
+	})
+}
+
+// ClearRepair drops the record for one path.
+//
+// The sweep calls it BEFORE re-pushing that path, not after, and the ordering is
+// the whole correctness of the retry: a re-push that is abandoned again records
+// a fresh debt from inside the push, so clearing afterwards would erase the very
+// record that says the file is still unsent.
+func (s *Store) ClearRepair(path string) error {
+	return s.update(func(tx *bolt.Tx) error {
+		return tx.Bucket(bucketRepair).Delete([]byte(path))
+	})
 }

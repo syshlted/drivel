@@ -4278,11 +4278,16 @@ this whole group walks through, so it is a precondition rather than a note.
     confidential by Google's own account and protecting it would imply
     otherwise.
 
-29. **M27 — The sync path's two silences.** **Next in line** (queued 2026-10-12),
-    not started. Two defects that are not bugs in what the engine *does* — it
-    behaves correctly both times — but in what it tells the person depending on
-    it. They are one milestone because the shape of the fix is the same in each:
-    the engine already holds the fact and discards it.
+29. **M27 — The sync path's two silences.** **Shipped 2026-10-12.** Two defects
+    that are not bugs in what the engine *does* — it behaves correctly both
+    times — but in what it tells the person depending on it. They are one
+    milestone because the shape of the fix is the same in each: the engine
+    already holds the fact and discards it.
+
+    **What building it changed.** Part 1 landed as designed. Part 2 did not: the
+    cheapest of its three options turned out to repair nothing, which is in
+    "What shipped" below and is the one thing to read before touching this
+    again.
 
     **Part 1 — back-pressure is invisible.** The outbound path is bounded in two
     places, and at the defaults the bound is 1280 events: `eventBuffer` (1024,
@@ -4363,10 +4368,100 @@ this whole group walks through, so it is a precondition rather than a note.
     "schedule a sweep" and "make sure the next one covers this" is the whole design,
     not a detail of it.
 
+    **What shipped.**
+
+    *Part 1* is `backpressure` in `engine.go`, driven from `dispatch` — the one
+    place that can see the outbound path run out of room, because it is where
+    the send blocks. One line on entering an episode (depth, bound,
+    `-upload-workers`, `-push-delay`) and one on leaving it (duration, how many
+    writes waited, what is still queued). Three things it needs that the entry
+    above did not name. **Hysteresis is the feature, not a refinement**: in
+    steady saturation every dispatch finds room the instant a worker frees a
+    slot and then refills it, so "did this send block?" flips thousands of times
+    a minute, and a mutation removing the episode check produced **101 reports
+    where 1 was wanted** against the test that pins it. The episode ends when the
+    backlog falls to a quarter of the bound (`satLowWater`). And **the thing that
+    ends an episode is the event that never arrives** — the copy finishes, the
+    queues drain, and no further dispatch happens to notice — so there is a
+    sampler (`satSample`, 1s) armed only while saturated. It samples; it never
+    reports on a tick. And **the 1280 bound is the best case, not the bound a
+    given workload meets**: paths are hashed to workers, so a burst concentrated
+    on one worker blocks once *its* 64 slots are full while the other three sit
+    idle, making the practical bound `eventBuffer + 64`. Running it printed
+    "646 of 1280" the first time, which is why the line reports the depth it
+    reached instead of asserting the queue is full — the wording it shipped with
+    was the second one written.
+
+    *Part 2* shipped as the **second** option, not the first, and the reason is a
+    measurement: **"set a flag that makes the next sweep unconditional" would
+    have scheduled a sweep that repaired nothing.** The entry above says the
+    repair already exists because "M7b's local walk re-pushes a file that
+    diverged from its baseline". It does not. `pushLocalOnly` is the *new
+    locally* row and skips every path that has an echo at all; an abandoned push
+    is almost always a **rewrite of a file that has one**, whose baseline still
+    describes exactly what the remote holds — so the remote pass matches the echo
+    and correctly does nothing, the walk skips, and the file stays local forever.
+    Confirmed by running it before any of this was written, and now pinned by
+    `TestSweepRepushesAnAbandonedWriteToAnAlreadySyncedFile`, which fails with
+    `pushes = []` the moment the new pass is removed.
+
+    So the record carries the **path**: a `repair` bucket in `internal/state`
+    (path → when it was first abandoned), written by `Engine.oweRepair` from the
+    give-up branch, and consumed by `pushOwedRepairs`, a pass that runs in
+    `runSweep` *before* the walk — a repair that succeeds writes a fresh echo, so
+    the walk then skips the path for the ordinary reason and nothing is pushed
+    twice. Four properties are load-bearing, and three of them are reasons from
+    elsewhere in the tree arriving in a new place:
+
+    - **`OweRepair` compares before writing** (§12's rule). Re-recording an owed
+      path costs no commit, which matters because the non-retryable branch gives
+      up after one attempt with no backoff, so a permission failure over a large
+      tree abandons as fast as the engine can push.
+    - **The record is cleared BEFORE the push, never after.** `Push` is
+      synchronous and records a fresh debt if it gives up again; clearing
+      afterwards would erase the one thing saying the file is still unsent. The
+      cost of that ordering is a crash in between, losing one path's record —
+      against a clear-afterwards that loses the repair itself, silently, every
+      time it fails twice.
+    - **The record is a path, not an operation and not content**, which is what
+      keeps it from being the persistent outbound queue this entry declines to
+      build. `repairEvent` re-derives what to send from the backing file as it
+      stands: gone ⇒ drop the record, a directory ⇒ `OpMkdir`, a placeholder or
+      a special file ⇒ drop it (M5, M15), otherwise a whole-file `OpWrite` with
+      nil extents (M6's unknown-means-whole-file invariant).
+    - **A rename is owed at its destination**, where the bytes now are.
+
+    *Scheduling* is `armRepairSweep`: the first poll that sees a debt sets a
+    deadline `repairDelay` (5m) out and says so; `dueSweep` pulls `nextSweep`
+    back to it. Nothing sweeps on the spot, which is the objection this entry and
+    the test plan's Group V write-up both insisted on keeping. A repair sweep
+    that leaves the debt standing doubles the delay, out to 80 minutes, so a
+    backend that is enumerable but failing is not swept every five minutes
+    forever. **`-sweep-interval 0` honours it**, per the recommendation below —
+    which meant `runWithoutFeed` could no longer return at interval 0 and now
+    idles instead, waking at `repairDelay` to re-read the bucket. That is a poll
+    rather than a notification on purpose: the engine and the downloader share
+    the state store and nothing else, the record has to be consulted after a
+    restart regardless, and a cross-object callback would write `nextSweep` from
+    a worker goroutine, which is single-goroutine state by design.
+
+    **Two things M27 deliberately does not close.** An abandoned **deletion** is
+    not repaired: there is no local content to re-send, and inferring it later
+    would have to go back through `-max-deletes`, which is the delete pass's
+    machinery rather than a re-push — the remote object is still there and still
+    marked seen, so the delete pass never considers it. `repairPathOf` therefore
+    declines to record one at all, rather than recording a path the repair pass
+    would drop for having no file. And **a shutdown cannot overtake a blocked
+    dispatch**: the send into a worker queue is unconditional (dropping is the
+    thing this bound exists to avoid), so a cancelled context does not unwind a
+    saturated engine, the engine's `drainTimeout` is only armed after the loop
+    exits, and `app.Run`'s `<-engineDone` is unbounded. That is pre-existing and
+    out of scope here; the honest fix is a per-attempt deadline on the provider
+    call, which §6 declines for `ChunkTransferTimeout` for a stated reason. Worth
+    writing down because part 1 is precisely about that bound.
+
     Unsettled: whether an abandoned push is also a per-path status through M14,
-    where `unknown` as a first-class status already points; and whether
-    `-sweep-interval 0` should honour an abandonment-triggered sweep anyway — the
-    recommendation is **yes**, because `0` means "do not poll", not "never repair".
+    where `unknown` as a first-class status already points.
 
 
 

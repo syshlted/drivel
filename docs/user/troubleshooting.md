@@ -165,6 +165,25 @@ calmer cycle and makes it far less likely; `-upload-workers` does not help, sinc
 the limit is the link rather than the pool. A single large file is unaffected:
 Drivel notices it once, when it is closed.
 
+Drivel says so when it happens, once each way:
+
+```
+[sync] back-pressure: writes through the mount are now waiting on uploads
+       (646 of 1280 event(s) queued; -upload-workers 4, -push-delay 300ms)
+[sync] back-pressure: cleared after 41m12s — 8104 write(s) waited, 12 event(s) still queued
+```
+
+Those two lines are the whole report, however long the copy runs: they mark the
+start and the end, not the backlog from moment to moment. Seeing the first
+without the second means it is still going on.
+
+The count can be well short of the total — 646 of 1280 above — and that is not a
+contradiction. Each file is handled by one of the upload workers, chosen from its
+path, so a burst that lands mostly on one worker fills that worker's share and
+stops there while the others still have room. Raising `-upload-workers` raises
+the total, but not the share any one worker gets, and it does not make the copy
+finish sooner — the limit is the uplink.
+
 **A file came back after I deleted it.** Most likely [same-name
 siblings](data-safety.md#same-name-siblings): the path names more than one Drive
 object, deleting removed the visible one, and an older one is now visible. Resolve
@@ -176,6 +195,31 @@ part of it. Check first that the mount is pointed where you think it is — a wr
 `-drive-root`, or an empty `-data`, produces exactly this. If the deletions are
 genuine, re-run with **both** `-resync` and a higher `-max-deletes`; the cap alone
 changes nothing until the next scheduled sweep.
+
+**`[sync] push write … failed after 5 attempt(s)`.** Drivel tried, backed off
+between attempts, and gave up — a few seconds of retries in total. A
+non-retryable error (a permission failure, a quota refusal) gives up after the
+first attempt instead, which the count tells you. The file on your machine is
+fine; it is the copy on the remote that is now behind.
+
+The line ends in `(recorded for repair by the next sweep)`, and that is what
+happens: Drivel remembers the path and re-sends it from the next enumeration,
+which it schedules within a few minutes rather than waiting for
+[`-sweep-interval`](configuration.md#when-an-upload-is-abandoned). **This works
+with `-sweep-interval 0` too** — `0` means "do not poll", not "never repair". You
+will see the repair in the log as `[sweep] repush  PATH (an earlier push was
+abandoned)`, and the sweep's closing summary counts them.
+
+If the failures keep coming, fix the cause rather than waiting: the repair is
+re-attempted on a sweep that backs off as it keeps failing, out to 80 minutes
+between tries, so it will not fix a wrong credential or a full account for you.
+
+**A file I deleted is still on the remote, and nothing retried the deletion.**
+This one is not repaired automatically. A push that is abandoned is re-sent from
+the local file, and a deletion has no local file to re-send from — so if the
+`[sync] push unlink …` line failed, delete it again, or from the other machine.
+Drivel never infers that deletion for you, because the remote object is still
+there and still looks like a file you have.
 
 **Inbound sync stopped silently.** Google expires change cursors. Drivel
 recognises the expiry and recovers by re-enumerating; if you suspect it has not,

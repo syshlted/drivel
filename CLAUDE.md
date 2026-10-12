@@ -430,28 +430,9 @@ below for why the backing file is opened readable regardless.
 
 Independent of M9, nothing waits on either.
 
-**M27** the sync path's two silences — **next in line** (queued 2026-10-12), not
-started. Both halves are cases of the engine doing the right thing and telling
-nobody, and DESIGN.md §9/M27 has the reasoning. **Back-pressure is invisible**:
-the outbound path is bounded at 1024 (`eventBuffer`) + workers × 64 = 1280 events
-at the defaults, past which `dispatch` waits on a full worker queue, the coalescer
-stops reading `events`, and `vfs.node.emit` blocks the FUSE handler — MC-11
-measured a 1286 backlog against that 1280. The bound is correct and stays; what is
-missing is a line on entering and leaving saturation, measured **where the
-blocking happens** (a depth sampled in `emit` cannot tell a full queue from a slow
-provider), rate-limited on the state *transition* rather than on time, and not
-arriving as a verbosity knob (M25 rule 1). **And an abandoned push is forgotten
-rather than merely abandoned**: `executeWithRetry` drops the event after
-`max: 5`/~7.5s of backoff — or after *one* attempt when the error is
-non-retryable — and nothing marks the path, counts it or schedules the repair,
-which then waits for `-sweep-interval` (24h on Drive, disabled at `0`). Decided:
-do not raise `max`, do not build a persistent outbound queue, and **do not start a
-sweep on the spot** — the options are to re-arm the next sweep or record what it
-owes, which is what keeps the test plan's "a sweep is the most expensive and most
-dangerous thing we do" objection intact. The tempting wrong reading is that five
-transient failures mean something systemic and therefore bound the damage: 7.5s is
-a wifi handoff, and if it *is* systemic then every push in flight and every one
-arriving during the outage is dropped the same way.
+M27 the sync path's two silences **shipped 2026-10-12**: back-pressure is
+reported, and an abandoned push is repaired rather than forgotten. See "The sync
+path's two silences" below for the invariants.
 
 **M14** control & status API — a unix socket (`internal/control`, HTTP/JSON,
 `/v1/…`) so third-party tools can read per-path sync status and per-backend stats,
@@ -857,15 +838,16 @@ V, failure and degradation** (`internal/app/failure_test.go` over the per-peer f
 injection in `faultstore_test.go`): MC-41, MC-43, MC-44b and MC-46 run in-process,
 MC-45's premise turned out not to hold, **MC-47 ran for real on 2026-10-10 over two
 processes and a local sshd** (see M8 rule 2), and only MC-40/MC-44 are left, Tier B
-by mechanism rather than by scheduling — **and now gated on M27**, since the finding
-below is what M27 fixes and MC-40 would otherwise measure a loss the product is
-already known to forget. Three of its findings are products of
-running it and not of the plan: an **abandoned push and a failed download are both
-repaired only by a sweep**, which `-sweep-interval 0` disables; the shutdown gap in
-M8 rule 1 above; and **an eager SFTP mount without `-materialize` never receives
-anything** (SFTP rule 2).
+by mechanism rather than by scheduling — **ungated since M27 shipped**, since the
+finding below is what M27 fixed and MC-40 would otherwise have measured a loss
+the product was already known to forget. Three of its findings are products of
+running it and not of the plan: an **abandoned push and a failed download were
+both repaired only by a sweep**, which `-sweep-interval 0` disables — the push
+half is M27, the **download half is not and still waits for a sweep**; the
+shutdown gap in M8 rule 1 above; and **an eager SFTP mount without
+`-materialize` never receives anything** (SFTP rule 2).
 
-**The queue is M27, then Group V's remaining two, then Group IV, then Group VI**
+**The queue is Group V's remaining two, then Group IV, then Group VI**
 (§5 of the test plan is the authority and carries the Group VI load estimate). Two
 things about that order are worth keeping: Group V is nearly finished rather than
 nearly started, so what looks like a group is two cases; and Group VI's constraint
@@ -1237,6 +1219,78 @@ over a LAN all beat 749 commits/s. **The cheaper thing first** is batching the
 (`flushForget`/`SetCursor` are there and already ordered) — full durability, no
 panic handling, but it needs its own reasoning about a path appearing twice in one
 page.
+
+## The sync path's two silences (M27)
+
+Two places the engine did the right thing and told nobody. Both fixes live where
+the fact already was; neither is a verbosity knob (M25 rule 1 — `-debug` is
+go-fuse's protocol trace and must never come to mean two things).
+
+1. **Back-pressure is reported on the state *transition*, and hysteresis is what
+   makes that possible.** `backpressure` in `engine.go` is driven from
+   `dispatch`, because that is **where the blocking happens** — a depth sampled
+   in `vfs.node.emit` cannot tell a full worker queue from a slow provider. One
+   line entering an episode (depth, the 1024 + workers×64 bound,
+   `-upload-workers`, `-push-delay`), one leaving it. **In steady saturation
+   every dispatch finds room the instant a worker frees a slot and then refills
+   it**, so a report keyed on "did this send block?" is the ten-thousand-line log
+   this replaces — a mutation removing the episode check produced **101 reports
+   where 1 was wanted**. The episode ends at a quarter of the bound
+   (`satLowWater`). **The event that ends an episode is the one that never
+   arrives** — the copy finishes, the queues drain, nothing dispatches again — so
+   a sampler (`satSample`, 1s) is armed *only while saturated*. It samples; it
+   never reports on a tick. And **1280 is the best case, not the bound a workload
+   meets**: paths are hashed to workers, so a burst landing mostly on one blocks
+   at `eventBuffer + 64` while the others idle — it printed "646 of 1280" the
+   first time it ran, which is why the line reports the depth reached rather than
+   claiming the queue is full.
+
+2. **An abandoned push records its PATH, and a bare flag would have repaired
+   nothing.** This is the correction worth keeping: DESIGN.md's original entry
+   said the repair already existed because "the local walk re-pushes a file that
+   diverged from its baseline". It does not. `pushLocalOnly` is the *new locally*
+   row and **skips every path that has an echo**, while an abandoned push is
+   almost always a rewrite of a file that has one — whose baseline still
+   describes exactly what the remote holds, so the remote pass matches the echo
+   and correctly does nothing. Measured before the fix; pinned by
+   `TestSweepRepushesAnAbandonedWriteToAnAlreadySyncedFile`, which fails with
+   `pushes = []` the moment the pass is removed.
+
+   So `internal/state` has a `repair` bucket (path → when first abandoned),
+   written by `Engine.oweRepair` and consumed by `pushOwedRepairs`, which runs in
+   `runSweep` **before** the walk — a repair that succeeds writes a fresh echo,
+   so the walk then skips the path for the ordinary reason. Four rules:
+   `OweRepair` **compares before writing** (the non-retryable branch gives up
+   after *one* attempt, so a permission failure over a large tree abandons as
+   fast as the engine can push); the record is cleared **before** the push, never
+   after, because `Push` is synchronous and re-records its own debt if it gives
+   up again; the record is **a path, not an operation and not content**, which is
+   what keeps it from being the persistent outbound queue the design declines —
+   `repairEvent` re-derives the event from the backing file (gone ⇒ drop,
+   directory ⇒ `OpMkdir`, placeholder or special ⇒ drop, else whole-file
+   `OpWrite` with nil extents); and **a rename is owed at its destination**.
+
+3. **Nothing starts a sweep on the spot.** `armRepairSweep` sets a deadline
+   `repairDelay` (5m) out and says so; a repair sweep that leaves the debt
+   standing doubles it to a ceiling of 80 minutes, so an enumerable-but-failing
+   backend is not swept every five minutes forever. **`-sweep-interval 0` honours
+   a repair sweep** — `0` means "do not poll", not "never repair" — which is why
+   `runWithoutFeed` no longer returns at interval 0 but idles, waking at
+   `repairDelay` to re-read the bucket. A poll rather than a notification on
+   purpose: the two halves share the state store and nothing else, the record
+   must be read after a restart anyway, and a callback would write `nextSweep`
+   from a worker goroutine when it is single-goroutine state by design.
+
+**Two things M27 does not close, and neither is an oversight.** An abandoned
+**deletion** is not repaired — no local content to re-send, and inferring it
+later has to go through `-max-deletes`, which is the delete pass's machinery, so
+`repairPathOf` declines to record one at all. And **a shutdown cannot overtake a
+blocked dispatch**: the send into a worker queue is unconditional (dropping is
+what the bound exists to prevent), so a cancelled context does not unwind a
+saturated engine, `drainTimeout` is only armed after the loop exits, and
+`app.Run`'s `<-engineDone` is unbounded. Pre-existing, found while building part
+1, and the honest fix is a per-attempt provider deadline — which §6 declines for
+`ChunkTransferTimeout` for a stated reason.
 
 ## Special files & mount safety (M15 items 1–3)
 

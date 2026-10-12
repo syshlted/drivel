@@ -20,7 +20,7 @@ flowchart LR
         backing[("Backing directory<br/>source of truth / local cache")]
         engine["Sync engine — outbound<br/>internal/syncengine.Engine"]
         downloader["Sync engine — inbound<br/>internal/syncengine.Downloader"]
-        state[("State store<br/>internal/state (bbolt)<br/>cursor + echo records<br/>+ sweep state (M7b)")]
+        state[("State store<br/>internal/state (bbolt)<br/>cursor + echo records<br/>+ sweep state (M7b)<br/>+ repair records (M27)")]
         hydrate["Hydrator (M5, opt-in)<br/>internal/hydrate<br/>placeholders + fault-in"]
         transport["Transport<br/>internal/transport<br/>HTTP/3 → HTTP/2"]
         index[("Path index (M7)<br/>internal/pathindex (bbolt)<br/>path ↔ fileID — a cache")]

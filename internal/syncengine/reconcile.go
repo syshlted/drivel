@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"path"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -118,6 +119,32 @@ const DefaultMaxDeletes = 100
 // the change feed within seconds.
 const DefaultSweepInterval = 24 * time.Hour
 
+// repairDelay is how long after an abandoned push a repair sweep falls due, and
+// maxRepairDelay is where the backoff for repeated failures stops.
+//
+// Not immediately, and that is the design rather than a hedge. A sweep is the
+// most expensive thing drivel does and the most dangerous (MC-25, MC-53), so
+// firing one off a transient failure would trade a known small loss — one file,
+// recorded, recoverable — for an unknown large cost. The delay also collapses a
+// whole outage's worth of abandonments into a single sweep, and gives the
+// provider time to come back before the sweep spends requests on it. What M27
+// guarantees is that the NEXT sweep happens and covers the path, not that one
+// starts on the spot.
+//
+// The backoff is for the case the delay alone does not cover: a sweep whose
+// re-pushes are abandoned again re-records the debt, so without it a provider
+// that is failing but still enumerable would be swept every five minutes
+// indefinitely. It doubles for each consecutive failure and stops after four,
+// putting the ceiling at 80 minutes.
+//
+// It is a constant and not a flag. What it governs is how long a repair waits,
+// and the two numbers a user can already set either side of it — -sweep-interval
+// and the retry policy — are the ones with a reason to differ per mount.
+const repairDelay = 5 * time.Minute
+
+// maxRepairBackoff is how many times repairDelay may double.
+const maxRepairBackoff = 4
+
 // Reconcile enables the M7b sweep on this downloader and returns it for chaining.
 // It is a no-op unless the store also implements provider.Enumerator.
 func (d *Downloader) Reconcile(opts ReconcileOptions) *Downloader {
@@ -164,6 +191,11 @@ func (d *Downloader) startFeed(ctx context.Context) (string, error) {
 		d.logf("[sweep] no change cursor yet: enumerating the remote tree before tailing it")
 	case d.rec.Force:
 		d.logf("[sweep] -resync: re-enumerating the remote tree")
+	case d.repairsOwed():
+		// An abandoned push from a previous run. The debt predates this process,
+		// so there is nothing to wait for: repairDelay exists to collapse a live
+		// outage into one sweep, and this one is already over.
+		d.logf("[sweep] a push was abandoned before this mount last stopped: re-enumerating the remote tree to repair it")
 	case d.sweepOverdue():
 		d.logf("[sweep] no enumeration within -sweep-interval %s: re-enumerating the remote tree", d.rec.Interval)
 	default:
@@ -208,6 +240,62 @@ func (d *Downloader) sweepDeadline() time.Time {
 	return last.Add(d.rec.Interval)
 }
 
+// repairsOwed reports whether the outbound path gave up on anything that the
+// next sweep should put right.
+//
+// An unreadable store answers no, for the same reason sweepOverdue does: it is
+// not evidence, and the alternative is sweeping on every poll.
+func (d *Downloader) repairsOwed() bool {
+	if !d.canSweep() || d.rec.Push == nil {
+		// No outbound path to repair *through* means the records can never be
+		// discharged, and arming a sweep for them would schedule one every
+		// repairDelay for the life of the mount. The question every caller is
+		// really asking is "is there a repair this downloader can perform?".
+		return false
+	}
+	owed, err := d.state.RepairsOwed()
+	if err != nil {
+		d.logf("[sweep] reading the repair list: %v", err)
+		return false
+	}
+	return owed
+}
+
+// armRepairSweep brings the next sweep forward when an abandoned push is waiting
+// to be repaired, and is what makes -sweep-interval stop being the only trigger.
+//
+// It is announced when the deadline is set rather than when the sweep runs,
+// because the gap between them is minutes and a silent one reads as nothing
+// happening. Once armed the deadline is remembered, so a second abandonment
+// joins the sweep already scheduled instead of pushing it further out.
+func (d *Downloader) armRepairSweep() {
+	if d.repairDue.IsZero() {
+		if !d.repairsOwed() {
+			return
+		}
+		wait := d.repairWait()
+		d.repairDue = time.Now().Add(wait)
+		d.logf("[sweep] a push was abandoned: a repair sweep falls due in %s", wait)
+	}
+	if d.nextSweep.IsZero() || d.repairDue.Before(d.nextSweep) {
+		d.nextSweep = d.repairDue
+	}
+}
+
+// repairWait is the delay before the next repair sweep, doubled for each
+// consecutive one that finished with the debt still standing.
+func (d *Downloader) repairWait() time.Duration {
+	base := d.repairBase
+	if base <= 0 {
+		// Only reachable through a Downloader built as a literal rather than by
+		// NewDownloader. Worth a line because the zero value shifts to zero,
+		// which would put the deadline at "now" and sweep on the spot — the one
+		// behaviour this whole mechanism exists to avoid.
+		base = repairDelay
+	}
+	return base << min(d.repairFails, maxRepairBackoff)
+}
+
 // dueSweep runs the periodic sweep if the deadline has passed, returning the
 // cursor the feed continues from. It exists for the long-lived mount that never
 // restarts, which is exactly the process startFeed's checks cannot help.
@@ -216,13 +304,27 @@ func (d *Downloader) sweepDeadline() time.Time {
 // as on a first run. The cursor it replaces is older than the one in hand, which
 // replays changes the feed already delivered — idempotent, and dropped by §4.
 func (d *Downloader) dueSweep(ctx context.Context) (string, bool) {
+	d.armRepairSweep()
 	if d.nextSweep.IsZero() || time.Now().Before(d.nextSweep) {
 		return "", false
 	}
+	repair := !d.repairDue.IsZero() && !d.repairDue.After(d.nextSweep)
 	// Reschedule before running, not after. A sweep that fails must not retry in a
 	// tight poll loop, and one that takes an hour must not be due again on return.
-	d.nextSweep = time.Now().Add(d.rec.Interval)
-	d.logf("[sweep] -sweep-interval %s elapsed: re-enumerating the remote tree", d.rec.Interval)
+	// With no interval there is no periodic schedule to return to, so the deadline
+	// goes back to "never" and armRepairSweep is the only thing that can set it
+	// again — otherwise one abandoned push would leave a mount with
+	// -sweep-interval 0 sweeping forever.
+	d.nextSweep = time.Time{}
+	if d.rec.Interval > 0 {
+		d.nextSweep = time.Now().Add(d.rec.Interval)
+	}
+	d.repairDue = time.Time{}
+	if repair {
+		d.logf("[sweep] repairing an abandoned push: re-enumerating the remote tree")
+	} else {
+		d.logf("[sweep] -sweep-interval %s elapsed: re-enumerating the remote tree", d.rec.Interval)
+	}
 	fresh, err := d.beginSweep(ctx)
 	if err != nil {
 		if ctx.Err() == nil {
@@ -322,9 +424,22 @@ func (d *Downloader) runSweep(ctx context.Context, sw state.Sweep) (string, erro
 	// the token was taken before the sweep, so the changes are still waiting when
 	// polling begins. Serial and deterministic is worth more here than concurrent
 	// and racing the very paths it is reconciling.
+	// Before the walk, because the walk cannot do this job and would not notice
+	// that it had not: it pushes a file with no baseline, and an abandoned push is
+	// usually a rewrite of a file that has one. A repair that succeeds here writes
+	// a fresh echo, so the walk then skips the path for the ordinary reason.
+	d.pushOwedRepairs(ctx, &st)
 	d.pushLocalOnly(ctx, sw, &st)
 	if err := d.applyDeletes(ctx, sw, &st); err != nil {
 		d.logf("[sweep] delete pass: %v", err)
+	}
+	// Whether the debt survived its repair decides how soon the next repair sweep
+	// may fall due. Cleared rather than doubled on success, so an isolated failure
+	// does not leave a mount sweeping on an hour's delay for the rest of its life.
+	if d.repairsOwed() {
+		d.repairFails++
+	} else {
+		d.repairFails = 0
 	}
 
 	// Only with a feed. A provider without one has no cursor, and persisting the
@@ -359,6 +474,7 @@ type sweepStats struct {
 	kept        int // would have been deleted locally, but the local copy diverged
 	orphaned    int // baselines dropped without acting: gone locally, unlisted remotely
 	special     int // local non-regular files stepped over: no byte stream to sync (M15)
+	repaired    int // paths re-pushed after the outbound path gave up on them (M27)
 }
 
 // kindOf names a file type for the one job of telling a user which of their files
@@ -400,6 +516,9 @@ func (s sweepStats) String() string {
 	}
 	if s.special > 0 {
 		out += fmt.Sprintf(", %d local special file(s) skipped", s.special)
+	}
+	if s.repaired > 0 {
+		out += fmt.Sprintf(", %d re-pushed after an abandoned upload", s.repaired)
 	}
 	return out
 }
@@ -477,6 +596,87 @@ func (d *Downloader) wouldMaterialize(f provider.RemoteFile) bool {
 	}
 	_, err := os.Lstat(filepath.Join(d.dataDir, filepath.FromSlash(f.Path)))
 	return err == nil
+}
+
+// pushOwedRepairs re-sends the paths the outbound path gave up on (M27).
+//
+// It exists because no other pass can find them, which was measured before it
+// was written rather than assumed. The remote half of the sweep sees the object
+// still holding the content we last successfully pushed, matches it against the
+// echo and correctly does nothing; pushLocalOnly skips any path that has an echo
+// at all, because its row of the table is "new locally". So a file that was
+// synced, rewritten, and whose push was then abandoned stayed local forever —
+// and a bare "a sweep is owed" flag, which is the cheapest of the three options
+// DESIGN.md §9/M27 weighed, would have scheduled a sweep that repaired nothing.
+//
+// The record is dropped BEFORE the push, never after. Push is synchronous and
+// records a fresh debt of its own if it gives up again, so clearing afterwards
+// would erase the one thing saying the file is still unsent. The cost of that
+// ordering is a crash in between, which loses one path's record — against a
+// clear-afterwards that would lose the repair itself, silently, every time it
+// failed twice.
+func (d *Downloader) pushOwedRepairs(ctx context.Context, st *sweepStats) {
+	if d.rec.Push == nil || d.state == nil {
+		return
+	}
+	// Collected first because EachRepair runs in a read transaction and clearing
+	// is a write — the same reason applyDeletes materialises its candidates.
+	var owed []string
+	if err := d.state.EachRepair(func(p string, _ time.Time) error {
+		owed = append(owed, p)
+		return nil
+	}); err != nil {
+		d.logf("[sweep] reading the repair list: %v", err)
+		return
+	}
+	for _, rel := range owed {
+		if ctx.Err() != nil {
+			return
+		}
+		ev, ok := d.repairEvent(rel)
+		if err := d.state.ClearRepair(rel); err != nil {
+			d.logf("[sweep] clearing the repair record for %s: %v", rel, err)
+			continue
+		}
+		if !ok {
+			continue
+		}
+		d.logf("[sweep] repush  %s (an earlier push was abandoned)", rel)
+		d.rec.Push.Push(ctx, ev)
+		st.repaired++
+	}
+}
+
+// repairEvent turns an owed path into the event that re-sends it, or reports
+// that there is nothing to send.
+//
+// Everything it refuses is refused for a reason that already exists elsewhere in
+// this file, because the record carries a path and nothing else: the backing
+// tree is the authority on what that path is now, not what it was when the push
+// was abandoned.
+func (d *Downloader) repairEvent(rel string) (fsevent.Event, bool) {
+	if skipLocal(path.Base(rel)) {
+		return fsevent.Event{}, false // §6 conflict copies stay local, as in the walk
+	}
+	fi, err := os.Lstat(filepath.Join(d.dataDir, filepath.FromSlash(rel)))
+	switch {
+	case err != nil:
+		// Gone locally since. Whatever the abandoned push was going to say about
+		// this path, the local tree no longer says it.
+		return fsevent.Event{}, false
+	case fi.IsDir():
+		return fsevent.Event{Op: fsevent.OpMkdir, Path: rel}, true
+	case !fi.Mode().IsRegular():
+		return fsevent.Event{}, false // M15: no byte stream to upload
+	}
+	// A placeholder is remote-born and pushing one is the M5 catastrophe. The
+	// uploader would refuse it anyway; not asking is cheaper and clearer.
+	if d.mat != nil && d.mat.IsPlaceholder(rel) {
+		return fsevent.Event{}, false
+	}
+	// Nil extents, deliberately: a record of the path cannot say which bytes
+	// changed, and M6's invariant is that unknown extents mean the whole file.
+	return fsevent.Event{Op: fsevent.OpWrite, Path: rel}, true
 }
 
 // pushLocalOnly walks the backing tree and pushes files that exist only there.

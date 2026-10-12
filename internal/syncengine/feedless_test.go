@@ -99,23 +99,35 @@ func TestFeedlessDownloaderWithNothingToEnumerateReturns(t *testing.T) {
 	}
 }
 
-// -sweep-interval 0 disables the only inbound path there is. That is a legitimate
-// thing to ask for, and Run must still return rather than busy-loop on a deadline
-// that never arrives.
-func TestFeedlessDownloaderStopsWhenTheIntervalIsZero(t *testing.T) {
+// -sweep-interval 0 disables the only *scheduled* inbound path there is. That is
+// a legitimate thing to ask for, and the loop must neither busy-loop on a
+// deadline that never arrives nor sweep again on its own.
+//
+// It used to return outright, which was right until M27 gave the outbound path a
+// way to put a sweep on the schedule: 0 means "do not poll", not "never repair",
+// so the loop now idles instead of exiting. It still exits on cancellation,
+// which is the only thing app.Run waits for.
+func TestFeedlessDownloaderIdlesWhenTheIntervalIsZero(t *testing.T) {
 	f := newFeedlessFixture(t, ReconcileOptions{Fetch: true, Interval: 0},
 		[]provider.RemoteFile{remote("a.txt", "x")})
+	f.dl.repairBase = 5 * time.Millisecond // wake often, so a busy-loop would show
 
+	ctx, cancel := context.WithCancel(t.Context())
 	done := make(chan struct{})
-	go func() { defer close(done); f.dl.Run(t.Context()) }()
+	go func() { defer close(done); f.dl.Run(ctx) }()
+
+	time.Sleep(200 * time.Millisecond)
+	// The initial sweep ran — the interval governs repeats, not the first one —
+	// and nothing prompted another, because nothing is owed.
+	if got := f.store.swept.Load(); got != 1 {
+		t.Errorf("sweeps = %d; want exactly the initial one", got)
+	}
+
+	cancel()
 	select {
 	case <-done:
 	case <-time.After(5 * time.Second):
-		t.Fatal("Run did not return with -sweep-interval 0")
-	}
-	// The initial sweep still ran: the interval governs repeats, not the first one.
-	if f.store.swept.Load() == 0 {
-		t.Error("no initial sweep ran")
+		t.Fatal("Run did not return when its context was cancelled")
 	}
 }
 

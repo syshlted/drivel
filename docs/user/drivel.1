@@ -598,6 +598,16 @@ unreconciled until something enumerates the tree again. Without a periodic sweep
 that means a first run, a resumed sweep, an expired cursor or
 .BR -resync ,
 which for a long-lived mount can be never.
+.IP
+.B 0
+disables the
+.I schedule
+and not the repair sweep: an upload that was abandoned still brings an
+enumeration forward a few minutes later, because
+.B 0
+means \(lqdo not poll\(rq rather than \(lqnever repair\(rq. See
+.B ABANDONED UPLOADS
+below.
 .TP
 .BI -push-delay " d"
 How long a file must go unchanged before it is uploaded. Default:
@@ -615,7 +625,14 @@ not on every
 so copying a large file produces two events rather than millions. Raising it
 trades promptness for quota, and drains the outbound queue on a longer cycle,
 which is what keeps a bulk copy of many small files from filling that queue and
-slowing the filesystem itself to the speed of the uplink.
+slowing the filesystem itself to the speed of the uplink. When that queue does
+fill,
+.B drivel
+logs one
+.B back-pressure
+line on entering the condition and one on leaving it, naming the depth and this
+option \(em it is waiting on purpose, and dropping the events instead would lose
+files.
 .IP
 It cannot hold a file indefinitely: one changed again inside every window is still
 uploaded, on a bound derived from the delay. It has no effect at all on a file
@@ -1059,6 +1076,48 @@ and the files remain in place after unmount. In-place mode is Linux-only; on
 other platforms supply a separate
 .I -data
 directory.
+.SH ABANDONED UPLOADS
+Every push is retried with a growing delay between attempts \(em five attempts
+over roughly seven seconds \(em and an error the backend reports as permanent is
+not retried at all. Past that
+.B drivel
+gives up on the event and says so:
+.PP
+.RS
+.EX
+[sync] push write notes/todo.md failed after 5 attempt(s): \(rs
+    ... (recorded for repair by the next sweep)
+.EE
+.RE
+.PP
+Giving up is deliberate: retrying a rejected upload forever spins, and a durable
+queue of unsent work would be a second copy of the user's data to keep safe.
+Instead the
+.I path
+is recorded, and the next enumeration is brought forward to a few minutes' time
+so the file is re-sent from whatever is on disk by then.
+.PP
+.RS
+.EX
+[sweep] a push was abandoned: a repair sweep falls due in 5m0s
+[sweep] repush  notes/todo.md (an earlier push was abandoned)
+.EE
+.RE
+.PP
+It is the
+.I next
+sweep rather than an immediate one, because a sweep is the most expensive
+operation here and one transient failure does not warrant it; the delay also
+folds a whole outage's worth of failures into a single sweep. Repeated failures
+double the delay out to 80 minutes. And
+.B -sweep-interval 0
+does not switch any of this off.
+.PP
+An abandoned
+.I deletion
+is the exception. There is no local file to re-send, so it is neither retried
+nor inferred later: the remote object is still present and still indistinguishable
+from a file the user has. Delete it again.
 .SH SPECIAL FILES AND MOUNT SAFETY
 .B drivel
 always mounts
