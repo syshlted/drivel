@@ -39,10 +39,9 @@ func New() (*http.Client, io.Closer) {
 	h3 := &http3.Transport{
 		TLSClientConfig: &tls.Config{},
 		QUICConfig: &quic.Config{
-			// Keep dial failures (UDP blocked) fast so fallback is snappy.
-			HandshakeIdleTimeout: 5 * time.Second,
-			// Keep the connection warm across the frequent changes.list poll loop.
-			KeepAlivePeriod: 30 * time.Second,
+			HandshakeIdleTimeout: h3HandshakeIdle,
+			MaxIdleTimeout:       h3MaxIdle,
+			KeepAlivePeriod:      h3KeepAlive,
 		},
 	}
 
@@ -65,6 +64,38 @@ func New() (*http.Client, io.Closer) {
 	return &http.Client{Transport: rt}, closerFunc(h3.Close)
 }
 
+// The two timeouts that decide how long the fallback takes are not
+// interchangeable, which is what MC-44's blackhole run established (2026-10-13).
+//
+// A QUIC *dial* into a path that is gone is bounded by h3HandshakeIdle. That is
+// the startup case, and it is also every re-probe after h3Retry lapses, because
+// by then the connection has been torn down. Measured at 5.0s.
+//
+// A request on a connection that was already established when the path
+// disappeared is bounded by h3MaxIdle instead: nothing tells quic-go the peer
+// has stopped hearing it, so the request stalls until the idle timer fires and
+// then completes over HTTP/2. Measured at 30.1s — six times the handshake bound,
+// for the case MC-44 actually specifies, a block arriving under load rather than
+// at startup. These notes previously claimed the handshake number for both.
+//
+// h3MaxIdle is the value quic-go's protocol.DefaultIdleTimeout already supplied;
+// it is written here so that the fallback latency of a transport this project
+// made a requirement is a number in this file rather than a dependency's
+// default. Two things about changing it. The effective timeout is min(ours, the
+// peer's advertised max_idle_timeout), so raising it may do nothing while
+// lowering it always bites. And lowering it costs packets on every idle mount,
+// because quic-go derives the keep-alive interval as
+// min(KeepAlivePeriod, idleTimeout/2) — so h3KeepAlive is an upper bound on the
+// ping rate and not the rate itself, which is 15s today.
+//
+// Neither timeout is reached by a *local* block: an output-chain drop is
+// reported to the sender as EPERM, which fails in milliseconds.
+const (
+	h3HandshakeIdle = 5 * time.Second
+	h3MaxIdle       = 30 * time.Second
+	h3KeepAlive     = 30 * time.Second
+)
+
 // h3Retry is how long a host stays written off before HTTP/3 is probed again.
 //
 // Remembering the downgrade is necessary — without it every request pays a failed
@@ -77,12 +108,14 @@ func New() (*http.Client, io.Closer) {
 //
 // The window is a cost ceiling rather than a guess at how long a network stays
 // broken. When QUIC is genuinely gone the re-probe costs one failed dial per
-// window per host, bounded by HandshakeIdleTimeout above — and a *local* block
-// costs nothing at all, because an output-chain drop is reported to the sender as
-// EPERM and fails immediately. Five minutes keeps that under a couple of percent
-// of a poll loop's time while recovering HTTP/3 promptly enough to matter. No
-// FUSE operation is behind it either way: §2.1 keeps the network off that path,
-// so the worst case delays a sync the engine would have retried anyway.
+// window per host — h3HandshakeIdle above, not the 30s an established connection
+// pays, because by the re-probe there is no connection left — and a *local* block
+// costs nothing at all. Measured against a persisting blackhole at a 3s request
+// cadence: 5.01s once per window, so two of 103 requests paid anything and the
+// window cost 1.7% of the wall clock, while recovering HTTP/3 promptly enough to
+// matter. No FUSE operation is behind it either way: §2.1 keeps the network off
+// that path, so the worst case delays a sync the engine would have retried
+// anyway.
 const h3Retry = 5 * time.Minute
 
 // fallback is a RoundTripper that prefers h3 and downgrades to h2 per host when

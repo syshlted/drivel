@@ -402,10 +402,41 @@ HTTP/2 in 203ms, with no error reaching the caller and nothing retried above the
 transport. So "under load" has the same answer as "at startup", and the per-host
 memory is doing its job. One caveat on that 203ms, because it is a property of how
 the block was made rather than of the transport: an output-hook `drop` is reported
-to the local sender as `EPERM`, so the write fails immediately. A network that
-*blackholes* UDP/443 returns nothing at all, and the fallback then waits on
-`HandshakeIdleTimeout` (5s) instead. That shape is unrun — it needs the drop to
-happen off-host, which per-cgroup scoping cannot express.
+to the local sender as `EPERM`, so the write fails immediately.
+
+**The blackhole shape was then run, and it has two different answers** (2026-10-13,
+two network namespaces joined by a veth with the drop on the far side, so the
+client's packets leave normally and nothing ever replies). The fallback still
+works, still surfaces no error and still loses no request — but *how long* it takes
+depends on whether a QUIC connection already existed, and the two numbers are six
+times apart:
+
+- **A block arriving mid-session costs 30.1s.** The request in flight is on an
+  established connection, and nothing tells quic-go the peer has stopped hearing
+  it, so it retransmits until the idle timer fires. That timer is `MaxIdleTimeout`,
+  which this transport had left to quic-go's `protocol.DefaultIdleTimeout` of 30s.
+  One request stalled; the other 130 in the run were unaffected.
+- **A block already in place at startup costs 5.0s**, which is
+  `HandshakeIdleTimeout`, and so does every `h3Retry` re-probe afterwards, because
+  by then the connection has been torn down and the attempt is a fresh dial. A
+  second run held the blackhole for the whole 320s and measured exactly that: 5.02s
+  at startup, 5.01s for the one re-probe, and 0ms for the other 101 requests — 1.7%
+  of the wall clock at a 3s cadence, which is what "a cost ceiling" means in
+  numbers.
+
+This section claimed the handshake number for both shapes until the run. The
+timeouts are now named constants here (`h3HandshakeIdle`, `h3MaxIdle`,
+`h3KeepAlive`) with `TestNewPinsTheQUICTimeouts` asserting them: `h3MaxIdle` is set
+to the 30s that was already in force, so nothing changes behaviourally, but the
+fallback latency of a transport §2.6 makes a requirement is now a number in the
+tree rather than a dependency's default. Two things govern changing it. The
+effective timeout is `min(ours, the peer's advertised max_idle_timeout)`, so
+raising it may do nothing while lowering it always bites; and lowering it costs
+keep-alive packets on every idle mount, since quic-go derives the ping interval as
+`min(KeepAlivePeriod, idleTimeout/2)` — 15s today, which makes `h3KeepAlive` a
+ceiling on the rate rather than the rate. 30s stands: it is one stalled request per
+episode, off the FUSE path by §2.1, against a permanent cost on every mount that
+is working fine.
 
 The restore was worse: **nothing brought HTTP/3 back.** `down` was a
 `map[string]bool`, written on the first failure and never cleared, so all 15
@@ -422,13 +453,20 @@ it lapsed, and nothing writes again until QUIC breaks. A "clear the mark on
 success" path was written and then deleted, because a mutation removing it changed
 no behaviour — it was an assertion that could not fail. **The window is a cost
 ceiling rather than an estimate** of how long a network stays broken: the re-probe
-costs at most one failed dial per window per host, bounded by
-`HandshakeIdleTimeout`, nothing at all when the block is local, and no FUSE
+costs at most one failed dial per window per host — `h3HandshakeIdle`, the 5.0s
+above and not the 30s, since a re-probe has no connection to lose — nothing at all
+when the block is local, and no FUSE
 operation is behind it either way because §2.1 keeps the network off that path —
 the worst case delays a sync the engine would have retried. **`now` is injectable**,
 so the window is tested by advancing a clock rather than by sleeping through it.
 Verified live at a 20-second window: HTTP/3 returned on the first request past the
-re-arm, 12.5s after the restore.
+re-arm, 12.5s after the restore. The blackhole run then verified it at the window
+that ships: mark written at t=45.1s, the block lifted at t=330.0s, and HTTP/3 back
+at t=345.4s — the first request after 45.1 + 300, so 15.4s after the restore
+because that is where in the window the lift happened to land. **Recovery latency
+is therefore "the rest of the current window", up to five minutes, and not a
+function of when the network came back** — which is worth knowing before reading a
+run as the fix not working.
 
 What MC-44 did *not* answer is the comparison it was written for. Throughput and
 CPU per protocol need the Drive provider, which is where the transport is injected,

@@ -213,7 +213,8 @@ all: driving `internal/transport` against a public HTTP/3 endpoint answers when
 the fallback fires and whether HTTP/3 ever comes back, which is where both of that
 case's findings were. It does not answer the throughput comparison, which needs
 the Drive provider because that is where the transport is injected. If you only
-need the first question, that is the cheap way to ask it. Four things from the run.
+need the first question, that is the cheap way to ask it. Three things from the
+run, and then the blackhole rig that followed it.
 
 **Check whether you share a network namespace before writing any rule.** In the
 project's dev container `nft list ruleset` shows the *host's* tables, so an
@@ -232,17 +233,48 @@ rule that silently matches nothing reads exactly like a transport that never fal
 back: a process *outside* the cgroup must still negotiate HTTP/3, and one inside
 must not.
 
-**Time the restore against the re-probe window, not against the rule.** A failed
-re-probe re-arms the window, so HTTP/3 returns on the first request after the last
-probe plus `h3Retry` — which can be most of a window after the rule came off, and
-looks like the fix not working. Shorten `h3Retry` for the run rather than guessing.
+**An output-hook `drop` is not a blackhole, and the two differ by 6x.** The kernel
+reports a local drop to the sender as `EPERM`, so the QUIC write fails immediately
+and the fallback is instant. A network that silently discards UDP/443 gives no
+error, and the attempt has to be waited out instead. Both shapes are now run; use
+the second for anything about *latency*, and expect two numbers from it, not one
+(mid-session 30s, startup 5s — see the MC-44 row).
 
-**An output-hook `drop` is not a blackhole.** The kernel reports it to the local
-sender as `EPERM`, so the QUIC write fails immediately and the fallback is
-instant. A network that silently discards UDP/443 gives no error and the fallback
-waits on `HandshakeIdleTimeout` instead. Measuring that needs the drop to happen
-off-host — a netns with the rule on the far side of the veth — which is the one
-thing per-cgroup scoping cannot express.
+The blackhole rig is **two namespaces and no host involvement at all**, which is
+what makes it safe on a machine whose network namespace is shared with the user's
+desktop:
+
+```sh
+ip netns add mc44c; ip netns add mc44s
+ip link add mc44veth-c type veth peer name mc44veth-s
+ip link set mc44veth-c netns mc44c; ip link set mc44veth-s netns mc44s
+ip -n mc44c addr add 10.244.44.2/24 dev mc44veth-c
+ip -n mc44s addr add 10.244.44.1/24 dev mc44veth-s
+ip -n mc44c link set lo up; ip -n mc44c link set mc44veth-c up
+ip -n mc44s link set lo up; ip -n mc44s link set mc44veth-s up
+printf '127.0.0.1 localhost\n10.244.44.1 mc44.test\n' > /etc/netns/mc44c/hosts
+```
+
+Four things about it. **The drop goes in the *server* namespace's input hook** —
+a rule in the client's output hook is the `EPERM` case again, so it has to be
+somewhere the packet reaches after leaving the sender. **Neither veth end stays in
+the host namespace**, so there is nothing to clean up there and nothing to get
+wrong; `ip netns del` takes the interfaces and the nft tables with it. **Prove the
+isolation before measuring**: no `mc44` interface in the host's `ip -br link`, the
+host's `nft list tables` count unchanged, `ping 10.244.44.1` from the host failing,
+and the host's own `curl --http3-only` still working. And **an origin is needed
+inside the rig** — a quic-go `http3.Server` and a `net/http` TLS server on the same
+`:443` with one self-signed cert, which the client trusts through `SSL_CERT_FILE`.
+Drive itself is unreachable from a namespace with no route out, and that is the
+point: the measurement is of `transport.New()`, which is reached by a probe binary
+inside the repo module.
+
+**Time the restore against the window, not the rule.** The mark re-arms on failure
+only, so HTTP/3 returns on the first request after *the last failure* plus
+`h3Retry` — which can be nearly a whole window after the rule came off and reads
+like the fix not working. Either shorten `h3Retry` for the run or compute the
+expected instant from the mark; the blackhole run did the latter and landed on it
+to the second.
 
 And for the Drive half: **the rig's tokens expire.** A Google Cloud project left
 in **Testing** publishing status issues refresh tokens that die after seven days,

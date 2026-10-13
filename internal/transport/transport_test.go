@@ -13,6 +13,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/quic-go/quic-go/http3"
 )
 
 // rtFunc adapts a function to http.RoundTripper.
@@ -214,6 +216,44 @@ func TestHTTP3IsReprobedAfterTheRetryWindow(t *testing.T) {
 // New's own wiring, because the window only works if it is configured: a
 // fallback with no retry duration remembers a downgrade forever, which is
 // exactly the behaviour being fixed.
+// The two timeouts that decide fallback latency belong to this package, because
+// MC-44 measured them and the numbers are quoted in the docs: 30s for a block
+// that arrives mid-session, 5s for a dial into one. MaxIdleTimeout is the one
+// that was previously left to quic-go's protocol.DefaultIdleTimeout, where a
+// dependency bump would have moved a documented, measured property without
+// anything here noticing.
+func TestNewPinsTheQUICTimeouts(t *testing.T) {
+	c, closer := New()
+	defer closer.Close() //nolint:errcheck // test
+	f, ok := c.Transport.(*fallback)
+	if !ok {
+		t.Fatalf("New returned transport %T, want the fallback", c.Transport)
+	}
+	h3, ok := f.h3.(*http3.Transport)
+	if !ok {
+		t.Fatalf("the HTTP/3 leg is %T, want *http3.Transport", f.h3)
+	}
+	q := h3.QUICConfig
+	if q == nil {
+		t.Fatal("QUICConfig is nil, so every timeout is quic-go's default")
+	}
+	if q.HandshakeIdleTimeout != h3HandshakeIdle {
+		t.Errorf("HandshakeIdleTimeout = %v, want %v", q.HandshakeIdleTimeout, h3HandshakeIdle)
+	}
+	if q.MaxIdleTimeout != h3MaxIdle {
+		t.Errorf("MaxIdleTimeout = %v, want %v (0 means quic-go's default decides how long a mid-session block stalls a request)", q.MaxIdleTimeout, h3MaxIdle)
+	}
+	if q.KeepAlivePeriod != h3KeepAlive {
+		t.Errorf("KeepAlivePeriod = %v, want %v", q.KeepAlivePeriod, h3KeepAlive)
+	}
+	// A keep-alive period at or above the idle timeout would be silently
+	// replaced by quic-go's derived interval; it already is here (idleTimeout/2),
+	// and the assertion records which way round the two have to be read.
+	if h3KeepAlive < h3MaxIdle/2 {
+		t.Errorf("KeepAlivePeriod %v is below idleTimeout/2 (%v), so it is the ping rate rather than a ceiling on it", h3KeepAlive, h3MaxIdle/2)
+	}
+}
+
 func TestNewConfiguresTheRetryWindow(t *testing.T) {
 	c, closer := New()
 	defer closer.Close() //nolint:errcheck // test

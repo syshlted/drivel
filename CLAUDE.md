@@ -1924,15 +1924,39 @@ so recovery needs no second mechanism — a "clear the mark on success" path was
 written, mutation-tested and deleted, because nothing could assert it: once the
 window lapses, a successful probe simply leaves it lapsed. **The window is a cost
 ceiling, not a guess** at how long a network stays broken: a re-probe costs at most
-one failed dial per window per host, bounded by `HandshakeIdleTimeout`, and no FUSE
+one failed dial per window per host, bounded by `h3HandshakeIdle`, and no FUSE
 operation is behind it because §2.1 keeps the network off that path. And **`now` is
-injectable** so the window is testable without sleeping through it.
+injectable** so the window is testable without sleeping through it. **Recovery
+latency is "the rest of the current window", not a function of when the network came
+back** — verified at the shipped 5 minutes, where a block lifted 285s into a window
+gave HTTP/3 back 15.4s later.
 
-**The fallback fires on the very next request, not after a stall** — measured, and
-with one caveat worth knowing before trusting the number: an nftables `drop` on the
-output hook is reported to the local sender as `EPERM`, so the failure is immediate.
-A network that *blackholes* UDP/443 gives no such error, and the fallback would then
-wait on `HandshakeIdleTimeout` instead. That shape is still unrun.
+**How fast the fallback fires depends on whether a connection already existed, and
+the two answers are six times apart.** A `drop` on the local output hook is reported
+to the sender as `EPERM`, so it fails in milliseconds — that is the 203ms the cgroup
+run measured, and it is a property of the block, not of the transport. The blackhole
+shape ran on 2026-10-13 (two netns across a veth, the drop on the far side, so the
+packets leave and nothing answers) and split in two:
+
+- **mid-session, 30.1s** — the in-flight request is on an established connection,
+  nothing tells quic-go the peer stopped hearing it, and it retransmits until the
+  idle timer fires. That is `MaxIdleTimeout`, which this transport had left to
+  quic-go's `protocol.DefaultIdleTimeout`.
+- **at startup, 5.0s** — `HandshakeIdleTimeout`, and the same for every re-probe,
+  which is a fresh dial by then: holding the blackhole for 320s cost 5.02s at
+  startup, 5.01s for the one re-probe and nothing for the other 101 requests.
+
+Either way the request *completes* over HTTP/2 and nothing above the transport sees
+an error: in a 433-second run exactly one request of 131 took longer than 100ms.
+These notes claimed the handshake number for both shapes until the run. All three
+timeouts are now named constants (`h3HandshakeIdle`, `h3MaxIdle`, `h3KeepAlive`)
+pinned by `TestNewPinsTheQUICTimeouts` — `h3MaxIdle` is the 30s that was already in
+force, so **this pins a measured number rather than changing one**, and a quic-go
+default bump can no longer move it silently. Lowering it is the only direction with
+any effect (the live value is `min(ours, the peer's)`) and it costs keep-alive
+packets on every healthy mount, because the ping interval is
+`min(KeepAlivePeriod, idleTimeout/2)` — so `h3KeepAlive` is a ceiling on the rate,
+15s in practice, not the rate itself.
 
 ## Mount modes
 

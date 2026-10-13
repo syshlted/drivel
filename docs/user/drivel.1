@@ -134,9 +134,15 @@ is a client you run yourself. It ships no credentials of its own; you supply the
 ones for the backend you point it at, so it runs under an identity you control.
 Each provider uses its own transport: Drive traffic is HTTP/3 (QUIC) with an
 automatic fallback to HTTP/2, and SFTP is the file transfer subsystem of SSH.
-On a network that blocks UDP port 443, Drive traffic moves to HTTP/2 on the next
-request and sync continues; when the block goes away, HTTP/3 is tried again
-within a few minutes. There is nothing to configure either way.
+On a network that blocks UDP port 443, Drive traffic moves to HTTP/2 and sync
+continues; when the block goes away, HTTP/3 is tried again within a few minutes.
+A network that rejects the UDP packets switches over immediately. One that
+silently discards them instead has to be waited out, so the request that runs
+into it pauses \(em up to five seconds if the block was already there when
+.B drivel
+started, up to thirty if it appeared mid-transfer \(em and then completes over
+HTTP/2. Nothing is lost and nothing above the transport sees an error. There is
+nothing to configure either way.
 .PP
 A provider runs in a
 .I separate process
