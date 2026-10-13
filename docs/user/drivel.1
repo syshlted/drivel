@@ -1230,7 +1230,27 @@ are deliberately not passed on, and neither are the
 or
 .B DRIVEL_
 variables \(em so which account a mount uses is a fact about its configuration
-rather than about the shell it was started from.
+rather than about the shell it was started from. The one
+.B DRIVEL_
+variable a backend does see is set by
+.B drivel
+itself rather than inherited: it names the descriptor the backend watches to
+learn that
+.B drivel
+has gone.
+.PP
+A backend's lifetime is its mount's. Stopping a mount stops its backend, and so
+does killing
+.B drivel
+outright \(em by
+.BR "kill -9" ,
+an out-of-memory kill or a crash \(em which is what that descriptor is for.
+Before this, a backend survived a killed
+.B drivel
+and went on holding that account's credentials with nothing driving it. If you
+ever find one, it is named
+.B plugin-serve
+in its command line.
 .SH ENVIRONMENT AND REQUIREMENTS
 .B drivel
 requires the FUSE mount helper

@@ -402,7 +402,8 @@ processes will not otherwise line up inside a 300 ms debounce window.
 
 | ID | Setup / action | Expected | Catches |
 |---|---|---|---|
-| **MC-40** | `kill -9` A mid-upload of a 5 GiB file. Restart. | No partial file remotely, no duplicate created on retry, upload resumes or restarts cleanly. Session URIs are deliberately not persisted, so a restart means a fresh upload — confirm it does not leave an orphan. **Still Tier B, and it is the one case in this group that cannot move**: both halves of it — a process that dies rather than one asked to stop, and a resumable upload session to be interrupted — are things a fake has none of. What Tier A does say about the restart is MC-44b's: an in-flight push that cannot complete is *dropped*, not queued, so "restart cleanly" must not be read as "the upload is still pending afterwards". | Crash-consistency of the push path. |
+| **MC-40** | `kill -9` A mid-upload of a large file. Restart. | **Run 2026-10-13**, two `drivel` processes over a local sshd (the MC-47 rig; Drive's resumable-session half is still unrun — see below). It found three defects, and the one the case was written to look for was there: **the backend process outlived its host indefinitely.** go-plugin ends a plugin by having the host call `Client.Kill`, and `kill -9` runs no code, so the child went on holding the account's credentials and its connection to the provider with nothing driving it — one more per crash-restart cycle, still alive 11 minutes later. Fixed by a liveness pipe the host holds for its own lifetime (`plugin/liveness.go`); pinned by `TestABackendExitsWhenItsHostLetsGoOfThePipe`, which fails in 11s against the unguarded `Serve`. **The destination path is never left holding a partial file** — M18 rule 7's write-to-temp-then-rename, confirmed live from both sides: killed mid-transfer at 161 MB of 537 MB, the remote still held the previous content byte for byte. **A new file recovers on the next sweep and converges**, by the local walk's "no echo, therefore new locally" row, byte-identical, with no duplicate — and the duplicate half of this case is **Drive-specific by construction**, since a path-addressed backend cannot grow a second object at one path. The stranded temporary is now the normal outcome of a crash rather than a rarity, because the child exits promptly instead of unwinding; `Enumerate` skips the prefix so it is invisible, but nothing reclaims it, and that is the open follow-up the fix created. | Crash-consistency of the push path. |
+| **MC-40 (b)** | The same kill, but mid-upload of a *rewrite* of a file that is already synced. | **The divergence is never repaired, and this is M27's blind spot rather than a regression.** Local holds the rewrite, the remote holds the previous content, and 44 sweeps over 7 minutes — past `repairDelay` — changed nothing: no push, no conflict copy, no repair record. **A crash is strictly worse than an outage here.** `Engine.oweRepair` runs when a push *gives up*, which is code; `kill -9` runs none, so the repair bucket is empty, while `pushLocalOnly` skips the path for having an echo and the remote pass matches that echo and correctly does nothing — the three-way silence M27's own entry describes, reached by the one route M27 does not cover. Recording the debt *before* the push would close it and is declined for the reason DESIGN.md §12 gives: it is the persistent outbound queue, and it doubles the commit count of every push. The cheaper candidate, and the one to weigh first, is to let the local walk consult the baseline fingerprint it already stores — `state.Echo.LocalSize`/`LocalMTime`, which `matchesBaseline` reads for the delete rows — so that a path whose local file no longer matches its own baseline is pushed rather than skipped. No new state, no extra commits, one `lstat` per file per sweep on a walk that already visits every file, and it would also have covered MC-44b without a repair bucket at all. Unscheduled; see §4's item. | That M27 repairs an abandoned push and not a lost one. |
 | **MC-41** | `kill -9` C mid-sweep (during MC-01's initial enumeration). Restart. | **Confirmed in Tier A**, as predicted and with the prediction's mechanism intact: a sweep paged at 2, held at its first page boundary and then stopped, leaves a sweep record carrying the page-two cursor; the next start logs `[sweep] resuming the enumeration interrupted at …` and completes over **exactly the four objects it had not reached**, deleting nothing on either side. That count is the assertion that matters — a sweep that silently restarted would list all six, mark every one of them seen, and never consult a mark. Giving the resumed sweep a fresh generation (an in-memory seen-set, in one line) deletes exactly the two files the dead run had already consumed, locally, reporting `2 deleted locally` as the ordinary resolution of a bulk remote delete. Pinned by `TestFleetResumesAnInterruptedSweepWithoutInferringDeletes`. Still Tier B: the literal `kill -9`, and a sweep large enough for the resume to matter in wall-clock. | The M7b resume path — an in-memory seen-set would delete the user's data here. |
 | **MC-42** | Delete C's `drivel-index.db` while stopped; restart. | Degrades to `files.list` name lookups. **No duplicates created, no data lost** — only latency and quota. **Answered below the seam and not in the fleet**: the index is Drive-private and a path-addressed fake has none to lose, so the regression tests for it are `TestResolutionWorksWithNoIndexAtAll`, `TestResolveFindsExistingRemoteFileWithColdIndex` and `TestStatFindsRemoteFileAfterRestart` in `internal/provider/gdrive`, which are where an index-shaped mistake is visible at all. Still Tier B: what the degradation *costs* against real Drive, which is the half nobody can fake. | M7 invariant 2. Before M7, this produced duplicate uploads beside real files. |
 | **MC-43** | With C in `-lazy` mode holding placeholders, delete C's `drivel-state.db`; restart. | **Confirmed in Tier A, in two shapes, and they do not exercise the same guard.** With the remote intact, the post-loss sweep re-stamps every placeholder and records it a fresh echo: no push, no conflict copy, the remote byte-identical, and a read through the mountpoint still hydrates the real content — so the marker that survived is a working promise and not a label. The guard doing the work there is `applyTo`'s re-stamp branch; removing it manufactures a conflict copy per placeholder and leaves the *placeholder* at the real path with the user's content parked beside it. Removing the **local walk's** placeholder skip changes nothing in that shape, because the sweep applies its pages before it walks, so every placeholder already has a baseline by then — which is why the second shape deletes one file remotely while the client is down. Then the page never mentions it, there is no re-stamp and no echo, and the walk's own check is the only thing in front of a push; without it the sweep offers the placeholder and the engine's M5 gate refuses it, which is two independent guards collapsing into one and a fallback. Pinned by `TestFleetKeepsPlaceholdersSafeWhenTheStateDBIsLost` and `TestFleetNeverPushesAPlaceholderWhoseRemoteIsGone`. | M5 invariants 1 and 2 — the data-loss guards. Run with `DRIVEL_REQUIRE_TESTENV=xattr` semantics in mind: on a filesystem without user xattrs this case is meaningless, and `app.Mount` warns as much. |
@@ -652,6 +653,59 @@ roughly in descending order of how likely they are to change a decision:
     rediscover which of the three shapes is actually dangerous, and so that
     "unguarded across processes" is not mistaken for "undetectable".
 
+19. **One `cp` of a large file costs two full uploads, and this is what MC-11's
+    extra upload was.** §5.3 below records a single duplicate in the 1000-file
+    seed run and sends it to Tier A to be chased as a coalescer question. MC-40's
+    rig answered it instead, by using a file big enough to make it happen every
+    time: a 512 MiB copy logged `[sync] upload dbl.bin (536870912 B)` **twice**,
+    three seconds apart, and the remote ended correct.
+
+    The mechanism is not a race and there is nothing to fix in the coalescer.
+    `OpCreate` is emitted when the file is created and `OpWrite` when the handle
+    closes, so the debounce window merges them only for a write that *finishes*
+    inside it — 300ms by default. Anything slower is two dispatches, and the first
+    one pushes a file that is still being written: `pushContent` opens it, `Put`
+    streams to EOF, and because the writer keeps extending it the whole file goes
+    across under an event that described a fraction of it. So the cost is not
+    "a partial upload plus a real one" but two complete ones, and it scales with
+    every file whose write outlives the window — which is every large file.
+
+    **The measurement was lying about it, and that is fixed.** The byte count on
+    an upload line came from the `Stat` taken before the transfer, so the first of
+    the two uploads reported 372 MiB of a 512 MiB file and read like a partial
+    push. It now counts what the store actually read (`countingReader` in
+    `pushContent`), which is what §2.7 says that line is for; pinned by
+    `TestUploadLineReportsTheBytesActuallySent`. Any volume figure taken from a
+    log written before 2026-10-13 under-reports a growing file.
+
+    What to do about the doubling is a design question and is **not** scheduled.
+    `OpCreate`'s content push cannot simply be dropped: it is what creates an
+    empty file, so `touch` would stop syncing until something else touched it,
+    and push-on-close means a handle held open emits nothing at all. The shape to
+    consider is the mount declining to push content for a create whose handle is
+    still open, which makes the event pair one event and is a `vfs` change rather
+    than an engine one.
+
+20. **A crash and an outage are not the same failure, and M27 only covers one.**
+    MC-44b's abandoned push is recorded for repair because giving up is code that
+    runs; MC-40 (b)'s is not, because `kill -9` runs none. The two then diverge
+    permanently: a rewrite of an already-synced file has an echo, which is what
+    `pushLocalOnly` skips on and what the remote pass matches, so no row of the
+    reconcile table proposes it. Measured over 44 sweeps.
+
+    This is worth separating from "M27 is incomplete". M27's entry says plainly
+    that it records a path when a push *abandons*; the gap is that a sweep has no
+    way to notice a local file that stopped matching its own baseline, which is
+    strictly more than the crash case needs — it also covers a push lost to a
+    power cut, an OOM kill, and a backing file written while the mount was down.
+    The fingerprint for it is already stored (`state.Echo.LocalSize`/`LocalMTime`,
+    added for the hashless-provider case in M18) and already consulted by
+    `matchesBaseline` for the delete rows. Extending the walk to consult it for
+    the *push* row is the candidate; what has to be settled first is what it means
+    when the fingerprint says "not recorded" (a zero `LocalMTime` must never read
+    as "matches", the same rule M18 item 12 states for deletion), and whether a
+    sweep is allowed to push a file whose baseline it cannot verify.
+
 ---
 
 ## 5. Sequencing
@@ -766,25 +820,28 @@ iterations per second under `-race`, instead of one instance per thousand files 
 1.18 s each. Chase it there. Keep MC-11 as the burst-throughput, quota and
 DB-growth measurement it is specified to be, and let its upload-count ratio be a
 corroborating observation rather than the experiment.
-6. **Failure injection — Group V done except MC-40 and MC-44.** Those two waited
-   on DESIGN.md §9/M27, which **shipped 2026-10-12**, so they are unblocked: the
-   group's own finding below is what M27 fixed, and running MC-40 before it
-   would have measured a loss the product was already known to forget. What it
-   measures now is different and worth stating up front — an abandoned push is
-   recorded and re-sent by a sweep brought forward to ~5 minutes, so MC-40's
-   question becomes how long the repair takes and whether the fleet converges
-   through it, rather than whether the file is lost. A failed *download* is
-   still repaired only by the next scheduled sweep; M27 did not touch that half.
-   Five of the eight
+6. **Failure injection — Group V done except MC-44.** **MC-40 ran
+   2026-10-13**, over the same two-process local-sshd rig as MC-47, and its row
+   has what it found: three defects, of which the one the case was written to look
+   for — a backend process outliving its host — was real and is fixed, and the one
+   it did not predict is that **a crash is not an outage**. M27 records an
+   abandoned push because abandoning is code; `kill -9` runs none, so MC-40 (b)'s
+   divergence is permanent where MC-44b's repairs itself in about five minutes.
+   Read the two rows together or the asymmetry is invisible. A failed *download*
+   is still repaired only by the next scheduled sweep; M27 did not touch that
+   half either. Six of the eight
    cases are in `internal/app/failure_test.go` (MC-41, MC-43 in two shapes,
    MC-44b, MC-46) with MC-45 answered from the code and MC-42 answered below the
    seam. **MC-47 ran for real on 2026-10-10** — two `drivel` processes over a local
    sshd, which is a shared remote with no quota and no account — and its row has
    what the three shapes actually do; the one thing it changed in the product is
    the message a locked state DB produces, and §4's cross-process item holds the
-   guard options it declined to build. MC-40 and MC-44 remain Tier B by mechanism (a process that
-   dies rather than one asked to stop; a packet filter), and
-   `scripts/multiclient/README.md` has the procedure for each. Four things came out
+   guard options it declined to build. MC-44 remains Tier B, by mechanism and by
+   credentials: it needs a packet filter, and the HTTP/3 transport is injected into
+   the Drive provider alone, so it needs a live account —
+   the rig's tokens are expired, a Cloud project left in Testing status issuing
+   refresh tokens that die after seven days. `scripts/multiclient/README.md` has
+   the procedure. Six things came out
    of the group that no case predicted, in descending order of how much they
    matter.
 
@@ -835,6 +892,22 @@ corroborating observation rather than the experiment.
    either half; it means MC-60's mixed-mode fleet needs a convergence oracle that
    asks the hydrator, and that is a harness item to build before MC-60 rather than
    during it.
+
+   **A backend process outlived its host, holding that account's credentials.**
+   go-plugin ends a plugin by having the host call `Client.Kill`, and a host killed
+   by a signal never reaches that line; nothing on the plugin side watches, because
+   go-plugin has no mechanism for it — the child inherits the host's own stdin
+   rather than a pipe to it, and a gRPC server keeps listening after its last
+   client disconnects. So MC-40's `kill -9` left `plugin-serve` running
+   indefinitely, one more per crash-restart cycle. Fixed with the pipe M16 already
+   uses for its daemonize handshake; §4's item has the alternatives and why
+   `Pdeathsig` is not one of them.
+
+   **One `cp` of a large file costs two full uploads**, which is §4.19 and is also
+   the answer to §5.3's open question about MC-11's extra upload. The byte count on
+   the upload line was taken before the transfer rather than measured by it, so a
+   log written before 2026-10-13 under-reports any file that grew during its own
+   push.
 
    **An eager SFTP mount without `materialize` is upload-only, permanently**, and
    MC-47's rig found it by being configured the way the docs describe. Two

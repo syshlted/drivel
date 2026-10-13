@@ -8,6 +8,7 @@ package syncengine
 import (
 	"bytes"
 	"context"
+	"io"
 	"log"
 	"os"
 	"path/filepath"
@@ -16,6 +17,7 @@ import (
 	"testing"
 
 	"github.com/syshlted/drivel/internal/fsevent"
+	"github.com/syshlted/drivel/provider"
 )
 
 // What a successful push says about itself.
@@ -139,5 +141,65 @@ func TestASkippedPushLogsNoUpload(t *testing.T) {
 	}
 	if got := store.ops(); len(got) != 0 {
 		t.Fatalf("the gate let an upload through after all: %v", got)
+	}
+}
+
+// growingStore appends to the file being pushed, once, partway through reading
+// it. It stands in for the ordinary case MC-40 found live: a copy into the mount
+// that takes longer than the debounce window is pushed while it is still being
+// written, and Put streams it to EOF, so the whole of it goes across.
+type growingStore struct {
+	*fakeStore
+	path  string // backing path to extend
+	extra string
+	once  bool
+}
+
+func (g *growingStore) Put(ctx context.Context, p string, r io.Reader) (provider.RemoteFile, error) {
+	return g.fakeStore.Put(ctx, p, readerFunc(func(b []byte) (int, error) {
+		if !g.once {
+			g.once = true
+			f, err := os.OpenFile(g.path, os.O_WRONLY|os.O_APPEND, 0o600)
+			if err != nil {
+				return 0, err
+			}
+			if _, err := f.WriteString(g.extra); err != nil {
+				return 0, err
+			}
+			if err := f.Close(); err != nil {
+				return 0, err
+			}
+		}
+		return r.Read(b)
+	}))
+}
+
+type readerFunc func([]byte) (int, error)
+
+func (f readerFunc) Read(p []byte) (int, error) { return f(p) }
+
+// The byte count on an upload line is the bytes sent, not the size the file had
+// when the push started. The two differ exactly when the number matters — a file
+// still being written — and the campaign reads these lines as transfer volume.
+func TestUploadLineReportsTheBytesActuallySent(t *testing.T) {
+	dataDir := t.TempDir()
+	logs := &capture{}
+	writeFile(t, dataDir, "a.txt", "hello")
+	fs := &growingStore{
+		fakeStore: newFakeStore(),
+		path:      filepath.Join(dataDir, "a.txt"),
+		extra:     " world",
+	}
+	e := New(Config{Store: fs, DataDir: dataDir, Logger: log.New(logs, "", 0)})
+
+	e.handle(context.Background(), fsevent.Event{Op: fsevent.OpCreate, Path: "a.txt"})
+
+	// 11 bytes crossed: "hello" plus the " world" appended during the push. The
+	// pre-transfer Stat said 5.
+	if n := logs.count("[sync] upload   a.txt (11 B)"); n != 1 {
+		t.Errorf("want one line reporting 11 bytes sent; got:\n%s", strings.Join(logs.lines(), "\n"))
+	}
+	if n := logs.count("(5 B)"); n != 0 {
+		t.Errorf("the line reported the size at push time, not the transfer:\n%s", strings.Join(logs.lines(), "\n"))
 	}
 }

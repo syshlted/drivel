@@ -796,7 +796,15 @@ func (e *Engine) pushContent(ctx context.Context, p string, dirty *ranges.Set) e
 	if _, err := f.Seek(0, io.SeekStart); err != nil {
 		return err
 	}
-	rf, err := e.store.Put(ctx, p, f)
+	// Counted rather than taken from the Stat above, because the two disagree
+	// exactly when the number matters. A file still being written grows during its
+	// own push — Put streams to EOF, so the whole of it goes across — and the
+	// pre-transfer size then under-reports the transfer by however much arrived in
+	// the meantime: a 512 MiB copy was logged as 372 MiB (MC-40). This line is the
+	// instrument the campaign measures transfer volume with
+	// (docs/dev/multiclient-test-plan.md §2.7), so it reports what was sent.
+	counted := &countingReader{r: f}
+	rf, err := e.store.Put(ctx, p, counted)
 	if err != nil {
 		return err
 	}
@@ -804,8 +812,21 @@ func (e *Engine) pushContent(ctx context.Context, p string, dirty *ranges.Set) e
 	// Only here, never on the routes above: a range write and both skips log their
 	// own lines, and counting this one as well would report an upload that did not
 	// happen — which is exactly what MC-21 (a touch must cost nothing) asserts.
-	e.logf("[sync] upload   %s (%d B)", p, size)
+	e.logf("[sync] upload   %s (%d B)", p, counted.n)
 	return nil
+}
+
+// countingReader reports how many bytes a store actually read out of a file. It
+// is not a progress meter: nothing reads n until the Put has returned.
+type countingReader struct {
+	r io.Reader
+	n int64
+}
+
+func (c *countingReader) Read(p []byte) (int, error) {
+	n, err := c.r.Read(p)
+	c.n += int64(n)
+	return n, err
 }
 
 // pushShortcut tries the two M6 routes that avoid re-uploading a whole file,

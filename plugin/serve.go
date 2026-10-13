@@ -49,6 +49,11 @@ import (
 // than appear anywhere. That is why the logger handed to the factory writes to
 // stderr, and why a plugin should never build one of its own over os.Stdout.
 func Serve(factory provider.Factory) {
+	// Stop if the host does. go-plugin has no plugin-side liveness mechanism, so
+	// without this a host killed by a signal leaves this process running with the
+	// account's credentials and nothing to serve. See liveness.go.
+	watchHost()
+
 	// The provider's logger writes to stderr with no prefix and no timestamp: the
 	// host adds both, using the mount's own prefix, so that a plugin's lines read
 	// as part of the mount they belong to rather than as a second program's

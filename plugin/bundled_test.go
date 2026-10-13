@@ -63,7 +63,7 @@ func TestBundledLaunchPassesTheServeSubcommandToExec(t *testing.T) {
 	bundled := &process{launchSpec: launchSpec{
 		kind: "gdrive", path: "/opt/drivel", args: []string{ServeCommand, "gdrive"}, bundled: true,
 	}}
-	cmd := bundled.clientConfig().Cmd
+	cmd := bundled.clientConfig(nil, "").Cmd
 	if cmd.Path != "/opt/drivel" {
 		t.Errorf("Path = %q, want the host image", cmd.Path)
 	}
@@ -74,7 +74,7 @@ func TestBundledLaunchPassesTheServeSubcommandToExec(t *testing.T) {
 	// And an installed plugin is still launched with nothing to say: its filename
 	// has already said which kind it is.
 	installed := &process{launchSpec: launchSpec{kind: "fake", path: "/x/" + BinaryPrefix + "fake"}}
-	if got, want := installed.clientConfig().Cmd.Args, []string{"/x/" + BinaryPrefix + "fake"}; !slices.Equal(got, want) {
+	if got, want := installed.clientConfig(nil, "").Cmd.Args, []string{"/x/" + BinaryPrefix + "fake"}; !slices.Equal(got, want) {
 		t.Errorf("Args = %q, want %q", got, want)
 	}
 }

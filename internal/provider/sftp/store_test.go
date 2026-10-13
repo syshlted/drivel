@@ -10,6 +10,7 @@ import (
 	"errors"
 	"io"
 	"os"
+	"path"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -547,5 +548,105 @@ func TestPathsStayInsideTheRoot(t *testing.T) {
 	}
 	if _, err := os.Stat(ts.path("escaped.txt")); err != nil {
 		t.Errorf("the path did not land inside the root either: %v", err)
+	}
+}
+
+// Two Puts of one path must not land in one server-side temporary. The property
+// asserted is the one a user would notice: whoever wins, the destination holds
+// one of the two uploads byte for byte and never a mixture of both.
+//
+// MC-40 found the shape live — the reconciler pushing through Engine.Push while
+// the worker pool pushed the same path — and the temporary's name was a function
+// of the destination alone, so both calls opened the same file and wrote at their
+// own offsets. The loser then kept writing through its handle into the file the
+// winner had already renamed into place.
+func TestConcurrentPutsOfOnePathDoNotShareATemporary(t *testing.T) {
+	ts := startServer(t)
+	s := ts.open(t)
+
+	// Distinguishable and long enough that the two calls overlap: a single small
+	// write would finish before the other started and the test would pass for the
+	// wrong reason.
+	const n = 4 << 20
+	a := bytes.Repeat([]byte{'a'}, n)
+	b := bytes.Repeat([]byte{'b'}, n)
+
+	errs := make(chan error, 2)
+	for _, body := range [][]byte{a, b} {
+		go func(body []byte) {
+			_, err := s.Put(t.Context(), "both.bin", bytes.NewReader(body))
+			errs <- err
+		}(body)
+	}
+	for range 2 {
+		if err := <-errs; err != nil {
+			// A losing Put may legitimately fail — its own temporary is gone by the
+			// time it renames, or the server refuses the rename. What it must not do
+			// is corrupt the destination, which is what the check below is for.
+			t.Logf("one Put failed, which is allowed: %v", err)
+		}
+	}
+
+	got, err := os.ReadFile(ts.path("both.bin"))
+	if err != nil {
+		t.Fatalf("reading the destination: %v", err)
+	}
+	if !bytes.Equal(got, a) && !bytes.Equal(got, b) {
+		// Report the shape rather than 4 MiB of it.
+		as := bytes.Count(got, []byte{'a'})
+		bs := bytes.Count(got, []byte{'b'})
+		t.Errorf("the destination holds a mixture: %d bytes, %d from one upload and %d from the other; want exactly one of the two",
+			len(got), as, bs)
+	}
+
+	// And nothing is left behind under the destination's own name, which is what a
+	// shared temporary looked like from the outside.
+	entries, err := os.ReadDir(ts.root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if isTemp(e.Name()) {
+			t.Logf("stranded temporary %s: allowed (the losing Put removed what it could), and invisible to Enumerate", e.Name())
+		}
+	}
+}
+
+// tempNameFor's three properties, each of which something downstream relies on.
+func TestTempNameIsUniqueColocatedAndRecognised(t *testing.T) {
+	const abs = "/srv/share/dir/report.pdf"
+	first, err := tempNameFor(abs)
+	if err != nil {
+		t.Fatalf("tempNameFor: %v", err)
+	}
+	second, err := tempNameFor(abs)
+	if err != nil {
+		t.Fatalf("tempNameFor: %v", err)
+	}
+	if first == second {
+		t.Errorf("two calls returned %q; a shared name is a shared file", first)
+	}
+	// The rename into place has to be within one filesystem to be atomic, so the
+	// temporary lives in the destination's own directory.
+	if got, want := path.Dir(first), path.Dir(abs); got != want {
+		t.Errorf("temporary is in %q, want the destination's directory %q", got, want)
+	}
+	// Enumerate skips these by prefix; a name it does not recognise would be
+	// materialised locally and then inferred as a deletion.
+	if !isTemp(path.Base(first)) {
+		t.Errorf("isTemp(%q) = false; Enumerate would report it as a file", path.Base(first))
+	}
+	if !strings.Contains(first, "report.pdf") {
+		t.Errorf("%q does not name its destination; a stranded upload should say what it was", first)
+	}
+
+	// A name too long to create is a Put that fails for a reason having nothing to
+	// do with the file's contents, so the destination's half is capped.
+	long, err := tempNameFor("/srv/" + strings.Repeat("x", 300) + ".bin")
+	if err != nil {
+		t.Fatalf("tempNameFor on a long name: %v", err)
+	}
+	if n := len(path.Base(long)); n > 255 {
+		t.Errorf("temporary name is %d bytes, which most servers refuse", n)
 	}
 }

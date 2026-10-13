@@ -933,6 +933,50 @@ existing M4 retry loop is what waits, and a crash costs a deferred push rather t
 a failed one. The capability set is captured at the first open and held across
 restarts, because the engine wires itself to that answer once.
 
+**What happens when the *host* dies, which is the harder direction.** go-plugin
+ends a plugin by having the host call `Client.Kill`, which `process.Close` does on
+an orderly shutdown. A host killed by a signal runs no code at all, and until
+2026-10-13 nothing covered that: there is no liveness mechanism on the plugin side
+of go-plugin — the child is given the host's *own* stdin rather than a pipe to it,
+and a gRPC server goes on listening after its last client disconnects. MC-40 found
+the consequence by being the case that looks for it: `kill -9` on a mount left
+`plugin-serve` running indefinitely, holding that account's credentials and its
+connection to the provider with nothing driving it, and one more accumulated per
+crash-restart cycle.
+
+The fix is the mechanism M16 already uses for its daemonize handshake. The host
+creates a pipe, passes the read end as the child's fd 3, and keeps the write end
+for its own lifetime; the child reads it, and a read that ends *cleanly* means
+every writer has closed — which the kernel guarantees for any way a host can die,
+including the ways that execute nothing. Four properties carry it. **Only a clean
+EOF counts**: any other read error means the descriptor is unusable, which is not
+evidence about the host and must not take a working backend down with it. **A
+plugin with no pipe is left alone**, which is what makes the call unconditional in
+`Serve` and what keeps an out-of-tree plugin built against an older `plugin`
+working. **The host releases its end on exactly the two transitions where a
+backend stops being its own** — a relaunch and `Close` — because holding it would
+leak a descriptor per crash in the component whose purpose is surviving crashes.
+And **it is cleanup rather than a boundary**: a plugin is code drivel launched and
+trusted (rule 8 again), so one that wanted to outlive its host could simply not
+read the pipe. What this buys is that an honest backend stops when there is
+nothing left to serve.
+
+Three alternatives were weighed. `SysProcAttr.Pdeathsig` is Linux and FreeBSD
+only, and in Go the signal is delivered when the *thread* that forked exits rather
+than the process, so the runtime retiring that thread kills a healthy backend
+(golang/go#27505). Polling `getppid` is portable and simple but up to a tick late,
+and has to reason about PID 1 and subreapers to decide what "reparented" even
+means. Watching the gRPC connection would make the plugin care about its own
+transport and still say nothing about a host that is alive but wedged.
+
+One consequence is worth naming because it is a regression in a smaller thing.
+The child now exits promptly instead of unwinding, so an in-flight `Put` does not
+run its own cleanup — on SFTP that means the server-side temporary is *stranded*
+where before the orphan lived long enough to remove it. It is invisible
+(`Enumerate` skips the prefix, M18 rule 7) and costs quota; reclaiming old
+temporaries is the open follow-up, and its age threshold has to exceed the longest
+plausible upload, because a young temporary may be another client's.
+
 **What it costs.** One process per mount, and a local RPC hop on every byte of every
 transfer. Against a network backend the hop is noise; against the local backend M11
 proposes it is a real cost and that milestone should measure it. See §9/M9.
@@ -3200,6 +3244,24 @@ this whole group walks through, so it is a precondition rather than a note.
       remove-then-rename otherwise; the sweep skips the `.drivel-upload.*` prefix
       so a temporary stranded by a dropped connection is never materialised
       locally and never inferred as a deletion.
+
+      **The name is unique per call, and that half was wrong until MC-40**
+      (2026-10-13). It was `tempPrefix + path.Base(abs)`, a function of the
+      destination alone, so two `Put`s of one path opened one server-side file and
+      wrote at their own offsets — and the loser of the race went on writing
+      through its open handle into the file the winner had already renamed into
+      place, leaving a destination holding a mixture of two uploads with an echo
+      recorded saying it holds one of them. Reproduced every run at 4 MiB. Two
+      writers is not a rare shape: within one mount the reconciler pushes through
+      `Engine.Push` while the worker pool may be pushing the same path, and
+      *across* mounts the server-side name is a shared namespace, so two clients
+      collide however carefully either one is internally ordered — which is why
+      the unique component comes from `crypto/rand` rather than a per-process
+      counter. The destination's name is kept but capped, both so a stranded
+      upload says what it was and because prefix-plus-a-long-name could exceed the
+      255-byte filename limit on its own. The cost is that a stranded temporary is
+      no longer reclaimed by the next `Put` of that path, which the plugin
+      liveness fix in §2.10 makes a likelier outcome rather than a rarer one.
     - *`Remove` has no recoverable form.* This is where the question first came
       up and it was settled for the whole group rather than for SFTP — see the
       preamble's deletion bullet. `-max-deletes` is the only guard, and the user
@@ -4445,7 +4507,38 @@ this whole group walks through, so it is a precondition rather than a note.
     restart regardless, and a cross-object callback would write `nextSweep` from
     a worker goroutine, which is single-goroutine state by design.
 
-    **Two things M27 deliberately does not close.** An abandoned **deletion** is
+    **Three things M27 deliberately does not close**, and the first was measured
+    rather than predicted. **A push lost to a crash is not repaired at all**
+    (MC-40, 2026-10-13, over two processes and a local sshd). The repair record is
+    written when a push *gives up*, and giving up is code that runs; `kill -9`
+    runs none. So the bucket is empty after a crash, and for the commonest shape —
+    a rewrite of a file that is already synced — nothing else proposes the path
+    either: it has an echo, so `pushLocalOnly` skips it, and the echo still
+    describes exactly what the remote holds, so the remote pass matches it and
+    correctly does nothing. Measured over 44 sweeps and seven minutes, past
+    `repairDelay`, with the local file holding the user's rewrite and the remote
+    holding the previous content throughout. **A crash is therefore strictly worse
+    than an outage**, which is the opposite of what part 2's entry reads like on
+    its own, and the asymmetry is invisible unless the two are read together.
+
+    Recording the debt *before* the push would close it, and is declined for the
+    reason §12 gives: that is the persistent outbound queue, and it doubles the
+    commit count of every push — the budget in §12 is a ratchet precisely so that
+    a change like this has to argue for itself. The cheaper candidate, and the one
+    to weigh first, is to let the sweep's local walk consult the baseline
+    fingerprint it already stores. `state.Echo.LocalSize`/`LocalMTime` were added
+    in M18 for the hashless-provider case and `matchesBaseline` already reads them
+    for the delete rows; extending that to the *push* row means a path whose local
+    file no longer matches its own baseline is pushed rather than skipped. No new
+    state, no extra commits, one `lstat` per file on a walk that already visits
+    every file — and it covers the power cut, the OOM kill and the file written
+    while the mount was down, none of which the repair bucket can ever see. What
+    has to be settled first is what a fingerprint that says "not recorded" means:
+    a zero `LocalMTime` must never read as "matches", which is the rule M18 item
+    12 states for the deletion direction and which here decides whether a sweep
+    may push a file whose baseline it cannot verify.
+
+    An abandoned **deletion** is
     not repaired: there is no local content to re-send, and inferring it later
     would have to go back through `-max-deletes`, which is the delete pass's
     machinery rather than a re-push — the remote object is still there and still

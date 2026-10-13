@@ -30,6 +30,8 @@ package sftp
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -56,6 +58,15 @@ const defaultTimeout = 30 * time.Second
 // tempPrefix names an upload in progress. See Store.Put for why uploads land on a
 // temporary name first, and Store.Enumerate for why the sweep steps over them.
 const tempPrefix = ".drivel-upload."
+
+// tempBaseMax caps how much of the destination's name a temporary carries.
+//
+// The name is there to be read by a person looking at a stranded upload, which
+// is worth something and is worth nothing if the name is then too long to
+// create: most servers cap a filename at 255 bytes, and prefix + a long name +
+// the unique suffix would pass it. Truncating keeps the diagnosis and makes a
+// Put of a file with a very long name work, which it previously did not.
+const tempBaseMax = 100
 
 // Config is what an SFTP provider needs to open. The toml tags are the keys a
 // `[account.NAME]` table in drivel's config file uses (M8) — spelled explicitly
@@ -284,6 +295,24 @@ func do[T any](ctx context.Context, s *Store, fn func(c *conn) (T, error)) (T, e
 // truncated — with no server-side digest (see the ContentHasher note above),
 // nothing downstream would ever notice. The engine records its echo from what
 // this returns, so a failed Put records nothing and the next sweep re-pushes.
+//
+// The temporary's name is UNIQUE PER CALL, and that is a correctness property
+// rather than tidiness. It used to be a function of the destination path alone,
+// so two Puts of one path shared one server-side file: they interleaved at their
+// own offsets, and the loser of the race went on writing through its open handle
+// into the file the winner had already renamed into place — a destination holding
+// a mixture of two uploads, with an echo recorded saying it holds one of them.
+// Two writers is not a rare shape. Within one mount the reconciler pushes
+// through Engine.Push while the worker pool may be pushing the same path (MC-40
+// found this), and across mounts the server-side name is a shared namespace, so
+// two clients pushing one path collide however carefully either one is ordered.
+//
+// What it costs is self-cleaning. A stranded temporary used to be overwritten by
+// the next Put of the same path and renamed away with it; a unique one stays
+// until something removes it. Enumerate still skips the prefix, so it is never
+// materialised locally and never inferred as a deletion (M18 rule 7) — it is
+// invisible rather than harmful — but nothing reclaims it, and a periodic sweep
+// of old temporaries is the open follow-up.
 func (s *Store) Put(ctx context.Context, p string, r io.Reader) (provider.RemoteFile, error) {
 	return do(ctx, s, func(c *conn) (provider.RemoteFile, error) {
 		abs := c.abs(p)
@@ -291,7 +320,10 @@ func (s *Store) Put(ctx context.Context, p string, r io.Reader) (provider.Remote
 		if err := c.cli.MkdirAll(dir); err != nil {
 			return provider.RemoteFile{}, fmt.Errorf("creating %s: %w", dir, err)
 		}
-		tmp := path.Join(dir, tempPrefix+path.Base(abs))
+		tmp, err := tempNameFor(abs)
+		if err != nil {
+			return provider.RemoteFile{}, err
+		}
 		f, err := c.cli.Create(tmp)
 		if err != nil {
 			return provider.RemoteFile{}, fmt.Errorf("creating %s: %w", tmp, err)
@@ -463,3 +495,22 @@ const dirVersion = "dir"
 
 // isTemp reports whether name is one of this provider's in-progress uploads.
 func isTemp(name string) bool { return strings.HasPrefix(name, tempPrefix) }
+
+// tempNameFor builds the unique in-progress name for an upload to abs. It lands
+// in abs's own directory, because the rename that follows has to be within one
+// filesystem to be atomic.
+//
+// The random component comes from crypto/rand rather than a counter: a counter
+// would have to be per process, and the collision this prevents is between two
+// processes as much as between two goroutines.
+func tempNameFor(abs string) (string, error) {
+	base := path.Base(abs)
+	if len(base) > tempBaseMax {
+		base = base[:tempBaseMax]
+	}
+	var n [8]byte
+	if _, err := rand.Read(n[:]); err != nil {
+		return "", fmt.Errorf("naming a temporary for %s: %w", abs, err)
+	}
+	return path.Join(path.Dir(abs), tempPrefix+base+"."+hex.EncodeToString(n[:])), nil
+}

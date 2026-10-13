@@ -13,6 +13,7 @@ import (
 	"io"
 	"log"
 	"net"
+	"os"
 	"os/exec"
 	"sync"
 	"time"
@@ -88,10 +89,16 @@ type process struct {
 	cfg provider.Config
 	lg  *log.Logger
 
-	mu       sync.Mutex
-	client   *goplugin.Client
-	api      pb.ProviderClient
-	content  *contentRegistry
+	mu      sync.Mutex
+	client  *goplugin.Client
+	api     pb.ProviderClient
+	content *contentRegistry
+	// alive is the host's end of the liveness pipe for the running backend. The
+	// child exits when it is closed, so it is held for the process's lifetime and
+	// released in exactly the two places a backend stops being ours: a relaunch
+	// and Close. Not releasing it would leak one descriptor per crash, over a
+	// mount whose whole point is to survive crashes.
+	alive    *os.File
 	caps     provider.CapabilitySet
 	started  time.Time
 	failures int
@@ -113,7 +120,7 @@ func (p *process) logf(format string, args ...any) {
 //
 // Three of its settings are security decisions rather than tuning, and each is
 // noted where it is made.
-func (p *process) clientConfig() *goplugin.ClientConfig {
+func (p *process) clientConfig(aliveChild *os.File, aliveEnv string) *goplugin.ClientConfig {
 	// Background rather than a caller's context, deliberately: the backend's
 	// lifetime is the mount's, not any one call's. Binding it to the context that
 	// happened to trigger a launch would kill the process the moment that push or
@@ -126,6 +133,18 @@ func (p *process) clientConfig() *goplugin.ClientConfig {
 	cmd := exec.CommandContext(context.Background(), p.path, p.args...)
 	cmd.Cancel = func() error { return nil }
 	cmd.Env = pluginEnv()
+	// The liveness pipe and the entry naming it are set together or not at all: a
+	// child told to watch fd 3 that was given no fd 3 would watch a descriptor
+	// that is not the pipe. No pipe means no liveness, which is the same tolerance
+	// watchHost has on the other side. See liveness.go.
+	//
+	// pluginEnv is the *inheritance* filter and this entry is neither inherited
+	// nor a credential — it is this host telling the child which descriptor to
+	// watch — so it is appended here rather than added to that allowlist.
+	if aliveChild != nil && aliveEnv != "" {
+		cmd.Env = append(cmd.Env, aliveEnv)
+		cmd.ExtraFiles = []*os.File{aliveChild}
+	}
 
 	return &goplugin.ClientConfig{
 		HandshakeConfig: handshake,
@@ -191,7 +210,19 @@ func checkLocalTransport(addr net.Addr) error {
 
 // launch starts the process and opens the backend. The caller holds p.mu.
 func (p *process) launch(ctx context.Context) error {
-	client := goplugin.NewClient(p.clientConfig())
+	aliveChild, aliveHost, aliveEnv, err := hostAlivePipe()
+	if err != nil {
+		return transportError("plugin %s: liveness pipe: %w", p.kind, err)
+	}
+	// The child's end is duplicated into it by exec; this copy is the host's to
+	// close either way, and on every failure path below the host's end goes with
+	// it so a refused launch leaves no descriptors behind.
+	defer aliveChild.Close()
+	fail := func(err error) error {
+		_ = aliveHost.Close()
+		return err
+	}
+	client := goplugin.NewClient(p.clientConfig(aliveChild, aliveEnv))
 
 	// Start before Client, so the transport can be checked before anything is
 	// dialled: Start launches the process and resolves the address the plugin
@@ -200,7 +231,7 @@ func (p *process) launch(ctx context.Context) error {
 	addr, err := client.Start()
 	if err != nil {
 		client.Kill()
-		return transportError("plugin %s: launching %s: %w", p.kind, p.what(), err)
+		return fail(transportError("plugin %s: launching %s: %w", p.kind, p.what(), err))
 	}
 	if err := checkLocalTransport(addr); err != nil {
 		client.Kill()
@@ -209,23 +240,23 @@ func (p *process) launch(ctx context.Context) error {
 		// the only thing that reports a backend as unusable, and a second class of
 		// launch error that bypasses it would need its own plumbing all the way up
 		// to the engine for a case no shipped backend can produce.
-		return transportError("plugin %s: %s %w", p.kind, p.what(), err)
+		return fail(transportError("plugin %s: %s %w", p.kind, p.what(), err))
 	}
 
 	rpc, err := client.Client()
 	if err != nil {
 		client.Kill()
-		return transportError("plugin %s: launching %s: %w", p.kind, p.what(), err)
+		return fail(transportError("plugin %s: launching %s: %w", p.kind, p.what(), err))
 	}
 	raw, err := rpc.Dispense(pluginName)
 	if err != nil {
 		client.Kill()
-		return transportError("plugin %s: %w", p.kind, err)
+		return fail(transportError("plugin %s: %w", p.kind, err))
 	}
 	d, ok := raw.(*dispensed)
 	if !ok {
 		client.Kill()
-		return transportError("plugin %s: served an unexpected %T", p.kind, raw)
+		return fail(transportError("plugin %s: served an unexpected %T", p.kind, raw))
 	}
 
 	// The content channel is opened before Open, because its broker ID has to be
@@ -245,7 +276,7 @@ func (p *process) launch(ctx context.Context) error {
 		// A refused Open is the backend's own answer — bad credentials, an
 		// unreadable sweep-mode — so it is decoded rather than wrapped as a
 		// transport failure. Wrapping it would make "run drivel login" retryable.
-		return decodeError(err)
+		return fail(decodeError(err))
 	}
 
 	caps, unknown := provider.CapabilitySetFromNames(resp.GetCapabilities())
@@ -263,7 +294,7 @@ func (p *process) launch(ctx context.Context) error {
 		p.logf("%s", describeMismatch(p.kind, p.caps, caps))
 	}
 
-	p.client, p.api, p.content = client, d.api, reg
+	p.client, p.api, p.content, p.alive = client, d.api, reg, aliveHost
 	p.started = time.Now()
 	return nil
 }
@@ -287,6 +318,7 @@ func (p *process) acquire(ctx context.Context) (pb.ProviderClient, *contentRegis
 	if p.client != nil {
 		lived := time.Since(p.started)
 		p.client.Kill() // reap; it has already exited
+		p.releaseAlive()
 		p.client, p.api, p.content = nil, nil, nil
 		if lived >= healthyRun {
 			p.failures = 0
@@ -341,6 +373,7 @@ func (p *process) Close() error {
 		cancel()
 	}
 	p.client.Kill()
+	p.releaseAlive()
 	p.client, p.api, p.content = nil, nil, nil
 	return nil
 }
@@ -402,4 +435,15 @@ func describeLaunch(s launchSpec, caps provider.CapabilitySet) string {
 		return fmt.Sprintf("loaded the bundled %s backend (capabilities: %s)", s.kind, caps)
 	}
 	return fmt.Sprintf("loaded %s plugin from %s (capabilities: %s)", s.kind, s.path, caps)
+}
+
+// releaseAlive closes the host's end of the liveness pipe for a backend that is
+// no longer running. Closing it is what tells a child that has somehow outlived
+// its Kill to stop; holding it is what would leak a descriptor per relaunch.
+// Callers hold p.mu.
+func (p *process) releaseAlive() {
+	if p.alive != nil {
+		_ = p.alive.Close()
+		p.alive = nil
+	}
 }

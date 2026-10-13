@@ -144,12 +144,44 @@ divergence, or set a short interval and measure the recovery.
 kill -9 "$(pgrep -f 'rig/c1/config.toml')"
 ```
 
+**MC-40 ran 2026-10-13** over the SFTP rig below rather than Drive; the plan's row
+has the results, and what is still unrun is the resumable-session half. What
+follows is the recipe, including the two things that cost time the first time.
+
 Two things to check that the Tier A versions cannot. The upload session is not
 persisted, so a restart re-uploads from zero: look for a *duplicate* remote object
-beside the real one rather than a resumed transfer. And since M23 the backend runs
-in its own process — `drivel plugin-serve gdrive`, a child of the host — so after
-the kill, check for an orphan with `pgrep -af plugin-serve`. A child that outlives
-its host is holding the account's credentials with nothing driving it.
+beside the real one rather than a resumed transfer — and note that only an
+ID-addressed backend can produce one, so this half of the case is Drive's alone.
+And since M23 the backend runs in its own process, so after the kill, check for an
+orphan:
+
+```sh
+pgrep -af plugin-serve          # works
+pgrep -af 'drivel plugin-serve' # finds nothing, ever
+pkill  -x drivel                # does NOT reach the child
+```
+
+**The child's command line is `/proc/self/exe plugin-serve <kind>` and its `comm`
+is `exe`**, because that is the path the host re-executes. So match on
+`plugin-serve` and nothing else; a recipe built around the program's name misses
+it and reads as "no orphan". A child that outlives its host is holding the
+account's credentials with nothing driving it — which is what this found, and
+`plugin/liveness.go` is the fix.
+
+Two things about getting the kill to land mid-upload. **Trigger on the temporary
+existing, not on its size**: the destination path never holds a partial file
+(M18 rule 7), so what to watch for is `.drivel-upload.*` in the destination's
+directory, and a size threshold turns a throughput measurement into a race you
+lose on a slow disk. **Put the rig's backing trees and the SFTP root on tmpfs** —
+a 512 MiB push took 3s there and between 25s and 95s on a 91%-full spinning
+volume, with the variance landing exactly where the kill has to be timed.
+
+And run the case in both shapes, because they do not have the same answer: a kill
+mid-upload of a **new** file recovers on the next sweep, and a kill mid-upload of a
+**rewrite** of an already-synced file does not recover at all. Set
+`sweep-interval` long enough that no sweep races the push you are interrupting
+(10m for the client being killed), or the sweep's own push of the same path
+confuses the result.
 
 ### MC-44, MC-44b — take the network away from one client
 

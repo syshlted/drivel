@@ -183,6 +183,15 @@ link during a sweep would let a loop run forever.
 **Permissions are not synced.** A file drivel uploads gets whatever mode your SSH
 account's umask gives it. Ownership, ACLs and extended attributes do not travel.
 
+**An interrupted upload can leave a `.drivel-upload.*` file on the server.**
+Drivel uploads to a temporary name and renames it into place, so the real path
+never holds a half-written file. If the mount is killed outright — `kill -9`, an
+out-of-memory kill, a power cut — the temporary stays. Drivel ignores these
+completely: it will not download one, and it will not mistake one for a file you
+deleted. Nothing removes them automatically, so if they build up, delete them by
+hand. Anything matching `.drivel-upload.*` under your `root` is safe to remove
+once no mount is uploading.
+
 ## When something is wrong
 
 `drivel mount -debug` logs every operation. The common failures:

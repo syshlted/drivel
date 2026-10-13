@@ -837,20 +837,27 @@ numbered list. The live testing work is now Tier B of the multi-client campaign
 V, failure and degradation** (`internal/app/failure_test.go` over the per-peer fault
 injection in `faultstore_test.go`): MC-41, MC-43, MC-44b and MC-46 run in-process,
 MC-45's premise turned out not to hold, **MC-47 ran for real on 2026-10-10 over two
-processes and a local sshd** (see M8 rule 2), and only MC-40/MC-44 are left, Tier B
-by mechanism rather than by scheduling — **ungated since M27 shipped**, since the
-finding below is what M27 fixed and MC-40 would otherwise have measured a loss
-the product was already known to forget. Three of its findings are products of
+processes and a local sshd** (see M8 rule 2), **MC-40 ran on 2026-10-13 over that
+same rig** and produced three product fixes — a plugin child that outlived its
+host (M9 rule 10), an SFTP temp name two writers shared (SFTP rule 7), and an
+upload byte count taken before the transfer — plus the finding that **a crash is
+not an outage**: M27 repairs an abandoned push and not a lost one. Only MC-44 is left, Tier B by mechanism
+*and* by credentials, since the HTTP/3 transport is injected into the Drive
+provider alone and the rig's OAuth tokens are expired. Five of the group's findings are products of
 running it and not of the plan: an **abandoned push and a failed download were
 both repaired only by a sweep**, which `-sweep-interval 0` disables — the push
 half is M27, the **download half is not and still waits for a sweep**; the
-shutdown gap in M8 rule 1 above; and **an eager SFTP mount without
-`-materialize` never receives anything** (SFTP rule 2).
+shutdown gap in M8 rule 1 above; **an eager SFTP mount without
+`-materialize` never receives anything** (SFTP rule 2); the orphaned plugin
+child (M9 rule 10); and **one `cp` of a large file costing two full uploads**,
+because `OpCreate` and `OpWrite` can only coalesce for a write that finishes
+inside the debounce window — which is also the answer to the duplicate upload
+MC-11 recorded and the plan had sent to Tier A to be chased.
 
-**The queue is Group V's remaining two, then Group IV, then Group VI**
+**The queue is MC-44, then Group IV, then Group VI**
 (§5 of the test plan is the authority and carries the Group VI load estimate). Two
-things about that order are worth keeping: Group V is nearly finished rather than
-nearly started, so what looks like a group is two cases; and Group VI's constraint
+things about that order are worth keeping: Group V is finished but for one
+case, which needs a live Drive account as much as a mechanism; and Group VI's constraint
 is wall clock and storage quota, **not** API rate — MC-11 recorded zero 403s at
 1.09 uploads/s, a single writer cannot burst past ~1 request/s, and storage is
 per Google *account*, so a fresh Cloud project buys per-project request
@@ -1281,7 +1288,23 @@ go-fuse's protocol trace and must never come to mean two things).
    must be read after a restart anyway, and a callback would write `nextSweep`
    from a worker goroutine when it is single-goroutine state by design.
 
-**Two things M27 does not close, and neither is an oversight.** An abandoned
+**Three things M27 does not close, and none is an oversight.** **A push lost to
+a *crash* is not repaired at all, which MC-40 measured on 2026-10-13**: a path is
+recorded when a push gives up, and giving up is code — `kill -9` runs none, so the
+repair bucket is empty, and a rewrite of an already-synced file then has an echo
+that `pushLocalOnly` skips on and that the remote pass matches, so no row of the
+reconcile table proposes it. 44 sweeps over 7 minutes changed nothing. **A crash
+is therefore strictly worse than an outage here**, which is the opposite of what
+the MC-44b row reads like on its own. Recording the debt *before* the push closes
+it and is declined: that is the persistent outbound queue §12 prices, and it
+doubles every push's commit count. The cheaper candidate, and the one to weigh
+first, is to let the local walk consult the baseline fingerprint it already
+stores — `state.Echo.LocalSize`/`LocalMTime`, which `matchesBaseline` reads for
+the delete rows — so a path whose local file no longer matches its own baseline is
+pushed rather than skipped: no new state, no extra commits, one `lstat` on a walk
+that already visits every file, and it covers the power-cut and OOM cases too.
+Unscheduled; `docs/dev/multiclient-test-plan.md` §4.20 has what must be settled
+first. An abandoned
 **deletion** is not repaired — no local content to re-send, and inferring it
 later has to go through `-max-deletes`, which is the delete pass's machinery, so
 `repairPathOf` declines to record one at all. And **a shutdown cannot overtake a
@@ -1398,13 +1421,39 @@ makes it different from `gdrive` follows from that plus one absence, so most of
    **There is no password and no passphrase option and there must not be one** — a
    credential in cleartext beside the file it protects, for an account that usually
    grants a shell. Encrypted key ⇒ agent.
-7. **`Put` is write-to-temp-then-rename.** The whole-file `Put` is the fallback
-   behind every M6 gate so it runs constantly, and an interrupted in-place write
-   would leave the remote truncated with no digest gate to ever notice. `Enumerate`
-   skips the `.drivel-upload.` prefix so a temporary stranded by a dropped
-   connection is neither materialised locally nor later inferred as a deletion.
-   `conn.rename` takes `posix-rename@openssh.com` when the session advertises it —
-   the fallback is not just slower, it has a window where the destination is absent.
+7. **`Put` is write-to-temp-then-rename, and the temp name is unique per call.**
+   The whole-file `Put` is the fallback behind every M6 gate so it runs constantly,
+   and an interrupted in-place write would leave the remote truncated with no
+   digest gate to ever notice. `Enumerate` skips the `.drivel-upload.` prefix so a
+   temporary stranded by a dropped connection is neither materialised locally nor
+   later inferred as a deletion. `conn.rename` takes `posix-rename@openssh.com`
+   when the session advertises it — the fallback is not just slower, it has a
+   window where the destination is absent.
+
+   **Uniqueness is the correctness half and it was missing until MC-40**
+   (2026-10-13). The name was `tempPrefix + path.Base(abs)` — a function of the
+   destination alone — so two `Put`s of one path opened one server-side file,
+   wrote at their own offsets, and the loser went on writing through its handle
+   into the file the winner had already renamed into place: a destination holding
+   a mixture of two uploads, with an echo recorded saying it holds one of them.
+   Reproduced at 4 MiB in `TestConcurrentPutsOfOnePathDoNotShareATemporary`,
+   which reports the mixture's composition and fails every run against the old
+   name. **Two writers is not a rare shape**: within one mount the reconciler
+   pushes through `Engine.Push` while the worker pool may be pushing the same
+   path, and across mounts the server-side name is a *shared namespace*, so two
+   clients collide however carefully either one is ordered. `crypto/rand` and not
+   a counter, for that second reason. The destination's name is kept but capped
+   (`tempBaseMax`), because a stranded upload should say what it was and because
+   prefix-plus-a-long-name used to exceed the 255-byte limit on its own.
+
+   **What it costs is self-cleaning, and that is now the normal case rather than
+   a rarity.** A stranded temporary used to be overwritten by the next `Put` of
+   the same path and renamed away with it. It is not any more — and the plugin
+   liveness fix (M9 rule 10) makes one *likelier*, because the backend now exits
+   promptly instead of unwinding, so the `Put`'s own `Remove` of its temporary
+   does not run. It stays invisible (`Enumerate` skips it) and costs quota.
+   Reclaiming old temporaries is the open follow-up; the threshold has to exceed
+   the longest plausible upload, because a young one may be another client's.
 8. **`Remove` is permanent and there is nothing behind it** — the group-wide
    decision above, arrived at here first. `-max-deletes` is the only guard, and
    `docs/user/sftp.md` says so in those words. Don't re-open it per backend.
@@ -1559,7 +1608,7 @@ the other is a difference nothing tests, which is why both are tested separately
 (`plugin/bundled_test.go`, `cmd/drivel/bundle_on_test.go`, and the fake plugin for
 the installed path).
 
-Nine things carry the correctness.
+Ten things carry the correctness.
 
 1. **Capability detection is negotiated, not asserted, and this is the load-bearing
    change.** The host-side proxy is *one type serving every backend*, so it
@@ -1646,6 +1695,29 @@ Nine things carry the correctness.
    and nothing else, so a digest is structurally a function of the bytes alone —
    that is what makes a two-vector probe sufficient. An in-process backend never
    reaches the proxy and is unaffected.
+
+10. **A backend must not outlive its host, and go-plugin has no mechanism for
+    that** — the mirror of rule 6, found live by MC-40 (2026-10-13). go-plugin ends
+    a plugin by having the *host* call `Client.Kill`, which `process.Close` does;
+    a host killed by a signal runs no code, and nothing on the plugin side
+    notices, because the child inherits the host's own stdin rather than a pipe to
+    it and a gRPC server goes on listening after its last client disconnects. So
+    `kill -9` on a mount left `plugin-serve` running indefinitely, holding that
+    account's credentials and its connection to the provider, one more per
+    crash-restart cycle. `plugin/liveness.go` is a pipe the host holds open for
+    its own lifetime and the child reads: a clean EOF means every writer is gone,
+    which the kernel guarantees for any way a host can die. Three things about it.
+    **Only a clean EOF counts** — any other read error means the descriptor is
+    unusable, which is not evidence about the host and must not take a working
+    backend down. **A plugin with no pipe is left alone**, which is what makes
+    `watchHost` safe to call unconditionally from `Serve` and keeps an
+    older out-of-tree plugin working. And **it is cleanup, not a boundary**: a
+    plugin is code drivel launched and trusted (rule 8), and one that wanted to
+    survive could simply not read the pipe. `Pdeathsig` was rejected — Linux and
+    FreeBSD only, and in Go it fires when the forking *thread* exits, so the
+    runtime retiring that thread kills a healthy backend. **The child's command
+    line is `/proc/self/exe plugin-serve <kind>` and its `comm` is `exe`**, so
+    `pgrep -af plugin-serve` finds it and `pkill -x drivel` does not.
 
 **Versioning is one number.** `plugin.ProtocolVersion` is in the handshake and a
 mismatch refuses the launch naming both. Adding a protobuf field does **not** bump

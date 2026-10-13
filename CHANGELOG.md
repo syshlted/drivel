@@ -13,6 +13,40 @@ from source with `make build`.
 
 ## Unreleased
 
+### Three fixes from killing a mount mid-upload — 2026-10-13
+
+Testing what happens when a mount is killed outright, rather than asked to stop,
+turned up three separate problems.
+
+**A killed mount left a process behind.** Drivel runs each backend in its own
+process. When you stop a mount normally, Drivel shuts that process down; when the
+mount is killed — by `kill -9`, an out-of-memory kill, a crash — it was never told,
+and it stayed running indefinitely, still holding your account's credentials and
+its connection to the server, with nothing driving it. Every crash left another
+one. A killed mount now takes its backend with it.
+
+**Two uploads of the same file at the same time could corrupt it, on SFTP.**
+Drivel uploads to a temporary name and renames it into place, so that an
+interrupted upload never leaves a half-written file at the real path. The
+temporary's name was built from the destination's name alone, so two uploads of
+one file — which happens when a scheduled re-scan offers a file the mount is
+already sending, and which can also happen between two machines sharing one
+server — used the same temporary and overwrote each other inside it. The result
+could be a file holding part of each upload. Temporary names are now unique per
+upload.
+
+One consequence of the first fix meets the second: because a killed mount's
+backend now stops immediately, it no longer gets to tidy up, so an upload
+interrupted that way leaves a `.drivel-upload.*` file on the server. Drivel
+ignores these — it will not download one or treat it as a deleted file — but
+nothing removes them yet, so delete them by hand if they accumulate.
+
+**Upload sizes in the log were wrong for a file still being written.** A line like
+`[sync] upload  big.bin (372768768 B)` reported the file's size when the upload
+*started*, not what was actually sent, so copying a large file into a mount
+under-reported by however much arrived in the meantime. It now reports the bytes
+transferred.
+
 ### An upload Drivel gave up on is now repaired, not forgotten — 2026-10-12
 
 When an upload fails, Drivel retries it a few times over about seven seconds and
