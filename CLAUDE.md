@@ -841,23 +841,27 @@ processes and a local sshd** (see M8 rule 2), **MC-40 ran on 2026-10-13 over tha
 same rig** and produced three product fixes — a plugin child that outlived its
 host (M9 rule 10), an SFTP temp name two writers shared (SFTP rule 7), and an
 upload byte count taken before the transfer — plus the finding that **a crash is
-not an outage**: M27 repairs an abandoned push and not a lost one. Only MC-44 is left, Tier B by mechanism
-*and* by credentials, since the HTTP/3 transport is injected into the Drive
-provider alone and the rig's OAuth tokens are expired. Five of the group's findings are products of
+not an outage**: M27 repairs an abandoned push and not a lost one. **MC-44's transport half ran the same day**, found
+that a transient UDP block downgraded the transport permanently, and fixed it (see
+"Transport" below). Only its throughput comparison is left, which needs a live
+account because the HTTP/3 transport is injected into the Drive provider alone —
+and the rig's OAuth tokens are expired, a Cloud project left in Testing status
+issuing refresh tokens that die after seven days. Six of the group's findings are products of
 running it and not of the plan: an **abandoned push and a failed download were
 both repaired only by a sweep**, which `-sweep-interval 0` disables — the push
 half is M27, the **download half is not and still waits for a sweep**; the
 shutdown gap in M8 rule 1 above; **an eager SFTP mount without
 `-materialize` never receives anything** (SFTP rule 2); the orphaned plugin
-child (M9 rule 10); and **one `cp` of a large file costing two full uploads**,
+child (M9 rule 10); **one `cp` of a large file costing two full uploads**,
 because `OpCreate` and `OpWrite` can only coalesce for a write that finishes
 inside the debounce window — which is also the answer to the duplicate upload
-MC-11 recorded and the plan had sent to Tier A to be chased.
+MC-11 recorded and the plan had sent to Tier A to be chased; and the permanent
+HTTP/3 downgrade in "Transport" below.
 
-**The queue is MC-44, then Group IV, then Group VI**
+**The queue is MC-44's throughput half, then Group IV, then Group VI**
 (§5 of the test plan is the authority and carries the Group VI load estimate). Two
 things about that order are worth keeping: Group V is finished but for one
-case, which needs a live Drive account as much as a mechanism; and Group VI's constraint
+half-case, which needs a live Drive account rather than a mechanism; and Group VI's constraint
 is wall clock and storage quota, **not** API rate — MC-11 recorded zero 403s at
 1.09 uploads/s, a single writer cannot burst past ~1 request/s, and storage is
 per Google *account*, so a fresh Cloud project buys per-project request
@@ -1907,6 +1911,28 @@ It's HTTP/3-*preferred*: fall back to HTTP/2 when the QUIC/UDP dial fails. The
 transport sits **below** OAuth — pass the client via `option.WithHTTPClient` and fold
 the token source into `oauth2.Transport{Base: ...}`; do **not** also pass
 `WithTokenSource` (conflicts). See DESIGN.md §2.6.
+
+**The downgrade is per host and it expires — `h3Retry`, 5 minutes — and the
+expiry is the part that was missing.** Remembering a host QUIC could not reach is
+necessary, because without it every request pays a failed dial; remembering it
+*forever* meant one transient block downgraded the process permanently, which
+MC-44 measured on 2026-10-13: UDP/443 dropped for forty seconds and restored, and
+all 15 requests in the 29 seconds afterwards stayed on HTTP/2, with HTTP/3 never
+retried again. Over an fstab mount that runs for weeks, that is a blip defeating a project
+requirement. Three things are load-bearing. **Only a failure re-arms the window**,
+so recovery needs no second mechanism — a "clear the mark on success" path was
+written, mutation-tested and deleted, because nothing could assert it: once the
+window lapses, a successful probe simply leaves it lapsed. **The window is a cost
+ceiling, not a guess** at how long a network stays broken: a re-probe costs at most
+one failed dial per window per host, bounded by `HandshakeIdleTimeout`, and no FUSE
+operation is behind it because §2.1 keeps the network off that path. And **`now` is
+injectable** so the window is testable without sleeping through it.
+
+**The fallback fires on the very next request, not after a stall** — measured, and
+with one caveat worth knowing before trusting the number: an nftables `drop` on the
+output hook is reported to the local sender as `EPERM`, so the failure is immediate.
+A network that *blackholes* UDP/443 gives no such error, and the fallback would then
+wait on `HandshakeIdleTimeout` instead. That shape is still unrun.
 
 ## Mount modes
 

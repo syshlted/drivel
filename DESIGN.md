@@ -393,6 +393,50 @@ times out (UDP blocked, restrictive networks). The fallback decision is cached p
 host so we don't re-probe UDP on every request. This is HTTP/3-*preferred*, not
 HTTP/3-*only*.
 
+**The cache expires, and MC-44 is why** (measured 2026-10-13, UDP/443 dropped for a
+running process by a cgroup-scoped nftables rule and then restored). Two results.
+
+The fallback is better than the case assumed: it fires on the **very next request**
+— last HTTP/3 response at 18.9s, the rule added, the request at 21.1s carried over
+HTTP/2 in 203ms, with no error reaching the caller and nothing retried above the
+transport. So "under load" has the same answer as "at startup", and the per-host
+memory is doing its job. One caveat on that 203ms, because it is a property of how
+the block was made rather than of the transport: an output-hook `drop` is reported
+to the local sender as `EPERM`, so the write fails immediately. A network that
+*blackholes* UDP/443 returns nothing at all, and the fallback then waits on
+`HandshakeIdleTimeout` (5s) instead. That shape is unrun — it needs the drop to
+happen off-host, which per-cgroup scoping cannot express.
+
+The restore was worse: **nothing brought HTTP/3 back.** `down` was a
+`map[string]bool`, written on the first failure and never cleared, so all 15
+requests in the 29 seconds after the rule came off stayed on HTTP/2 — and would
+have for the life of the process. A mount runs for weeks, usually from
+`/etc/fstab`, so a forty-second blip was permanently defeating the requirement at
+the top of this section — and silently, since HTTP/2 works.
+
+So the map records *when* a host was last found unusable, and `isDown` treats a
+mark older than `h3Retry` (5 minutes) as lapsed. Three things about it. **Only a
+failure re-arms the window**, which is what makes recovery need no second
+mechanism: once a mark lapses it stops being consulted, a successful probe leaves
+it lapsed, and nothing writes again until QUIC breaks. A "clear the mark on
+success" path was written and then deleted, because a mutation removing it changed
+no behaviour — it was an assertion that could not fail. **The window is a cost
+ceiling rather than an estimate** of how long a network stays broken: the re-probe
+costs at most one failed dial per window per host, bounded by
+`HandshakeIdleTimeout`, nothing at all when the block is local, and no FUSE
+operation is behind it either way because §2.1 keeps the network off that path —
+the worst case delays a sync the engine would have retried. **`now` is injectable**,
+so the window is tested by advancing a clock rather than by sleeping through it.
+Verified live at a 20-second window: HTTP/3 returned on the first request past the
+re-arm, 12.5s after the restore.
+
+What MC-44 did *not* answer is the comparison it was written for. Throughput and
+CPU per protocol need the Drive provider, which is where the transport is injected,
+and the rig's credentials were expired. On a public endpoint with 384 KB bodies the
+two were indistinguishable — HTTP/3 66–117ms against HTTP/2 58–88ms, 5.8 against
+6.7 ms of CPU per MB — which measures request rate, not bulk transfer, and should
+not be quoted as if it settled anything.
+
 **Composition with OAuth (§ auth, M2).** The transport sits *below* auth. Passing
 `option.WithHTTPClient` to the Drive service means we must **not** also pass
 `WithTokenSource` — they conflict — so the token source is folded into the client:

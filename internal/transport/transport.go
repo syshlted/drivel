@@ -10,7 +10,9 @@
 // quic-go does not fall back to TCP on its own, New returns a composite
 // RoundTripper that is HTTP/3-*preferred*: it tries HTTP/3 and, when the QUIC path
 // is unavailable for a host (UDP blocked, handshake timeout), transparently retries
-// over HTTP/2 and remembers that host so later requests skip the QUIC probe.
+// over HTTP/2 and remembers that host so later requests skip the QUIC probe. That
+// memory expires (see h3Retry), because a mount runs for weeks and the thing that
+// blocked QUIC usually does not.
 //
 // The transport sits BELOW auth: callers wrap the returned client's transport with
 // oauth2 (see internal/provider) rather than passing a separate token source.
@@ -56,20 +58,45 @@ func New() (*http.Client, io.Closer) {
 		h3:            h3,
 		h2:            h2,
 		isUnavailable: quicUnavailable,
-		down:          make(map[string]bool),
+		retry:         h3Retry,
+		now:           time.Now,
+		down:          make(map[string]time.Time),
 	}
 	return &http.Client{Transport: rt}, closerFunc(h3.Close)
 }
 
+// h3Retry is how long a host stays written off before HTTP/3 is probed again.
+//
+// Remembering the downgrade is necessary — without it every request pays a failed
+// QUIC dial — but remembering it *forever* was wrong, and MC-44 measured the
+// consequence: UDP/443 taken away for forty seconds and then restored left the
+// process on HTTP/2 for the rest of its life, with HTTP/3 never retried. Over a
+// mount that runs for weeks, usually from /etc/fstab, that turns one transient
+// blip into a permanent downgrade of the transport this project made a
+// requirement.
+//
+// The window is a cost ceiling rather than a guess at how long a network stays
+// broken. When QUIC is genuinely gone the re-probe costs one failed dial per
+// window per host, bounded by HandshakeIdleTimeout above — and a *local* block
+// costs nothing at all, because an output-chain drop is reported to the sender as
+// EPERM and fails immediately. Five minutes keeps that under a couple of percent
+// of a poll loop's time while recovering HTTP/3 promptly enough to matter. No
+// FUSE operation is behind it either way: §2.1 keeps the network off that path,
+// so the worst case delays a sync the engine would have retried anyway.
+const h3Retry = 5 * time.Minute
+
 // fallback is a RoundTripper that prefers h3 and downgrades to h2 per host when
 // the QUIC path is unavailable. The h3/h2 fields are interfaces so the selection
-// logic is unit-testable with fakes.
+// logic is unit-testable with fakes, and now is injectable for the same reason —
+// a test for the re-probe window must not sleep through it.
 type fallback struct {
 	h3, h2        http.RoundTripper
 	isUnavailable func(error) bool
+	retry         time.Duration
+	now           func() time.Time
 
 	mu   sync.RWMutex
-	down map[string]bool // host -> HTTP/3 known-unavailable
+	down map[string]time.Time // host -> when HTTP/3 was last found unavailable
 }
 
 func (f *fallback) RoundTrip(req *http.Request) (*http.Response, error) {
@@ -103,16 +130,43 @@ func (f *fallback) RoundTrip(req *http.Request) (*http.Response, error) {
 	return f.h2.RoundTrip(req)
 }
 
+// isDown reports whether this host's HTTP/3 path is written off *right now*. A
+// mark older than the retry window is treated as lapsed rather than deleted: the
+// next request probes HTTP/3 again, and only a failure writes a fresh mark.
 func (f *fallback) isDown(host string) bool {
 	f.mu.RLock()
 	defer f.mu.RUnlock()
-	return f.down[host]
+	at, ok := f.down[host]
+	if !ok {
+		return false
+	}
+	if f.retry <= 0 {
+		// No window configured: the mark never expires. New always sets one; this
+		// is so a fallback built directly, as a test may, is still coherent.
+		return true
+	}
+	return f.clock().Sub(at) < f.retry
 }
 
+// markDown records that HTTP/3 has just been found unusable for this host. Only
+// a *failure* writes here, which is what makes recovery need no second
+// mechanism: once the window lapses the mark stops being consulted, a successful
+// probe leaves it lapsed, and nothing re-arms it until QUIC breaks again. A
+// "clear it on success" path was written, measured against a mutation and
+// deleted — it changed no behaviour, only the map's size by one entry per host.
 func (f *fallback) markDown(host string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.down[host] = true
+	f.down[host] = f.clock()
+}
+
+// clock is injectable so a test for the re-probe window does not have to sleep
+// through it, and defaulted so a fallback built without one still works.
+func (f *fallback) clock() time.Time {
+	if f.now == nil {
+		return time.Now()
+	}
+	return f.now()
 }
 
 // quicUnavailable reports whether err means the QUIC/HTTP-3 path could not be used

@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 )
 
 // rtFunc adapts a function to http.RoundTripper.
@@ -38,7 +39,7 @@ func TestPrefersH3WhenAvailable(t *testing.T) {
 		h3:            rtFunc(func(*http.Request) (*http.Response, error) { atomic.AddInt32(&h3Calls, 1); return okResp(), nil }),
 		h2:            rtFunc(func(*http.Request) (*http.Response, error) { atomic.AddInt32(&h2Calls, 1); return okResp(), nil }),
 		isUnavailable: quicUnavailable,
-		down:          map[string]bool{},
+		down:          map[string]time.Time{},
 	}
 	if _, err := f.RoundTrip(newReq(t)); err != nil {
 		t.Fatal(err)
@@ -55,7 +56,7 @@ func TestFallsBackAndRemembersHost(t *testing.T) {
 		h3:            rtFunc(func(*http.Request) (*http.Response, error) { atomic.AddInt32(&h3Calls, 1); return nil, dialErr }),
 		h2:            rtFunc(func(*http.Request) (*http.Response, error) { atomic.AddInt32(&h2Calls, 1); return okResp(), nil }),
 		isUnavailable: quicUnavailable,
-		down:          map[string]bool{},
+		down:          map[string]time.Time{},
 	}
 	// First request: probes h3, fails, falls back to h2.
 	if _, err := f.RoundTrip(newReq(t)); err != nil {
@@ -80,7 +81,7 @@ func TestGenuineErrorPropagatesWithoutFallback(t *testing.T) {
 		h3:            rtFunc(func(*http.Request) (*http.Response, error) { return nil, realErr }),
 		h2:            rtFunc(func(*http.Request) (*http.Response, error) { atomic.AddInt32(&h2Calls, 1); return okResp(), nil }),
 		isUnavailable: quicUnavailable,
-		down:          map[string]bool{},
+		down:          map[string]time.Time{},
 	}
 	_, err := f.RoundTrip(newReq(t))
 	if !errors.Is(err, realErr) {
@@ -104,7 +105,7 @@ func TestFallbackRewindsReplayableBody(t *testing.T) {
 			return okResp(), nil
 		}),
 		isUnavailable: quicUnavailable,
-		down:          map[string]bool{},
+		down:          map[string]time.Time{},
 	}
 	// http.NewRequest with a *strings.Reader sets GetBody automatically.
 	req, err := http.NewRequest(http.MethodPost, "https://www.googleapis.com/upload", strings.NewReader(payload))
@@ -127,7 +128,7 @@ func TestFallbackRefusesUnreplayableBody(t *testing.T) {
 			return nil, nil
 		}),
 		isUnavailable: quicUnavailable,
-		down:          map[string]bool{},
+		down:          map[string]time.Time{},
 	}
 	// A bare io.Reader body has no GetBody, so it cannot be replayed.
 	req, err := http.NewRequest(http.MethodPost, "https://www.googleapis.com/upload", io.NopCloser(strings.NewReader("x")))
@@ -137,5 +138,93 @@ func TestFallbackRefusesUnreplayableBody(t *testing.T) {
 	req.GetBody = nil
 	if _, err := f.RoundTrip(req); err == nil {
 		t.Fatal("expected an error when body cannot be replayed for fallback")
+	}
+}
+
+// The downgrade is remembered, and then it expires. MC-44 took UDP/443 away from
+// a running process for forty seconds and gave it back; the process stayed on
+// HTTP/2 for the rest of its life, because the memory of the failure had no end.
+// A mount runs for weeks, so that is one blip becoming a permanent downgrade of
+// the transport this project requires.
+func TestHTTP3IsReprobedAfterTheRetryWindow(t *testing.T) {
+	var h3Calls, h2Calls int32
+	var h3Fails atomic.Bool
+	h3Fails.Store(true)
+
+	clock := time.Now()
+	f := &fallback{
+		h3: rtFunc(func(*http.Request) (*http.Response, error) {
+			atomic.AddInt32(&h3Calls, 1)
+			if h3Fails.Load() {
+				return nil, errors.New("quic: handshake did not complete in time")
+			}
+			return okResp(), nil
+		}),
+		h2:            rtFunc(func(*http.Request) (*http.Response, error) { atomic.AddInt32(&h2Calls, 1); return okResp(), nil }),
+		isUnavailable: quicUnavailable,
+		retry:         5 * time.Minute,
+		now:           func() time.Time { return clock },
+		down:          map[string]time.Time{},
+	}
+	get := func() {
+		t.Helper()
+		if _, err := f.RoundTrip(newReq(t)); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Probe, fail, fall back — and then skip the probe while the window is open.
+	get()
+	get()
+	clock = clock.Add(4 * time.Minute)
+	get()
+	if h3Calls != 1 {
+		t.Errorf("h3 was probed %d times inside the window; want 1, or every request pays a failed dial", h3Calls)
+	}
+	if h2Calls != 3 {
+		t.Errorf("h2 served %d of 3 requests", h2Calls)
+	}
+
+	// Past the window, HTTP/3 is tried again. It is still broken, so the mark is
+	// refreshed rather than cleared: the next request must not probe again.
+	clock = clock.Add(2 * time.Minute)
+	get()
+	get()
+	if h3Calls != 2 {
+		t.Errorf("h3 probed %d times; want 2 — once per window, and a failed re-probe must re-arm the window", h3Calls)
+	}
+
+	// Now QUIC comes back. The next re-probe succeeds, and because only a failure
+	// re-arms the window, every request after it goes to HTTP/3.
+	h3Fails.Store(false)
+	clock = clock.Add(6 * time.Minute)
+	get()
+	get()
+	get()
+	if h3Calls != 5 {
+		t.Errorf("h3 handled %d calls; want 5 — a working QUIC path must stop falling back", h3Calls)
+	}
+	// 5 = the 3 while the first window was open, plus the 2 after the failed
+	// re-probe; the 3 since recovery must not add to it.
+	if h2Calls != 5 {
+		t.Errorf("h2 served %d requests; want 5 — nothing should reach it after recovery", h2Calls)
+	}
+}
+
+// New's own wiring, because the window only works if it is configured: a
+// fallback with no retry duration remembers a downgrade forever, which is
+// exactly the behaviour being fixed.
+func TestNewConfiguresTheRetryWindow(t *testing.T) {
+	c, closer := New()
+	defer closer.Close() //nolint:errcheck // test
+	f, ok := c.Transport.(*fallback)
+	if !ok {
+		t.Fatalf("New returned transport %T, want the fallback", c.Transport)
+	}
+	if f.retry != h3Retry || f.retry <= 0 {
+		t.Errorf("retry = %v, want %v", f.retry, h3Retry)
+	}
+	if f.now == nil {
+		t.Error("now is nil; isDown would fall back to time.Now and the window would be untestable")
 	}
 }

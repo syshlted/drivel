@@ -208,6 +208,48 @@ protocol comparison. For MC-44b the one thing Tier A cannot answer is whether th
 change cursor survives 20 real minutes; everything else about that case is already
 pinned, including that inbound recovers and outbound does not.
 
+**The transport half of MC-44 ran 2026-10-13**, and it ran without an account at
+all: driving `internal/transport` against a public HTTP/3 endpoint answers when
+the fallback fires and whether HTTP/3 ever comes back, which is where both of that
+case's findings were. It does not answer the throughput comparison, which needs
+the Drive provider because that is where the transport is injected. If you only
+need the first question, that is the cheap way to ask it. Four things from the run.
+
+**Check whether you share a network namespace before writing any rule.** In the
+project's dev container `nft list ruleset` shows the *host's* tables, so an
+unscoped output rule takes QUIC away from the developer's browser and from any
+real mount they have running. A cgroup is the cheapest scope that needs no second
+user:
+
+```sh
+sudo mkdir /sys/fs/cgroup/drivel-fault
+sudo sh -c 'echo PID > /sys/fs/cgroup/drivel-fault/cgroup.procs'
+sudo nft add rule inet drivel-fault out socket cgroupv2 level 1 "drivel-fault" udp dport 443 drop
+```
+
+**Then prove the scope in both directions before measuring anything**, because a
+rule that silently matches nothing reads exactly like a transport that never falls
+back: a process *outside* the cgroup must still negotiate HTTP/3, and one inside
+must not.
+
+**Time the restore against the re-probe window, not against the rule.** A failed
+re-probe re-arms the window, so HTTP/3 returns on the first request after the last
+probe plus `h3Retry` — which can be most of a window after the rule came off, and
+looks like the fix not working. Shorten `h3Retry` for the run rather than guessing.
+
+**An output-hook `drop` is not a blackhole.** The kernel reports it to the local
+sender as `EPERM`, so the QUIC write fails immediately and the fallback is
+instant. A network that silently discards UDP/443 gives no error and the fallback
+waits on `HandshakeIdleTimeout` instead. Measuring that needs the drop to happen
+off-host — a netns with the rule on the far side of the veth — which is the one
+thing per-cgroup scoping cannot express.
+
+And for the Drive half: **the rig's tokens expire.** A Google Cloud project left
+in **Testing** publishing status issues refresh tokens that die after seven days,
+so `drivel login` has to be re-run per client before any Group V or VI session.
+The symptom is `oauth2: "invalid_grant"` on the first call, which looks like a
+drivel bug and is not one.
+
 ### MC-46 — fill a client's backing filesystem
 
 Give it a small one rather than filling a real one:

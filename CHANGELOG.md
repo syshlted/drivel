@@ -13,6 +13,20 @@ from source with `make build`.
 
 ## Unreleased
 
+### A network blip no longer costs you HTTP/3 until you restart — 2026-10-13
+
+Drive traffic uses HTTP/3 (QUIC, over UDP port 443) and falls back to HTTP/2 when
+that is blocked — on a guest network, behind a restrictive firewall, or on a VPN
+that does not pass UDP. The fallback works well: it happens on the next request,
+nothing fails, and sync carries on.
+
+What did not work was coming back. Drivel remembered that HTTP/3 had failed and
+never checked again, so a mount that hit a forty-second blip stayed on HTTP/2 for
+as long as it ran — which for a mount started at boot means weeks. Drivel now
+re-checks every five minutes and goes back to HTTP/3 when it can. Nothing to
+configure, and the re-check costs at most one failed connection attempt per five
+minutes while the block lasts.
+
 ### Three fixes from killing a mount mid-upload — 2026-10-13
 
 Testing what happens when a mount is killed outright, rather than asked to stop,
