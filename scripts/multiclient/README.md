@@ -17,6 +17,24 @@ no network and runs under `-race` with the rest of the suite.
    destroy data.
 4. **One token per client.** `token.json` is rewritten on refresh, and three
    processes sharing one path race on that write.
+5. **Check the account before trusting the rig.** `TestLiveRigPreflight` is the
+   tree's one read-only live probe: it reports which account a token belongs to,
+   how much quota is left (MC-10 parks 6 GiB of a free account's 15 GB) and
+   whether the `drivel-rig` folder still exists. It creates nothing, so it is
+   safe against any account.
+
+   ```sh
+   DRIVEL_LIVE_RIG=1 \
+     DRIVEL_CREDS=rig/c1/credentials.json \
+     DRIVEL_TOKEN=rig/c1/token.json \
+     go test -count=1 -v -run TestLiveRigPreflight ./internal/provider/gdrive/
+   ```
+
+   Run it once per client, because it is also how an expired token announces
+   itself. A Cloud project left in **Testing** publishing status expires refresh
+   tokens after seven days, so a rig that worked last week fails with
+   `oauth2: "invalid_grant"` and nothing else wrong with it — check that before
+   looking for a drivel bug.
 
 ## Laying it out
 
@@ -26,9 +44,23 @@ scripts/multiclient/rig-init.sh -r <FOLDER_ID> -c ~/credentials.json -n 3
 ```
 
 That writes `rig/c1…c3` (mountpoint, backing dir, state DB, index DB, config,
-logs) plus `rig/oracle`. Give each client a token — `drivel login -account c1`,
-then copy the token into `rig/c1/token.json` — or pass `-t token.json` to
-`rig-init.sh` to seed all of them from one you already have.
+logs) plus `rig/oracle`. Then give each client a token of its own, by pointing
+`login` straight at the rig's files:
+
+```sh
+./bin/drivel login -scope drive \
+  -credentials rig/c1/credentials.json \
+  -token       rig/c1/token.json
+```
+
+**Not `-account c1`.** That writes the token under `$XDG_CONFIG_HOME/drivel/c1`
+instead, and appends an `[account.c1]` block and a `[[mount]]` at `~/drive-c1`
+to your own config file — none of which the rig reads. One run per client, each
+forcing a fresh consent, against **one** Google account: the clients sync one
+folder, so quota contention (MC-36, MC-50/51) and the same-name-sibling case
+(MC-30) are properties of a single user's Drive. `rig-init.sh -t` copies one
+token into every client, which is exactly what rule 4 above forbids; it is for a
+single-client smoke test, not a fleet run.
 
 Start each client in its own terminal:
 
@@ -38,6 +70,39 @@ Start each client in its own terminal:
 
 `ts` (moreutils) timestamps every line; the convergence and latency numbers read
 those timestamps.
+
+## When the rig has gone stale
+
+A rig is two halves — a Drive folder and four local state directories — and
+either can outlive the other. The folder is the one that disappears: a case
+deletes it, or the web UI does, after which every `config.toml` still names an
+ID that 404s and the preflight above reports `no "drivel-rig" folder at the top
+level`. Create a replacement (web UI, or any API client — the preflight
+deliberately will not), then fix **both** halves.
+
+**Re-pinning the new ID is not enough on its own.** Each client's state DB holds
+§4 echo records — which are also M7b's delete baseline — for paths whose remote
+objects are gone, so against a fresh empty folder every one of them is the
+sweep's *deleted remotely* row. A thousand stale baselines against
+`max-deletes = 100` means the pass is **abandoned** rather than trimmed, and that
+guard is deliberate: a count that large means the premise is broken, not that
+there are a thousand real deletions. So the rig sits refusing to reconcile, and
+with `sweep-interval = 0` nothing retries. Reset the local half:
+
+```sh
+mount | grep fuse.drivel          # must be empty before you delete anything
+for c in c1 c2 c3 oracle; do
+  find rig/$c/data rig/$c/logs -mindepth 1 -delete
+  rm -f rig/$c/drivel-state.db rig/$c/drivel-index.db
+done
+sed -i "s|<OLD_ID>|<NEW_ID>|g" rig/*/config.toml
+```
+
+Unmount first for a reason that is not tidiness: emptying a backing tree under
+a live mount emits an `OpUnlink` per file and an `OpRmdir` per directory, and
+the engine pushes every one of them to the folder you were trying to keep. Keep
+the `token.json` files — they are credentials rather than state, and
+re-authorising costs a browser round trip per client.
 
 ## Running a case
 
