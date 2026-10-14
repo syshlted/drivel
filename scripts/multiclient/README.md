@@ -273,13 +273,37 @@ protocol comparison. For MC-44b the one thing Tier A cannot answer is whether th
 change cursor survives 20 real minutes; everything else about that case is already
 pinned, including that inbound recovers and outbound does not.
 
-**The transport half of MC-44 ran 2026-10-13**, and it ran without an account at
-all: driving `internal/transport` against a public HTTP/3 endpoint answers when
-the fallback fires and whether HTTP/3 ever comes back, which is where both of that
-case's findings were. It does not answer the throughput comparison, which needs
-the Drive provider because that is where the transport is injected. If you only
-need the first question, that is the cheap way to ask it. Three things from the
-run, and then the blackhole rig that followed it.
+**MC-44 ran in full on 2026-10-13**, in three rigs rather than one, and which one
+you want depends on the question.
+
+**When the fallback fires, and whether HTTP/3 comes back**, needs no account at
+all: driving `internal/transport` against a public HTTP/3 endpoint answers both,
+and that is where both of the case's product findings were. **How long the
+fallback takes** needs the blackhole rig below, because a local drop is not a
+blackhole. **What each protocol costs** needs the Drive provider, because that is
+where the transport is injected:
+
+```sh
+DRIVEL_CREDS=rig/c1/credentials.json \
+DRIVEL_TOKEN=rig/c1/token.json \
+DRIVEL_LIVE_ROOT=<FOLDER_ID> \
+  scripts/multiclient/mc44-throughput.sh -m 64 -n 5 -o rig/results/mc44-throughput/$(date +%Y%m%dT%H%M%S)
+```
+
+That drops UDP/443 for its own cgroup to force the fallback, proves the scope in
+both directions before it measures anything, and runs alternating HTTP/2 and
+HTTP/3 pairs. Two things in it are the difference between a measurement and a
+story. **The protocol is attributed, not assumed** — nftables counters on the
+output hook, so an HTTP/2 run must read ~0 on udp443 and an HTTP/3 run ~0 on
+tcp443; the counters are of *egress*, so a run's figure is ~the payload for the
+upload leg and ~nothing for the download leg. And **it alternates and takes a
+median** because download times vary **twofold between consecutive runs of one
+protocol** while upload times repeat to within 0.1%: one sample of each reads as a
+clean 2:1 win for whichever got lucky, which is what the first run of it produced.
+The answer, for reference, is that throughput is indistinguishable (Drive is the
+limiter at ~4 MiB/s up) and HTTP/3 costs ten times the CPU per MiB uploaded.
+
+Three things from the transport run, and then the blackhole rig that followed it.
 
 **Check whether you share a network namespace before writing any rule.** In the
 project's dev container `nft list ruleset` shows the *host's* tables, so an
@@ -341,11 +365,11 @@ like the fix not working. Either shorten `h3Retry` for the run or compute the
 expected instant from the mark; the blackhole run did the latter and landed on it
 to the second.
 
-And for the Drive half: **the rig's tokens expire.** A Google Cloud project left
-in **Testing** publishing status issues refresh tokens that die after seven days,
-so `drivel login` has to be re-run per client before any Group V or VI session.
-The symptom is `oauth2: "invalid_grant"` on the first call, which looks like a
-drivel bug and is not one.
+One trap specific to the throughput rig, and it cost a run: `nft reset counters`
+resets named counter *objects* and leaves an anonymous rule counter alone, so one
+phase's total silently carries into the next and the second protocol reads as
+though it sent everything twice. `nft reset rules` is the one that clears them.
+Anything to do with the rig's expired tokens is in "Before the first run" above.
 
 ### MC-46 — fill a client's backing filesystem
 

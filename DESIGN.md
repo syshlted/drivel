@@ -468,12 +468,45 @@ is therefore "the rest of the current window", up to five minutes, and not a
 function of when the network came back** — which is worth knowing before reading a
 run as the fix not working.
 
-What MC-44 did *not* answer is the comparison it was written for. Throughput and
-CPU per protocol need the Drive provider, which is where the transport is injected,
-and the rig's credentials were expired. On a public endpoint with 384 KB bodies the
-two were indistinguishable — HTTP/3 66–117ms against HTTP/2 58–88ms, 5.8 against
-6.7 ms of CPU per MB — which measures request rate, not bulk transfer, and should
-not be quoted as if it settled anything.
+**The comparison MC-44 was written for then ran** (2026-10-13, five alternating
+HTTP/2 and HTTP/3 pairs of a 64 MiB upload and a 64 MiB download through this
+provider's `Put`/`Get` against the live rig; `scripts/multiclient/mc44-throughput.sh`).
+The protocol is *attributed* rather than assumed, because there is no knob that
+selects one: UDP/443 is dropped for the run's cgroup to force the fallback, and
+nftables counters on the output hook say what actually carried the bytes — every
+HTTP/2 run read 0.0 MiB on udp443 and ~66 MiB on tcp443, every HTTP/3 run exactly
+the reverse. The answer is in two halves and only one of them is interesting.
+
+**Throughput is indistinguishable, because Drive is the limiter.** Upload came out
+at a median 4.16 MiB/s on HTTP/2 against 4.07 on HTTP/3, with per-run ranges of
+4.07–4.28 and 3.72–4.18 — overlapping, and 64 MiB took 15–17s on every single run
+of either protocol. Download medians were 33.46 against 30.83 MiB/s, but the
+per-run spread was 25.50–53.98 and 14.80–43.31: it varies **twofold between
+consecutive runs of one protocol**, so that column measures what Drive was doing
+that minute and not what the transport costs. A single sample of each would have
+read as a clean 2:1 win for whichever one got lucky, which is why the harness
+alternates and reports a median of five.
+
+**CPU is where they differ, and they differ by an order of magnitude.** Upload cost
+2.00 ms/MiB on HTTP/2 against **20.50 on HTTP/3**, download 6.10 against 13.10 —
+and unlike the throughput columns these do not overlap at all across the ten runs
+(1.9–2.0 against 20.2–22.8; 6.1–6.9 against 12.6–15.0). The download figures
+include the MD5 the probe computes while streaming, which is a constant common to
+both, so the *difference* — 18.5 ms/MiB up, 7.0 down — is the protocol's and the
+ratio understates it. In absolute terms it is 1.3s of CPU to upload 64 MiB, about
+8% of one core at the 4 MiB/s Drive allows, against 0.8% for HTTP/2. That is the
+price of doing in userspace what the kernel does for TCP, measured rather than
+assumed, and it is a per-client cost that scales with transfer volume.
+
+**This prices the requirement at the top of this section; it does not overturn
+it.** The rationale there is connection reuse, 0-RTT resumption and the absence of
+head-of-line blocking across concurrent transfers — claims about a frequent poll
+loop and many small requests, which a two-stream bulk transfer does not test in
+either direction. What the run does establish is that there is no bulk-throughput
+*advantage* to point at on this path, so anything defending HTTP/3 has to defend it
+on the poll loop. One honest limit: 4 MiB/s of upload is slow enough to hide a
+protocol difference that a faster path might expose, and this is one container on
+one network.
 
 **Composition with OAuth (§ auth, M2).** The transport sits *below* auth. Passing
 `option.WithHTTPClient` to the Drive service means we must **not** also pass

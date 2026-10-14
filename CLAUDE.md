@@ -841,12 +841,10 @@ processes and a local sshd** (see M8 rule 2), **MC-40 ran on 2026-10-13 over tha
 same rig** and produced three product fixes — a plugin child that outlived its
 host (M9 rule 10), an SFTP temp name two writers shared (SFTP rule 7), and an
 upload byte count taken before the transfer — plus the finding that **a crash is
-not an outage**: M27 repairs an abandoned push and not a lost one. **MC-44's transport half ran the same day**, found
-that a transient UDP block downgraded the transport permanently, and fixed it (see
-"Transport" below). Only its throughput comparison is left, which needs a live
-account because the HTTP/3 transport is injected into the Drive provider alone —
-and the rig's OAuth tokens are expired, a Cloud project left in Testing status
-issuing refresh tokens that die after seven days. Six of the group's findings are products of
+not an outage**: M27 repairs an abandoned push and not a lost one. **MC-44 ran the same day and completed**: its
+transport half found that a transient UDP block downgraded the transport
+permanently and fixed it, and its throughput half then measured the two protocols
+against live Drive (both in "Transport" below). Six of the group's findings are products of
 running it and not of the plan: an **abandoned push and a failed download were
 both repaired only by a sweep**, which `-sweep-interval 0` disables — the push
 half is M27, the **download half is not and still waits for a sweep**; the
@@ -858,10 +856,9 @@ inside the debounce window — which is also the answer to the duplicate upload
 MC-11 recorded and the plan had sent to Tier A to be chased; and the permanent
 HTTP/3 downgrade in "Transport" below.
 
-**The queue is MC-44's throughput half, then Group IV, then Group VI**
-(§5 of the test plan is the authority and carries the Group VI load estimate). Two
-things about that order are worth keeping: Group V is finished but for one
-half-case, which needs a live Drive account rather than a mechanism; and Group VI's constraint
+**Group V is finished; the queue is Group IV, then Group VI**
+(§5 of the test plan is the authority and carries the Group VI load estimate). One
+thing about that order is worth keeping: Group VI's constraint
 is wall clock and storage quota, **not** API rate — MC-11 recorded zero 403s at
 1.09 uploads/s, a single writer cannot burst past ~1 request/s, and storage is
 per Google *account*, so a fresh Cloud project buys per-project request
@@ -1957,6 +1954,28 @@ any effect (the live value is `min(ours, the peer's)`) and it costs keep-alive
 packets on every healthy mount, because the ping interval is
 `min(KeepAlivePeriod, idleTimeout/2)` — so `h3KeepAlive` is a ceiling on the rate,
 15s in practice, not the rate itself.
+
+**What HTTP/3 costs here is CPU and not throughput, and the ratio is ten to one**
+(MC-44's throughput half, 2026-10-13: five alternating pairs of a 64 MiB upload
+and download through `gdrive.Put`/`Get` against the live rig, protocol forced by
+dropping UDP/443 for the run's cgroup and *attributed* by nftables counters rather
+than assumed — `scripts/multiclient/mc44-throughput.sh`). Upload cost **2.00
+ms/MiB on HTTP/2 against 20.50 on HTTP/3**, download 6.10 against 13.10, and these
+do not overlap across the ten runs where the throughput columns overlap entirely:
+upload medians were 4.16 against 4.07 MiB/s with 64 MiB taking 15–17s every single
+time, so **Drive is the limiter and the protocol is invisible in the transfer
+rate**. Three things not to misread. **The download spread is Drive's and not the
+protocol's** — it varies twofold between consecutive runs of *one* protocol
+(25.50–53.98 against 14.80–43.31), which is why the harness alternates and reports
+a median of five; a single sample each reads as a clean 2:1 win for whichever one
+got lucky, and the first run of this did exactly that. **The difference, not the
+ratio, is the protocol's** on the download leg, because the probe's own MD5 is a
+constant in both: 18.5 ms/MiB up and 7.0 down. And **this prices the requirement
+rather than overturning it** — §2.6's rationale is connection reuse, 0-RTT and
+head-of-line blocking across *many small requests*, which a two-stream bulk
+transfer does not test; what the run removes is any bulk-throughput advantage to
+point at, so the argument for HTTP/3 has to be made on the poll loop. 1.3s of CPU
+per 64 MiB upload is ~8% of one core at the 4 MiB/s Drive allows, against 0.8%.
 
 ## Mount modes
 
