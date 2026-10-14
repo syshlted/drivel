@@ -4567,7 +4567,12 @@ this whole group walks through, so it is a precondition rather than a note.
     idle, making the practical bound `eventBuffer + 64`. Running it printed
     "646 of 1280" the first time, which is why the line reports the depth it
     reached instead of asserting the queue is full — the wording it shipped with
-    was the second one written.
+    was the second one written. **MC-36 then fired it against real Drive on
+    2026-10-13**, three clients each writing 1000 files into one shared directory
+    with all 3000 events issued inside a second: **one line per client and
+    nothing after it**, at 252–254 of 1280. Until then the episode check and the
+    hysteresis had only been driven by tests, so this is the first evidence that
+    a real burst produces one report rather than ten thousand.
 
     *Part 2* shipped as the **second** option, not the first, and the reason is a
     measurement: **"set a flag that makes the next sweep unconditional" would

@@ -12,6 +12,7 @@
 #   wide DIR [N]           MC-12  N entries in one directory (default 5000)
 #   names DIR              MC-12  the names Drive and POSIX disagree about
 #   bulk-delete DIR        MC-23  rm -rf a subtree
+#   shared DIR TAG [N]     MC-36  N files into ONE shared dir, named by TAG
 set -euo pipefail
 
 case_name=${1:?usage: workload.sh CASE MOUNTDIR [args]}
@@ -38,6 +39,22 @@ case $case_name in
       printf '%s%s' "$hdr" "${pad:${#hdr}}" > "$d/f$i.txt"
     done
     echo "wrote $n files of 4 KiB under $dir/many"
+    ;;
+
+  shared)
+    # MC-36: three clients writing concurrently into one directory. The names
+    # must be distinct per client — `many` would have all three write the same
+    # paths, which is MC-30 a thousand times over and a different case
+    # entirely. 4 KiB apiece, as `many` uses, so the two are comparable.
+    tag=${1:?usage: workload.sh shared DIR TAG [N]}
+    n=${2:-1000}
+    pad=$(head -c 4096 /dev/zero | tr '\0' x)
+    mkdir -p "$dir/shared36"
+    for i in $(seq 1 "$n"); do
+      hdr=$(printf 'file %d of %d from %s\n' "$i" "$n" "$tag")
+      printf '%s%s' "$hdr" "${pad:${#hdr}}" > "$dir/shared36/$tag-$i.txt"
+    done
+    echo "wrote $n files of 4 KiB as $tag-* under $dir/shared36"
     ;;
 
   large)

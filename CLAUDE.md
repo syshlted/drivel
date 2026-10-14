@@ -1251,7 +1251,12 @@ go-fuse's protocol trace and must never come to mean two things).
    meets**: paths are hashed to workers, so a burst landing mostly on one blocks
    at `eventBuffer + 64` while the others idle — it printed "646 of 1280" the
    first time it ran, which is why the line reports the depth reached rather than
-   claiming the queue is full.
+   claiming the queue is full. **It fired for real under MC-36 on 2026-10-13** —
+   three clients each writing 1000 files into one shared directory, 3000 events
+   issued in a single second — and produced **exactly one line per client and
+   nothing after it**, at 252–254 of 1280. That is this report's first live
+   exercise; before it, the episode check and the hysteresis had only ever been
+   driven by tests.
 
 2. **An abandoned push records its PATH, and a bare flag would have repaired
    nothing.** This is the correction worth keeping: DESIGN.md's original entry
