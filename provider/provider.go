@@ -155,6 +155,15 @@ type ChangeSource interface {
 // returned by the previous call. A next of "" means the sweep is complete.
 // Objects whose parent chain does not reach the mount root are the provider's to
 // drop; the engine only ever sees paths inside the mount.
+//
+// **A non-empty next MUST differ from the cursor it was given.** The engine
+// reads its own cursor handed back as a provider that cannot advance and ends
+// the sweep there rather than listing one page forever — which leaves the
+// listing a prefix of the tree, so no deletion is inferred from it and it does
+// not count as a completed sweep. A provider whose real continuation state is
+// in memory still has to return something that moves; a page counter is enough.
+// This is not a formality: gdrive's scoped descent returned a constant, which
+// truncated every scoped sweep to two calls (MC-12, 2026-10-14).
 type Enumerator interface {
 	Enumerate(ctx context.Context, cursor string) (files []RemoteFile, next string, err error)
 }

@@ -119,6 +119,67 @@ func TestScopedSweepPagesOneLargeFolder(t *testing.T) {
 	}
 }
 
+// The descent's cursor advances, call by call. It is a marker rather than real
+// state — the frontier is in memory and any non-empty cursor means "restart" —
+// but `provider.Enumerator` requires a continuation cursor to differ from the
+// one it was handed, because the engine reads its own cursor coming back as a
+// provider that cannot advance and ends the sweep there.
+//
+// It returned the bare constant until MC-12 ran a 1100-file directory against
+// real Drive on 2026-10-14. Every scoped sweep was truncated to two calls: the
+// root, then one batch of folders, after which the engine stopped and ran its
+// delete pass over 477 of the remote's 1157 objects. Nothing in this package
+// could see it, because `sweep` fed the cursor back without that rule.
+func TestScopedSweepAdvancesItsCursor(t *testing.T) {
+	// More folders than one batch of enumFanout, so the descent needs at least
+	// three calls: the root, then two batches.
+	files := []*drive.File{folder("id-mine", "mine", fakeRootID)}
+	var want []string
+	for i := range enumFanout + 4 {
+		id := fmt.Sprintf("id-d%02d", i)
+		name := fmt.Sprintf("d%02d", i)
+		files = append(files, folder(id, name, "id-mine"),
+			file(id+"-f", "f.txt", id))
+		want = append(want, name, name+"/f.txt")
+	}
+	d, _ := newFakeDrive(t, files...)
+	mountSubfolder(d, "id-mine")
+	d.sweepMode = SweepScoped
+
+	var cursors []string
+	got := map[string]provider.RemoteFile{}
+	cursor := ""
+	for range 20 {
+		batch, next, err := d.Enumerate(ctx, cursor)
+		if err != nil {
+			t.Fatalf("enumerate: %v", err)
+		}
+		for _, f := range batch {
+			got[f.Path] = f
+		}
+		if next == "" {
+			break
+		}
+		if next == cursor {
+			t.Fatalf("call %d returned the cursor it was given (%q): the engine ends a sweep "+
+				"there, so the descent would stop after this page", len(cursors)+1, next)
+		}
+		cursors = append(cursors, next)
+		cursor = next
+	}
+
+	if len(cursors) < 2 {
+		t.Fatalf("the descent finished in %d continuation(s); the fixture is too small to "+
+			"exercise the property", len(cursors))
+	}
+	have := keys(got)
+	sort.Strings(have)
+	sort.Strings(want)
+	if fmt.Sprint(have) != fmt.Sprint(want) {
+		t.Fatalf("descent emitted %v; want %v", have, want)
+	}
+}
+
 // A page token that ages out mid-descent cannot be renewed, so the folder is
 // re-listed from the start. The sweep must still finish and still report every
 // path — the repeat is a cost, not a correctness problem.

@@ -30,6 +30,14 @@ for log in "$@"; do
   printf '  %-34s %s\n' "conflict resolutions"     "$(count '[pull] conflict')"
   printf '  %-34s %s\n' "retries (transient/quota)" "$(count 'failed, retrying')"
   printf '  %-34s %s\n' "sweeps completed"         "$(count '[sweep] reconcile complete')"
+  # Two rows rather than one, because the pair is the assertion: M27 reports a
+  # saturation episode once on entering and once on leaving, so anything other
+  # than a 1/1 or 1/0 pair per burst is the report flapping rather than the
+  # mount saturating repeatedly. Counted here because MC-36 recorded "exactly
+  # one line per client" by eye, and MC-12 then measured 88 of them in nine
+  # minutes against the same build.
+  printf '  %-34s %s\n' "back-pressure episodes"    "$(count 'back-pressure: writes through the mount')"
+  printf '  %-34s %s\n' "back-pressure clears"      "$(count 'back-pressure: cleared')"
 
   # These are not volume. Any non-zero value is a finding.
   #

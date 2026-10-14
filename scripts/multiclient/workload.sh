@@ -13,6 +13,12 @@
 #   names DIR              MC-12  the names Drive and POSIX disagree about
 #   bulk-delete DIR        MC-23  rm -rf a subtree
 #   shared DIR TAG [N]     MC-36  N files into ONE shared dir, named by TAG
+#   touch DIR FILE         MC-21  mtime only, no content change
+#   rewrite DIR FILE       MC-21  the same bytes again — M6 gate 3
+#   append DIR [MiB] [N]   MC-22  N appends, each closing the file, 1s apart
+#   specials DIR           MC-13  what Drive has no representation for
+#   rename-dir DIR SRC DST MC-26b/MC-27  rename a directory
+#   move DIR SRC DST       MC-28  move a file between directories
 set -euo pipefail
 
 case_name=${1:?usage: workload.sh CASE MOUNTDIR [args]}
@@ -115,6 +121,78 @@ case $case_name in
     echo "wrote the hostile-name set into $d"
     ;;
 
+  touch)
+    f=${1:?usage: workload.sh touch DIR FILE}
+    touch "$dir/$f"
+    echo "touched $dir/$f"
+    ;;
+
+  rewrite)
+    # The same bytes again, through the mount. This is the case MC-21 is really
+    # about: a `touch` changes no content and so emits no content event at all
+    # (vfs emits OpSetattr, which the engine drops), whereas a rewrite does reach
+    # the push path and is where M6's unchanged-content gate either fires or does
+    # not. The copy is staged outside the mount because a write into the backing
+    # dir emits nothing.
+    f=${1:?usage: workload.sh rewrite DIR FILE}
+    tmp=$(mktemp)
+    cp "$dir/$f" "$tmp"
+    cp "$tmp" "$dir/$f"
+    rm -f "$tmp"
+    echo "rewrote $dir/$f with its own bytes ($(stat -c %s "$dir/$f") B)"
+    ;;
+
+  append)
+    # MC-22: the amplification an append-style workload pays. Each iteration
+    # CLOSES the file, which is what emits the event — an appender that holds it
+    # open emits nothing until it closes, at any -push-delay.
+    mib=${1:-1}
+    n=${2:-20}
+    gap=${3:-1}
+    mkdir -p "$dir/append"
+    f=$dir/append/log.bin
+    : > "$f"
+    for i in $(seq 1 "$n"); do
+      dd if=/dev/urandom bs=1M count="$mib" status=none >> "$f"
+      [[ $i -lt $n ]] && sleep "$gap"
+    done
+    echo "appended ${mib} MiB × $n to $f ($(stat -c %s "$f") B, $(( mib * n * (n + 1) / 2 )) MiB of cumulative content)"
+    ;;
+
+  specials)
+    # MC-13: the file kinds a path-addressed cloud store has no representation
+    # for, plus the two metadata cases. M15 items 1-3 decided what happens; this
+    # is that decision meeting a real mount and a real Drive.
+    d=$dir/specials
+    mkdir -p "$d"
+    : > "$d/empty.txt"                                   # zero bytes
+    truncate -s 8M "$d/sparse.bin"                       # all hole
+    dd if=/dev/urandom of="$d/sparse.bin" bs=4096 count=1 seek=1024 conv=notrunc status=none
+    echo setuid > "$d/setuid.sh"; chmod 4755 "$d/setuid.sh"
+    echo tz > "$d/non-utc.txt"; touch -d '2001-02-03 04:05:06 +1030' "$d/non-utc.txt"
+    ln -s plain-target "$d/relative.link"  2>&1 || echo "  (relative symlink refused)"
+    ln -s /etc/hostname "$d/absolute.link" 2>&1 || echo "  (absolute symlink refused)"
+    mkfifo "$d/pipe" 2>&1 || echo "  (fifo refused)"
+    echo hard > "$d/hardlink-src.txt"
+    ln "$d/hardlink-src.txt" "$d/hardlink-dst.txt" 2>&1 || echo "  (hard link refused — M15 item 2)"
+    echo "wrote the special-file set into $d"
+    ;;
+
+  rename-dir)
+    src=${1:?usage: workload.sh rename-dir DIR SRC DST}
+    dst=${2:?usage: workload.sh rename-dir DIR SRC DST}
+    mv "$dir/$src" "$dir/$dst"
+    echo "renamed $dir/$src -> $dir/$dst"
+    ;;
+
+  move)
+    src=${1:?usage: workload.sh move DIR SRC DST}
+    dst=${2:?usage: workload.sh move DIR SRC DST}
+    mkdir -p "$(dirname "$dir/$dst")"
+    mv "$dir/$src" "$dir/$dst"
+    echo "moved $dir/$src -> $dir/$dst"
+    ;;
+
   bulk-delete)
     target=${1:-many}
     rm -rf "${dir:?}/$target"
@@ -122,7 +200,7 @@ case $case_name in
     ;;
 
   *)
-    sed -n '2,18p' "$0" >&2
+    sed -n '2,21p' "$0" >&2
     exit 2
     ;;
 esac

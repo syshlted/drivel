@@ -1168,6 +1168,19 @@ says so rather than merely being absent elsewhere. On FreeBSD such a file cannot
 created through the mount at all: the attempt fails with
 .B EINVAL
 and creates nothing.
+.PP
+.B Permissions, modification times and the holes in a sparse file are not synced.
+A downloaded file is created by the atomic write that protects a reader from a
+half\-finished one, so it lands
+.BR rw\-\-\-\-\-\-\- ,
+and it is stamped with the time the upload reached the provider rather than the
+time the file was written \(em an executable bit, a
+.B setuid
+bit and an original date therefore reach no other client. A sparse file keeps its
+size and loses its holes: it transfers and occupies its apparent size everywhere
+else. The client that wrote the file keeps all three unchanged. Carrying POSIX
+mode and ownership needs a record bound to the content it describes and is not
+implemented.
 .SH PROVIDER BACKENDS
 A storage backend runs in its own process, started by
 .B drivel

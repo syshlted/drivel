@@ -13,6 +13,49 @@ from source with `make build`.
 
 ## Unreleased
 
+### A folder-scoped sweep only looked at part of your Drive — 2026-10-14
+
+**This is the one to read.** When Drivel is pointed at a folder rather than at
+the whole of My Drive, it walks that folder itself. That walk was stopping after
+two steps — the folder you mounted plus eight of its subfolders — and then
+reporting that it had finished.
+
+What that cost depends on which client you were. A new client fetched part of the
+tree and stopped: in testing, 472 files of 1114, with nothing scheduled to look
+again. An established client was worse off, because the part of the tree the walk
+never reached looks exactly like a part of the tree somebody deleted, and the
+walk's next job is to apply deletions. The `-max-deletes` limit (100 by default)
+is what stood between that and a large number of local files being removed; set
+it to `0` for "no limit" and nothing did.
+
+Both halves are fixed. The walk now continues to the end — the same test tree
+goes from 477 objects listed to all 1157 — and, separately, a walk that *does*
+end early for any reason now keeps what it found but refuses to infer a single
+deletion from it, does not count itself as a completed sweep, and says
+`reconcile INCOMPLETE` so the next start tries again. A backend that cannot
+advance its own listing can no longer cause a deletion.
+
+This only ever affected a mount scoped to a folder (`-drive-root <folder>`, the
+usual setup) and only the sweep: ordinary sync through the change feed was never
+involved, which is why clients that were already up to date stayed correct.
+
+### The back-pressure report repeated itself all through a long copy — 2026-10-14
+
+When a bulk copy fills Drivel's upload queue it says so, once when the
+filesystem starts waiting and once when it stops — the entry from 12 October
+below has the two lines. They were meant to be two lines. Copying 1100 files
+into one folder produced **88 of them in nine minutes**: Drivel decided the
+condition was over every second or so, said so, and then immediately said it had
+started again — each "cleared" line reporting a queue that was still full.
+
+The reason is worth stating, because the number in the line was wrong in the same
+way. Changes wait in two places — a small queue in front of each upload worker,
+and a larger set of files whose upload has not been scheduled yet — and Drivel
+was only counting the first. So it reported a quarter of its capacity in use when
+in fact everything was waiting, and the test for "the backlog has drained" was
+true the whole time. A copy now produces one line when it begins to wait and one
+when it stops, as described, and both lines count the whole backlog.
+
 ### A network blip no longer costs you HTTP/3 until you restart — 2026-10-13
 
 Drive traffic uses HTTP/3 (QUIC, over UDP port 443) and falls back to HTTP/2 when
@@ -98,7 +141,7 @@ naming how deep it is and the two settings that govern it:
 
 ```
 [sync] back-pressure: writes through the mount are now waiting on uploads
-       (646 of 1280 event(s) queued; -upload-workers 4, -push-delay 300ms)
+       (256 of 1280 event(s) queued, 846 awaiting dispatch; -upload-workers 4, -push-delay 300ms)
 [sync] back-pressure: cleared after 41m12s — 8104 write(s) waited, 12 event(s) still queued
 ```
 

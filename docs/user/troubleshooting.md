@@ -169,7 +169,7 @@ Drivel says so when it happens, once each way:
 
 ```
 [sync] back-pressure: writes through the mount are now waiting on uploads
-       (646 of 1280 event(s) queued; -upload-workers 4, -push-delay 300ms)
+       (256 of 1280 event(s) queued, 846 awaiting dispatch; -upload-workers 4, -push-delay 300ms)
 [sync] back-pressure: cleared after 41m12s — 8104 write(s) waited, 12 event(s) still queued
 ```
 
@@ -177,12 +177,16 @@ Those two lines are the whole report, however long the copy runs: they mark the
 start and the end, not the backlog from moment to moment. Seeing the first
 without the second means it is still going on.
 
-The count can be well short of the total — 646 of 1280 above — and that is not a
-contradiction. Each file is handled by one of the upload workers, chosen from its
-path, so a burst that lands mostly on one worker fills that worker's share and
-stops there while the others still have room. Raising `-upload-workers` raises
-the total, but not the share any one worker gets, and it does not make the copy
-finish sooner — the limit is the uplink.
+The first count can be well short of the total — 256 of 1280 above — and that is
+not a contradiction. Each file is handled by one of the upload workers, chosen
+from its path, so a burst that lands mostly on one worker fills that worker's
+share and stops there while the others still have room. Raising
+`-upload-workers` raises the total, but not the share any one worker gets, and it
+does not make the copy finish sooner — the limit is the uplink.
+
+The second count is the rest of the backlog: changes Drivel has accepted from the
+filesystem and not yet handed to a worker. For a bulk copy that is where almost
+all of it sits, so it is the number that tells you how much is left.
 
 **A file came back after I deleted it.** Most likely [same-name
 siblings](data-safety.md#same-name-siblings): the path names more than one Drive

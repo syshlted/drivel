@@ -9,6 +9,7 @@ import (
 	"context"
 	"fmt"
 	"path"
+	"strconv"
 	"sync"
 
 	"google.golang.org/api/drive/v3"
@@ -61,11 +62,23 @@ const enumFanout = 8
 // and a cost the user cannot see is one they report as a hang.
 const enumScopedWarn = 2000
 
-// scopedCursor is what Enumerate returns while a descent is in progress. The
-// real state is the frontier, which lives in memory: unlike the flat sweep's
+// scopedCursor prefixes what Enumerate returns while a descent is in progress.
+// The real state is the frontier, which lives in memory: unlike the flat sweep's
 // Drive page token there is nothing here worth persisting, because restarting a
-// scoped sweep costs one walk of the folder that was mounted.
+// scoped sweep costs one walk of the folder that was mounted. Any non-empty
+// cursor therefore means "restart", and only its emptiness is ever read back.
+//
+// **The number after it is load-bearing even so**, because `provider.Enumerator`
+// requires a continuation cursor to differ from the one it was handed: the
+// engine's loop-breaker reads its own cursor coming back as a provider that
+// cannot advance and ends the sweep. This was the bare constant until MC-12 ran
+// a 1100-file directory on 2026-10-14, which truncated the descent to two calls
+// — the root plus one batch of folders — and reported a sweep that had seen 477
+// of 1157 objects as complete.
 const scopedCursor = "scoped"
+
+// scopedToken is the continuation cursor for a descent that has made n calls.
+func scopedToken(n int) string { return scopedCursor + ":" + strconv.Itoa(n) }
 
 // folderTask is one unit of a descent: list this folder's children, resuming
 // from pageToken when the folder holds more than one page of them.
@@ -172,7 +185,12 @@ func (d *Drive) enumerateScoped(ctx context.Context, cursor string) ([]provider.
 	}
 	d.logf("[drive] scoped enumeration: %d folder listing(s), %d object(s), %d folder(s) queued",
 		sw.requests, sw.objects, len(sw.frontier))
-	return page.files, scopedCursor, nil
+	// Counted per call rather than per listing: a batch whose listings all failed
+	// returns above, but one that partly failed issues no new request for the
+	// folders it put back, and a token that repeated there would be read as a
+	// stall under exactly the throttling the retry exists to survive.
+	sw.pages++
+	return page.files, scopedToken(sw.pages), nil
 }
 
 // beginScopedSweepLocked returns the descent this call belongs to, seeding a new

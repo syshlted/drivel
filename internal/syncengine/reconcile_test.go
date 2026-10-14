@@ -126,7 +126,23 @@ type sweepFixture struct {
 	store *enumStore
 	push  *recPusher
 	dl    *Downloader
+	src   *recSource
+	opts  ReconcileOptions
+	logs  *capture
 	trace []string
+}
+
+// useEnumerator rebuilds the downloader over a different enumerator, keeping the
+// same backing dir, state store and feed. For the cases where what is under test
+// is the enumerator's behaviour rather than the listing's content.
+func (f *sweepFixture) useEnumerator(store interface {
+	provider.Store
+	provider.Enumerator
+},
+) {
+	f.logs = &capture{}
+	f.dl = NewDownloader(f.src, store, f.dir, f.st, DefaultCadence).
+		Logger(log.New(f.logs, "", 0)).Reconcile(f.opts)
 }
 
 func newSweepFixture(t *testing.T, opts ReconcileOptions, pages ...[]provider.RemoteFile) *sweepFixture {
@@ -136,8 +152,9 @@ func newSweepFixture(t *testing.T, opts ReconcileOptions, pages ...[]provider.Re
 	if opts.Push == nil {
 		opts.Push = f.push
 	}
-	src := &recSource{trace: &f.trace, start: "token-before-sweep"}
-	f.dl = NewDownloader(src, f.store, f.dir, f.st, DefaultCadence).Reconcile(opts)
+	f.src = &recSource{trace: &f.trace, start: "token-before-sweep"}
+	f.opts = opts
+	f.dl = NewDownloader(f.src, f.store, f.dir, f.st, DefaultCadence).Reconcile(opts)
 	return f
 }
 
@@ -212,6 +229,75 @@ func TestSweepResumesFromPersistedCursor(t *testing.T) {
 	}
 	if !f.exists("b.txt") {
 		t.Fatal("page 1 was not applied")
+	}
+}
+
+// stuckEnum advances its pages internally — the frontier a scoped descent keeps
+// in memory — while handing back a cursor that never changes. That is exactly
+// what gdrive's scoped enumeration did, and the combination is invisible to the
+// provider's own tests because they feed the cursor back without the engine's
+// loop-breaker in the way.
+type stuckEnum struct {
+	*enumStore
+	calls int
+}
+
+func (s *stuckEnum) Enumerate(_ context.Context, cursor string) ([]provider.RemoteFile, string, error) {
+	s.cursors = append(s.cursors, cursor)
+	i := s.calls
+	s.calls++
+	if i >= len(s.pages) {
+		return nil, "", nil
+	}
+	return s.pages[i], "stuck", nil
+}
+
+// A sweep that ended because the provider could not advance its cursor has seen
+// a PREFIX of the remote tree, and must not run anything that reasons from
+// completeness.
+//
+// MC-12 found this live on 2026-10-14: gdrive's scoped descent returned a
+// constant cursor, so the loop-breaker ended every scoped sweep after two calls
+// — and the code then fell through to the delete pass, the local walk and the
+// completion stamp over a listing holding 477 of the remote's 1157 objects. The
+// provider half is fixed too (its cursor advances now); this is the half that
+// has to hold for any provider, including an out-of-tree one.
+func TestAStalledSweepInfersNoDeletesAndDoesNotCount(t *testing.T) {
+	f := newSweepFixture(t, ReconcileOptions{Fetch: true},
+		[]provider.RemoteFile{remote("page0.txt", "zero")},
+		[]provider.RemoteFile{remote("page1.txt", "one")},
+	)
+	f.store.content["page0.txt"] = []byte("zero")
+	f.store.content["page1.txt"] = []byte("one")
+	f.useEnumerator(&stuckEnum{enumStore: f.store})
+
+	// Synced before, in a part of the tree the truncated listing never reaches:
+	// the delete pass's "not seen anywhere in this sweep" row, and the one row
+	// with no fallback above it.
+	writeFile(t, f.dir, "unlisted.txt", "precious")
+	seedBaseline(t, f.st, "unlisted.txt", "precious")
+
+	f.run(t)
+
+	if !f.exists("unlisted.txt") {
+		t.Fatal("a path the stalled listing never reached was deleted locally")
+	}
+	if got, ok := readBacking(t, f.dir, "page0.txt"); !ok || got != "zero" {
+		t.Fatalf("the page that did arrive was not applied: %q ok=%v", got, ok)
+	}
+	if n := len(f.push.ops()); n != 0 {
+		t.Fatalf("pushes = %v; a prefix of the tree cannot tell local-only from unlisted", f.push.ops())
+	}
+	if _, ok, err := f.st.SweepDone(); err != nil || ok {
+		t.Fatalf("SweepDone ok=%v err=%v; a truncated sweep must not stamp a completion, or "+
+			"the schedule counts from a sweep that saw most of the remote", ok, err)
+	}
+	if _, ok, err := f.st.Sweep(); err != nil || !ok {
+		t.Fatalf("Sweep ok=%v err=%v; the in-progress record is what makes the next mount try again", ok, err)
+	}
+	if n := f.logs.count("INCOMPLETE"); n != 1 {
+		t.Fatalf("the sweep reported itself incomplete %d time(s); want 1:\n%s",
+			n, strings.Join(f.logs.lines(), "\n"))
 	}
 }
 

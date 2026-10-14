@@ -35,6 +35,17 @@ func sweep(t *testing.T, d *Drive) (map[string]provider.RemoteFile, int) {
 		if next == "" {
 			return out, pages
 		}
+		// The engine's loop-breaker, which this helper did not model until MC-12
+		// (2026-10-14): runSweep reads its own cursor handed back as a provider
+		// that cannot advance, and ends the sweep there — keeping the pages it
+		// has, inferring no deletions, and not counting the sweep. Every test
+		// here passed against a constant cursor while a real scoped sweep was
+		// being truncated to two calls, so the contract belongs in the helper
+		// that stands in for the engine.
+		if next == cursor {
+			t.Fatalf("Enumerate returned the cursor it was given (%q) after page %d: a "+
+				"continuation cursor must advance (provider.Enumerator)", next, pages)
+		}
 		cursor = next
 		if pages > 20 {
 			t.Fatal("enumeration did not terminate")

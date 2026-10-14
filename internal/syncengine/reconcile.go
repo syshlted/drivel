@@ -389,6 +389,7 @@ func (d *Downloader) recoverCursor(ctx context.Context) (string, error) {
 func (d *Downloader) runSweep(ctx context.Context, sw state.Sweep) (string, error) {
 	started := time.Now()
 	var st sweepStats
+	stalled := false
 	for {
 		files, next, err := d.enum.Enumerate(ctx, sw.Cursor)
 		if err != nil {
@@ -399,10 +400,22 @@ func (d *Downloader) runSweep(ctx context.Context, sw state.Sweep) (string, erro
 		}
 		if next != "" && next == sw.Cursor {
 			// A provider that hands back the cursor it was given would loop us over
-			// one page forever. Treat it as the end of the sweep: the pages already
-			// applied stand, and the delete passes below are the only thing that
-			// needs completeness — so say so rather than pretending it completed.
-			d.logf("[sweep] enumeration stalled on cursor %q; ending the sweep here", next)
+			// one page forever. End the sweep here: the pages already applied
+			// stand, because materialising what was listed is always safe.
+			//
+			// What does NOT stand is anything that reasons from the listing being
+			// complete, and this branch used to fall straight through to all of
+			// it. MC-12 found that on 2026-10-14: gdrive's scoped descent returned
+			// a constant cursor, so every scoped sweep ended after two calls —
+			// and then ran the delete pass, pushed the local walk and stamped a
+			// completed sweep over a listing holding 477 of the remote's 1157
+			// objects. On a client with a baseline that is a mass-delete proposal
+			// capped only by -max-deletes, which is the one operation with no
+			// fallback above it.
+			d.logf("[sweep] enumeration stalled on cursor %q: this provider cannot advance its "+
+				"cursor, so the listing is a PREFIX of the remote tree — keeping what it "+
+				"listed, inferring no deletions, and not counting this as a sweep", next)
+			stalled = true
 			next = ""
 		}
 		sw.Cursor = next
@@ -428,7 +441,20 @@ func (d *Downloader) runSweep(ctx context.Context, sw state.Sweep) (string, erro
 	// that it had not: it pushes a file with no baseline, and an abandoned push is
 	// usually a rewrite of a file that has one. A repair that succeeds here writes
 	// a fresh echo, so the walk then skips the path for the ordinary reason.
+	// Owed repairs are independent of the listing: they re-send paths this engine
+	// itself abandoned, which is true whatever the sweep saw.
 	d.pushOwedRepairs(ctx, &st)
+	if stalled {
+		// Neither remaining pass may run on a prefix. The delete pass would read
+		// every unlisted path as deleted remotely; the local walk would read every
+		// unlisted path as new locally and push over a remote it never saw, which
+		// is a whole-file Put with no conflict copy behind it. Leaving the sweep
+		// record in place and the completion stamp unwritten is the recovery: the
+		// next mount reads no stamp, treats a sweep as overdue and starts a fresh
+		// one. -resync forces it sooner.
+		d.logf("[sweep] reconcile INCOMPLETE in %s: %s", time.Since(started).Round(time.Millisecond), st)
+		return sw.Token, nil
+	}
 	d.pushLocalOnly(ctx, sw, &st)
 	if err := d.applyDeletes(ctx, sw, &st); err != nil {
 		d.logf("[sweep] delete pass: %v", err)

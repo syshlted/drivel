@@ -1984,6 +1984,47 @@ are both lossy and racy.
    beside MC-52, whose "enumeration scales with the account" finding is this one
    seen from the other side.
 
+   **The first live run found that none of the above was reachable: the descent
+   stopped after two calls** (MC-12, 2026-10-14, and it had been doing so since
+   this shipped on 2026-09-07). `enumerateScoped` returned the constant
+   `scopedCursor` for as long as the frontier was non-empty — correct on its own
+   terms, since the frontier is in memory and nothing about it is worth
+   persisting. `runSweep` ends a sweep whose provider hands back *the cursor it
+   was given*, as a loop-breaker against a provider that cannot advance. Call 1
+   takes `""` and returns `"scoped"`; call 2 takes `"scoped"` and returns
+   `"scoped"`; the sweep ends. So every scoped sweep saw the mount root plus one
+   batch of `enumFanout` folders: **477 of 1157 objects** on the rig, and a cold
+   client that stopped at 472 files of 1114 with the sweep recorded as complete.
+
+   **Three places were wrong, and fixing one would not have been enough.**
+
+   - `provider.Enumerator` did not *say* that a continuation cursor must differ
+     from the one it was handed. It does now, with the consequence named, because
+     the requirement is the engine's and an out-of-tree backend cannot infer it.
+   - The descent returns `scoped:N`, counted per call rather than per listing — a
+     partly-throttled batch issues no new request for the folders it re-queued,
+     and a token that repeated there would read as a stall under exactly the
+     throttling the re-queue exists to survive. Resume is unchanged: any
+     non-empty cursor still means "restart".
+   - **The loop-breaker fell through to the passes that need completeness.** It
+     set `next = ""` and then ran `pushLocalOnly`, `applyDeletes`, `SetCursor`
+     and `FinishSweep` over a listing that was a *prefix* of the tree — so every
+     unlisted path was a delete candidate, bounded only by `-max-deletes`, and
+     unbounded at `max-deletes = 0`. A stalled sweep now keeps its applied pages
+     and runs neither remaining pass, writes no completion stamp, leaves the
+     in-progress record in place so the next mount starts fresh, and logs
+     `reconcile INCOMPLETE`. The regression test fails against the old code on
+     the delete, not on the log line.
+
+   **Why nothing caught it.** `gdrive`'s own tests drive `Enumerate` in a loop
+   that feeds the cursor straight back, without the engine's loop-breaker in the
+   way — so the helper now asserts the contract, and two older scoped tests fail
+   against a constant cursor as a result. And the only live cold sweep on record
+   is MC-01's, which ran **2026-09-05**, two days before scoped mode existed: it
+   was a flat sweep, and the flat path returns Drive's own page tokens, which
+   advance. The feed path was never involved, which is why a fleet that was
+   already converged stayed correct throughout.
+
 
 10. **M8 — Multi-account & multi-provider mounts.** ✅ Shipped. §2.8 has the design;
    what is worth recording here is what building it changed about the plan.
@@ -4556,8 +4597,7 @@ this whole group walks through, so it is a precondition rather than a note.
     steady saturation every dispatch finds room the instant a worker frees a
     slot and then refills it, so "did this send block?" flips thousands of times
     a minute, and a mutation removing the episode check produced **101 reports
-    where 1 was wanted** against the test that pins it. The episode ends when the
-    backlog falls to a quarter of the bound (`satLowWater`). And **the thing that
+    where 1 was wanted** against the test that pins it. And **the thing that
     ends an episode is the event that never arrives** — the copy finishes, the
     queues drain, and no further dispatch happens to notice — so there is a
     sampler (`satSample`, 1s) armed only while saturated. It samples; it never
@@ -4567,12 +4607,48 @@ this whole group walks through, so it is a precondition rather than a note.
     idle, making the practical bound `eventBuffer + 64`. Running it printed
     "646 of 1280" the first time, which is why the line reports the depth it
     reached instead of asserting the queue is full — the wording it shipped with
-    was the second one written. **MC-36 then fired it against real Drive on
-    2026-10-13**, three clients each writing 1000 files into one shared directory
-    with all 3000 events issued inside a second: **one line per client and
-    nothing after it**, at 252–254 of 1280. Until then the episode check and the
-    hysteresis had only been driven by tests, so this is the first evidence that
-    a real burst produces one report rather than ten thousand.
+    was the second one written.
+
+    **What the episode check is keyed on is MC-12's correction (2026-10-14), and
+    the sentence above about the bound is why the shipped version could not
+    work.** It shipped ending an episode when the depth fell to a quarter of the
+    bound (`satLowWater`, now gone). A bulk copy never reaches that state: 1100
+    files into one directory plateau at ~254 queued, *below* the 320 a quarter
+    of 1280 asks for, and the rest of the backlog — 846 events — sits in the
+    coalescer's debounce map, which the depth closure did not look at. So the
+    clear condition was true for the entire 35-minute drain, every freed slot
+    opened an episode and the next tick closed it: **113 episodes and 112 clears
+    over 413 uploads**, each "cleared" line reporting 253 events still queued.
+    That is the ten-thousand-line log this part exists to avoid, arriving by a
+    route the design had already half-described and not followed through.
+
+    The rule is now two conditions, and the first is what makes it unflappable:
+    an episode ends when **the coalescer has nothing left to hand to a worker**
+    (its event channel is empty and no path is inside its debounce window) *and*
+    **no dispatch waited since the previous tick**. The first is stable by
+    construction — with nothing left to dispatch, no further dispatch can block
+    until new events arrive, so the condition cannot oscillate; the second is
+    what keeps a provider slower than the writer inside one episode while the
+    backlog drains. `depth` now reports both halves of the outbound path, so the
+    entering line carries the backlog as well as the queue — "256 of 1280
+    event(s) queued, 846 awaiting dispatch" — and the second number is the one a
+    bulk copy makes large. One shape still reports more than once, honestly: a
+    slow trickle of writes against a saturated worker pool is a sequence of
+    genuine episodes, because each write really does wait and the pool really
+    does empty between them.
+
+    **MC-36's "one line per client and nothing after it" (2026-10-13) does not
+    survive this**, and it is worth saying why rather than quietly dropping it.
+    That run's shape is the one the regression test now reproduces, and it
+    counts 15 clears against the shipped rule; its logs are gone with the rig
+    reset, so the likeliest reading is that the number was taken by eye from
+    part of a log. `scripts/multiclient/logcount.sh` counts both lines now, for
+    exactly that reason — the assertion is the *pair*, and nothing in the
+    harness was counting it. Until MC-12 the episode check had only ever been
+    driven by tests, and the one test that drove it chose an unbuffered event
+    channel, which is the single geometry in which a fraction-of-the-bound rule
+    behaves: it made the bound the lone worker queue, so the backlog was visible
+    in the depth. The test is buffered as production is now.
 
     *Part 2* shipped as the **second** option, not the first, and the reason is a
     measurement: **"set a flag that makes the next sweep unconditional" would

@@ -1115,6 +1115,23 @@ elapsed, and on `-resync`.
    file with no baseline and puts it back. TTL and LRU eviction fail the same way and
    silently. `-sweep-interval` exists because the other four triggers all fire at
    startup, so nothing ever pruned a long-lived mount.
+6. **A continuation cursor must advance, and a sweep that ends early must infer
+   nothing.** `runSweep` reads its own cursor handed back as a provider that
+   cannot advance and ends the sweep — so `provider.Enumerator` now *states* that
+   a non-empty `next` differs from the cursor it was given, and `gdrive`'s scoped
+   descent returns `scoped:N` rather than the bare constant it returned from M7c
+   until MC-12 ran it live (2026-10-14). It had been truncating every scoped
+   sweep to two calls — the mount root plus one `enumFanout` batch, 477 of 1157
+   objects on the rig — because the two halves had never run together: the
+   provider's own tests feed the cursor back without the loop-breaker, and the
+   only live cold sweep on record predates scoped mode by two days. The *other*
+   half is the one that cost data: that branch fell through to `pushLocalOnly`,
+   `applyDeletes` and `FinishSweep` over a listing that was a **prefix** of the
+   tree, making every unlisted path a delete candidate under `-max-deletes` alone.
+   A stalled sweep now keeps its pages, runs neither completeness-dependent pass,
+   writes no completion stamp, leaves the in-progress record for the next mount,
+   and logs `reconcile INCOMPLETE`. Anything added to this loop later inherits
+   that rule: **a partial listing may materialise and may not conclude.**
 
 Below the seam: a flat listing has no parent-before-child guarantee, so an object
 whose parent is unseen is parked on that parent's ID and released when it arrives;
@@ -1269,20 +1286,39 @@ go-fuse's protocol trace and must never come to mean two things).
    every dispatch finds room the instant a worker frees a slot and then refills
    it**, so a report keyed on "did this send block?" is the ten-thousand-line log
    this replaces — a mutation removing the episode check produced **101 reports
-   where 1 was wanted**. The episode ends at a quarter of the bound
-   (`satLowWater`). **The event that ends an episode is the one that never
+   where 1 was wanted**. **The event that ends an episode is the one that never
    arrives** — the copy finishes, the queues drain, nothing dispatches again — so
    a sampler (`satSample`, 1s) is armed *only while saturated*. It samples; it
    never reports on a tick. And **1280 is the best case, not the bound a workload
    meets**: paths are hashed to workers, so a burst landing mostly on one blocks
    at `eventBuffer + 64` while the others idle — it printed "646 of 1280" the
    first time it ran, which is why the line reports the depth reached rather than
-   claiming the queue is full. **It fired for real under MC-36 on 2026-10-13** —
-   three clients each writing 1000 files into one shared directory, 3000 events
-   issued in a single second — and produced **exactly one line per client and
-   nothing after it**, at 252–254 of 1280. That is this report's first live
-   exercise; before it, the episode check and the hysteresis had only ever been
-   driven by tests.
+   claiming the queue is full.
+
+   **The episode ends when the coalescer has nothing left to dispatch and no
+   dispatch has waited since the last tick — not at a fraction of the bound, and
+   that is MC-12's correction (2026-10-14).** The shipped rule ended an episode
+   below a quarter of the bound, which a bulk copy is *always* under: a burst
+   plateaus at ~254 queued against the 320 that rule wants, because the backlog
+   is not in the queues at all — it sits in the coalescer's debounce map, which
+   `depth` did not look at. So the clear condition held for a whole 35-minute
+   drain and the report flapped: **113 episodes and 112 clears over 413
+   uploads**, every "cleared" line naming 253 events still queued. The new first
+   condition cannot oscillate (nothing to dispatch ⇒ nothing can block until new
+   events arrive) and the second keeps a slow provider inside one episode; the
+   entering line now reports both halves ("256 of 1280 event(s) queued, 846
+   awaiting dispatch"), and the second number is the one worth reading. **A slow
+   trickle against a saturated pool still reports repeatedly, and truthfully** —
+   those are separate episodes.
+
+   Two things not to repeat. **MC-36's "exactly one line per client" does not
+   survive this** — the same shape flaps under the shipped rule (15 clears in
+   the regression test), its logs are gone, and nothing in the harness was
+   counting the lines, which `logcount.sh` now does. And **the one test that
+   drove the episode check used an unbuffered event channel**, the single
+   geometry where a fraction-of-the-bound rule behaves, because it made the lone
+   worker queue the bound; it is buffered as production is now. A log assertion
+   is only as good as the geometry it runs in.
 
 2. **An abandoned push records its PATH, and a bare flag would have repaired
    nothing.** This is the correction worth keeping: DESIGN.md's original entry

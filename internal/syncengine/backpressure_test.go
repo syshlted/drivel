@@ -92,9 +92,12 @@ func TestBackPressureIsReportedOnceEachWay(t *testing.T) {
 	})
 	e.satSample = 5 * time.Millisecond
 
-	// Unbuffered, so the bound is the single worker queue and the low-water mark
-	// is only reached once that queue has genuinely drained.
-	ch := make(chan fsevent.Event)
+	// Buffered as internal/app's is (eventBuffer), because the geometry decides
+	// what the report can see. This test ran against an unbuffered channel until
+	// 2026-10-14, which made the bound the single worker queue and the backlog
+	// visible in it — the one arrangement in which a fraction-of-the-bound clear
+	// condition behaves. MC-12 then met the real one; see satSample's comment.
+	ch := make(chan fsevent.Event, 1024)
 	done := make(chan struct{})
 	go func() { defer close(done); e.Run(context.Background(), ch) }()
 
@@ -256,8 +259,89 @@ func TestBackPressureIsClosedAtShutdown(t *testing.T) {
 func TestBackPressureCountsTheWholeOutboundPath(t *testing.T) {
 	e := New(Config{Workers: 4})
 	events := make(chan fsevent.Event, 1024)
-	bp := &backpressure{e: e, bound: cap(events) + e.workers*workerQueue, depth: func() int { return 0 }}
+	bp := &backpressure{
+		e: e, bound: cap(events) + e.workers*workerQueue,
+		depth: func() (int, int) { return 0, 0 },
+	}
 	if want := 1024 + 4*64; bp.bound != want {
 		t.Fatalf("bound = %d; want %d (eventBuffer + workers*workerQueue)", bp.bound, want)
+	}
+}
+
+// The backlog of a bulk copy sits in the coalescer's debounce map, not in the
+// queues — so an episode must not end while the coalescer still has events to
+// hand over, however shallow the queues look.
+//
+// This is MC-12's live finding (2026-10-14) as a test. 1100 files written into
+// one directory plateaued at 254 queued of a 1280 bound with 846 events still
+// in the debounce map; the shipped rule declared an episode over below a quarter
+// of the bound, which 254 already is, so it cleared on the first tick and
+// reopened on the next blocked dispatch — 53 lines in three minutes, each
+// "cleared" line reporting 253 events still queued. It fails with 26 clears
+// against that rule and 1 against this one.
+func TestBackPressureSurvivesABacklogTheQueuesCannotHold(t *testing.T) {
+	const events = 400
+	dir := t.TempDir()
+	store := newBlockingStore()
+	logs := &capture{}
+	e := New(Config{
+		Store: store, DataDir: dir, Workers: 1,
+		// Long enough that every event is absorbed into the debounce map before
+		// the first one is dispatched, which is what empties the channel and
+		// leaves the backlog somewhere no channel length can see.
+		Debounce: 150 * time.Millisecond,
+		Logger:   log.New(logs, "", 0),
+	})
+	e.satSample = 5 * time.Millisecond
+
+	for i := 0; i < events; i++ {
+		writeFile(t, dir, dirName(i), "x")
+	}
+	ch := make(chan fsevent.Event, 1024)
+	done := make(chan struct{})
+	go func() { defer close(done); e.Run(context.Background(), ch) }()
+	for i := 0; i < events; i++ {
+		ch <- fsevent.Event{Op: fsevent.OpWrite, Path: dirName(i)}
+	}
+	waitFor(t, func() bool {
+		return logs.count("back-pressure: writes through the mount are now waiting") == 1
+	}, "timed out waiting for the saturation report")
+
+	// The provider now runs slower than the backlog drains, which is the whole
+	// of a bulk copy against a real provider: one upload at a time, the queue
+	// refilling the instant it empties.
+	for i := 0; i < 100; i++ {
+		store.release(1)
+		time.Sleep(time.Millisecond)
+	}
+	if n := logs.count("back-pressure: cleared"); n != 0 {
+		t.Fatalf("the episode was cleared %d time(s) while the coalescer still held a backlog:\n%s",
+			n, strings.Join(logs.lines(), "\n"))
+	}
+	if n := logs.count("back-pressure: writes through the mount are now waiting"); n != 1 {
+		t.Fatalf("saturation was reported %d time(s) during one episode; want 1", n)
+	}
+
+	store.open()
+	waitFor(t, func() bool { return logs.count("back-pressure: cleared") == 1 }, "timed out waiting for the recovery report")
+	close(ch)
+	<-done
+
+	if n := logs.count("back-pressure: writes through the mount are now waiting"); n != 1 {
+		t.Errorf("entered saturation %d time(s); want exactly 1", n)
+	}
+	if n := logs.count("back-pressure: cleared"); n != 1 {
+		t.Errorf("left saturation %d time(s); want exactly 1", n)
+	}
+	// The entering line has to say how big the backlog is, not only how full the
+	// queue it could see was.
+	var entered string
+	for _, l := range logs.lines() {
+		if strings.Contains(l, "back-pressure: writes through the mount") {
+			entered = l
+		}
+	}
+	if !strings.Contains(entered, "awaiting dispatch") {
+		t.Errorf("the saturation line does not report the undispatched backlog: %s", entered)
 	}
 }

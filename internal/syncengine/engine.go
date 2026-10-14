@@ -116,16 +116,23 @@ const workerQueue = 64
 // saturated, so an idle mount arms no timer.
 const defaultSatSample = time.Second
 
-// satLowWater is the fraction of the outbound bound at which saturation is
-// declared over, as a divisor: the backlog must fall to a quarter of capacity.
+// An episode ends when the coalescer has nothing left to hand to a worker and
+// no dispatch waited over the last sampling interval. Hysteresis is not a
+// refinement here, it is the feature: in steady saturation every dispatch finds
+// room the instant a worker frees a slot and then refills it, so "did this send
+// block?" flips thousands of times a minute and a report keyed on it would be
+// the ten-thousand-line log this exists to avoid.
 //
-// Hysteresis is not a refinement here, it is the feature. In steady saturation
-// every dispatch finds room the instant a worker frees a slot and then refills
-// it, so "did this send block?" flips thousands of times a minute and a report
-// keyed on it would be the ten-thousand-line log this exists to avoid. A quarter
-// is low enough that the refill dynamics never reach it and high enough that a
-// mount with a trickle of ongoing writes still gets told the episode ended.
-const satLowWater = 4
+// It is NOT a fraction of the bound, which is what shipped and what MC-12 found
+// wrong on 2026-10-14: a quarter of 1280 is 320, a burst concentrated on one
+// worker plateaus at ~256 queued, and the coalescer holds the rest of the
+// backlog in a map the depth could not see — so the clear condition was true
+// for the entire 35-minute drain. Every freed slot opened an episode and the
+// next tick closed it: 53 lines in three minutes, each "cleared" line reporting
+// 253 events still queued. Both halves of the rule matter. "Nothing left to
+// dispatch" is the stable half — no further dispatch can block until new events
+// arrive, so it cannot flap — and "no wait since the last tick" is what keeps a
+// provider slower than the writer inside one episode while the backlog drains.
 
 // retryPolicy bounds the per-op backoff loop.
 type retryPolicy struct {
@@ -270,18 +277,45 @@ func (e *Engine) Run(ctx context.Context, events <-chan fsevent.Event) {
 		}(in[i])
 	}
 
+	// Debounce state: coalesce content writes per path behind a trailing timer.
+	// Structural ops flush the affected path(s) first so per-path order is kept.
+	c := coalescer{pending: map[string]*ranges.Set{}}
+	timers := map[string]*time.Timer{}
+	flushCh := make(chan string, 64)
+	// since[p] is when p's oldest un-dispatched content change arrived. The
+	// trailing timer is re-armed by every later change, so this is the only thing
+	// that bounds how long one path can be held: see maxWaitFactor.
+	since := map[string]time.Time{}
+	stopTimer := func(p string) {
+		if t, ok := timers[p]; ok {
+			t.Stop()
+			delete(timers, p)
+		}
+	}
+	// settle forgets everything that was holding p pending. It must run whenever p
+	// is dispatched — including when the coalescer turns out to have nothing for
+	// it — because a stale `since` entry would put the next change to that path
+	// past its deadline the moment it arrived.
+	settle := func(p string) {
+		stopTimer(p)
+		delete(since, p)
+	}
+
 	// Back-pressure reporting (M27). bp is touched only by this goroutine — from
 	// dispatch, which this goroutine calls, and from the sampler case below — so
 	// it needs no lock.
 	bp := &backpressure{
 		e:     e,
 		bound: cap(events) + e.workers*workerQueue,
-		depth: func() int {
-			n := len(events)
+		depth: func() (queued, undispatched int) {
 			for _, ch := range in {
-				n += len(ch)
+				queued += len(ch)
 			}
-			return n
+			// What the coalescer has yet to hand over. A burst does not sit in
+			// the worker queues — it sits HERE, in the debounce map, which no
+			// channel length can see: 1100 files reported 254 of 1280 queued
+			// while 846 of them were still waiting for a worker (MC-12, live).
+			return queued, len(events) + len(c.pending)
 		},
 	}
 	// The sampler ticks only while an episode is open; a nil channel blocks
@@ -314,30 +348,6 @@ func (e *Engine) Run(ctx context.Context, events <-chan fsevent.Event) {
 			satC = satTick.C
 		}
 		ch <- ev
-	}
-
-	// Debounce state: coalesce content writes per path behind a trailing timer.
-	// Structural ops flush the affected path(s) first so per-path order is kept.
-	c := coalescer{pending: map[string]*ranges.Set{}}
-	timers := map[string]*time.Timer{}
-	flushCh := make(chan string, 64)
-	// since[p] is when p's oldest un-dispatched content change arrived. The
-	// trailing timer is re-armed by every later change, so this is the only thing
-	// that bounds how long one path can be held: see maxWaitFactor.
-	since := map[string]time.Time{}
-	stopTimer := func(p string) {
-		if t, ok := timers[p]; ok {
-			t.Stop()
-			delete(timers, p)
-		}
-	}
-	// settle forgets everything that was holding p pending. It must run whenever p
-	// is dispatched — including when the coalescer turns out to have nothing for
-	// it — because a stale `since` entry would put the next change to that path
-	// past its deadline the moment it arrived.
-	settle := func(p string) {
-		stopTimer(p)
-		delete(since, p)
 	}
 
 loop:
@@ -434,13 +444,17 @@ loop:
 // stopped here".
 type backpressure struct {
 	e     *Engine
-	bound int        // what depth() can reach before everything upstream blocks
-	depth func() int // events queued in front of the uploader, right now
+	bound int // what the queued half of depth() can reach before everything upstream blocks
+	// depth reports the outbound path's two halves: how many events are queued
+	// in front of the uploader, and how many the coalescer has not handed over
+	// yet (its event channel plus its debounce map).
+	depth func() (queued, undispatched int)
 
 	on    bool
 	since time.Time
-	at    int // depth when the episode opened
+	at    int // queued depth when the episode opened
 	waits int // dispatches that had to wait during it
+	seen  int // waits as of the previous sample
 }
 
 // blocked records that a dispatch is about to wait for room, and reports whether
@@ -450,14 +464,16 @@ func (b *backpressure) blocked() bool {
 	if b.on {
 		return false
 	}
-	b.on, b.since, b.at = true, time.Now(), b.depth()
+	queued, undispatched := b.depth()
+	b.on, b.since, b.at, b.seen = true, time.Now(), queued, b.waits
 	// Not "the queue is full": what filled is ONE worker's inbox, and because
 	// paths are hashed to workers the aggregate can be well short of the bound
 	// when that happens — measured at 646 of 1280 with four workers. Leading
-	// with the consequence is both shorter and true.
+	// with the consequence is both shorter and true. The second number is the
+	// backlog behind it, which is the one a bulk copy makes large.
 	b.e.logf("[sync] back-pressure: writes through the mount are now waiting on uploads "+
-		"(%d of %d event(s) queued; -upload-workers %d, -push-delay %s)",
-		b.at, b.bound, b.e.workers, b.e.debounce)
+		"(%d of %d event(s) queued, %d awaiting dispatch; -upload-workers %d, -push-delay %s)",
+		b.at, b.bound, undispatched, b.e.workers, b.e.debounce)
 	return true
 }
 
@@ -467,13 +483,18 @@ func (b *backpressure) sample() bool {
 	if !b.on {
 		return false
 	}
-	left := b.depth()
-	if left > b.bound/satLowWater {
+	queued, undispatched := b.depth()
+	waited := b.waits > b.seen
+	b.seen = b.waits
+	if undispatched > 0 || waited {
 		return true
 	}
+	// "Cleared" is about the filesystem, not about the uploads: what ended is
+	// writes waiting on room, and the queue it still reports drains without
+	// holding anything back.
 	b.e.logf("[sync] back-pressure: cleared after %s — %d write(s) waited, %d event(s) still queued",
-		time.Since(b.since).Round(time.Millisecond), b.waits, left)
-	b.on, b.waits = false, 0
+		time.Since(b.since).Round(time.Millisecond), b.waits, queued)
+	b.on, b.waits, b.seen = false, 0, 0
 	return false
 }
 
