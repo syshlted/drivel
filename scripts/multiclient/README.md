@@ -15,8 +15,15 @@ no network and runs under `-race` with the rest of the suite.
    With `delete = "permanent"` they are gone for good instead.
 3. **A throwaway Google account.** The delete and conflict cases are designed to
    destroy data.
-4. **One token per client.** `token.json` is rewritten on refresh, and three
-   processes sharing one path race on that write.
+4. **One token per client — tidiness, not safety.** This item used to claim
+   `token.json` is rewritten on refresh so that clients sharing a path race on
+   that write. MC-45 disproved it: nothing in a *mount* ever writes a token
+   file. `gauth.SaveToken` has exactly one caller, `drivel login`, and
+   `TestOnlyLoginWritesTheOAuthToken` is a tree-wide grep that keeps it that
+   way. Keep them separate anyway, for reasons that survive: a revoked or
+   expired token then takes down one client instead of the fleet, and a
+   per-client file makes it obvious which client authenticated as whom. See the
+   plan's §2.1.
 5. **Check the account before trusting the rig.** `TestLiveRigPreflight` is the
    tree's one read-only live probe: it reports which account a token belongs to,
    how much quota is left (MC-10 parks 6 GiB of a free account's 15 GB) and
@@ -58,9 +65,10 @@ instead, and appends an `[account.c1]` block and a `[[mount]]` at `~/drive-c1`
 to your own config file — none of which the rig reads. One run per client, each
 forcing a fresh consent, against **one** Google account: the clients sync one
 folder, so quota contention (MC-36, MC-50/51) and the same-name-sibling case
-(MC-30) are properties of a single user's Drive. `rig-init.sh -t` copies one
-token into every client, which is exactly what rule 4 above forbids; it is for a
-single-client smoke test, not a fleet run.
+(MC-30) are properties of a single user's Drive. `rig-init.sh -t` seeds every client
+from one token, which is safe for the reason rule 4 above gives and is the quick
+way to stand up a wide fleet — MC-51 needs five clients and nobody wants five
+browser consents — at the cost of one revocation taking all of them down.
 
 Start each client in its own terminal:
 
@@ -137,6 +145,42 @@ and `drivel plugin-serve <kind>` owns the path index. Disk and CPU for "a client
 is the sum. MC-11's write-amplification figure was recorded before M9, when both
 bbolt stores were in one process, so it is not comparable to a host-only sample
 taken today (see the plan, §4.17).
+
+## Group IV and VI: the case drivers
+
+Three cases have drivers of their own, because each needs a fleet reshaped
+around it rather than a workload poured into a fixed one:
+
+```sh
+scripts/multiclient/mc50-steady-state.sh -d rig -n 300 -m 5 -o rig/results/mc50
+scripts/multiclient/mc51-scaling.sh      -d rig -N "1 2 3 5" -k 1024
+scripts/multiclient/mc44-throughput.sh   -m 64 -n 5          # see MC-44 below
+scripts/multiclient/rig-purge.py         rig/c1              # empty the remote
+```
+
+`mc50` drives idle / light / heavy cells against a fleet that is **already
+running with one `-pprof` port per client** (6061 upward, in client order) and
+reports through `mc50-report.sh`, which is split out so a run can be
+re-reported without being re-run. `mc51` drives the fleet *size* instead, so it
+starts and stops clients itself and needs them stopped to begin with.
+`rig-purge.py` reads the folder to empty out of a client's own `config.toml`
+and refuses a root of `root`, so it hardcodes neither a path nor an account.
+
+Two things these drivers learned the hard way, both worth copying into the next
+one. **Count after a settle, never at the moment a condition goes true**: MC-51
+reported zero uploads at N=1 because convergence is trivially true the instant
+the file is written and the debounce window alone is 300ms, and three downloads
+at N=2 because the cold-start enumeration was still landing. And **a bare `wait`
+also waits for your samplers** — MC-50's driver hung on it, because the sampler
+and the goroutine scraper never exit; wait for the workload PIDs by name.
+
+**Stopping clients is by process name, never by a command-line pattern.**
+`pgrep -f 'drivel mount -config'` and `ps | awk '/drivel mount/'` both match the
+shell that is running them, so a kill loop built from either one kills the
+session. Use `ps -eo pid,comm | awk '$2=="drivel"'`: a shell's `comm` is never
+`drivel`. (A plugin child's `comm` is `exe`, since it is launched as
+`/proc/self/exe` — M9 rule 10 — so `ps -eo comm | grep -c '^exe$'` is how you
+check none was left behind.)
 
 ## Checking against Drive, not against each other
 

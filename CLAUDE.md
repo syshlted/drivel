@@ -856,9 +856,17 @@ inside the debounce window — which is also the answer to the duplicate upload
 MC-11 recorded and the plan had sent to Tier A to be chased; and the permanent
 HTTP/3 downgrade in "Transport" below.
 
-**Group V is finished; the queue is Group IV, then Group VI**
-(§5 of the test plan is the authority and carries the Group VI load estimate). One
-thing about that order is worth keeping: Group VI's constraint
+**Groups IV and V are finished and Group VI is partly done** (ran 2026-10-13/14;
+§5 of the test plan is the authority and every row carries its own result). What
+is left: **MC-52 and MC-53, both declined for wall clock with the arithmetic
+stated** — 100 000 files is ~39 hours of pushing at the 0.71 uploads/s MC-50
+measured, and a 24-hour soak cannot be compressed without destroying what it
+measures — plus MC-20/MC-23/MC-26 against the mixed-mode fleet and at each fleet
+size. **Three findings from those groups outrank the rest and are below in their
+own sections**: §6's conflict copy protects *unsynced local work* and not content
+(MC-31, MC-60), inbound sync stalls while a client drains an outbound backlog
+(MC-36, MC-50), and §12's ~36 KB per commit is now confirmed in the field. One
+thing about the remaining order is worth keeping: Group VI's constraint
 is wall clock and storage quota, **not** API rate — MC-11 recorded zero 403s at
 1.09 uploads/s, a single writer cannot burst past ~1 request/s, and storage is
 per Google *account*, so a fresh Cloud project buys per-project request
@@ -922,6 +930,24 @@ Three invariants; breaking any of them loses user data.
 Also: a failed hydration must return `EIO`, never a short read (zeros served as
 content are silent corruption); and §6 conflict copies are always downloaded in
 full, because their paths exist only locally and could never be hydrated later.
+**Both halves of that last sentence were verified live by MC-60** (2026-10-14):
+on a lazy client the conflict copy holding a remote 1 MiB came down complete —
+on-disk equal to apparent size, no marker — while everything else on that mount
+was a placeholder.
+
+**§6's conflict copy protects unsynced local work, not content, and the
+difference is where the fleet loses data** (MC-31 and MC-60, 2026-10-14). A
+client that has already pushed has a local file matching its own echo, so there
+is nothing local for §6 to protect and an incoming remote change applies
+cleanly — which is correct, and which means two clients editing one file
+concurrently end with the later *pusher*'s bytes and **no conflict copy
+anywhere**. The loss happens on the winner's whole-file `Put`, which replaces a
+remote that moved since its own baseline: documented last-writer-wins, not a
+bug. On Drive the loser survives in the revision history, which drivel neither
+creates nor exposes; on SFTP and every M17–M21 backend it is simply gone. Do not
+write a test or a doc that asserts "no content is lost" without saying which
+interleaving it means — three expectations in the multiclient plan said it and
+all three were wrong.
 
 ## Range writes (M6)
 
@@ -1282,6 +1308,21 @@ go-fuse's protocol trace and must never come to mean two things).
    `repairEvent` re-derives the event from the backing file (gone ⇒ drop,
    directory ⇒ `OpMkdir`, placeholder or special ⇒ drop, else whole-file
    `OpWrite` with nil extents); and **a rename is owed at its destination**.
+
+**Inbound sync stalls while a client drains a large outbound backlog**, measured
+twice (MC-36 at 1000 files per client, MC-50 at 300, 2026-10-13/14). During the
+23.5 minutes its own uploads took, each client fetched about **20** of its peers'
+2000 files; within seconds of its last upload landing, inbound resumed and took
+the remaining ~1980 in 15 minutes. An idle peer with 3000 files to fetch and
+nothing to push converged **twelve minutes earlier**. Three things about it. It
+is **not a deadlock** — it clears unaided, so a supervisor is not the answer.
+**Nothing is logged**, so from outside the process a suspended inbound loop and
+an idle one are indistinguishable, which is §2.6's "content equality, not log
+silence" in a third place. And **the mechanism is unidentified**: the candidates
+are the state DB's single writer (the engine commits an echo per upload), the
+per-mount plugin process serialising calls, and `gdrive`'s own `d.mu`. Naming it
+needs a goroutine dump, so run the rig with `-pprof` before chasing it — MC-50
+has established that it can be.
 
 3. **Nothing starts a sweep on the spot.** `armRepairSweep` sets a deadline
    `repairDelay` (5m) out and says so; a repair sweep that leaves the debt
