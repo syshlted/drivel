@@ -42,6 +42,22 @@ This is the half of syncing that can lose data, so it is guarded hard.
 **A deletion made while Drivel is running** is unambiguous — it saw the operation
 — and propagates like any other change.
 
+For a short while afterwards, though, the backend may not agree that it happened.
+Google Drive moves a folder's contents to the trash along with the folder, but not
+instantly, so for a few seconds its list of recent changes still describes those
+files as present. Drivel remembers what it deleted, and for five minutes it
+ignores a report that carries the same content at the same path:
+
+```
+[pull] ignore  notes/scratch.txt (deleted here 3s ago; the remote is still reporting what we deleted)
+```
+
+Without that, Drivel downloaded the file back — and re-created the folder to put
+it in, which then looked like new local work and was pushed back to the remote,
+re-appearing on every machine you sync with. The check is on the **content**, so a
+file somebody genuinely re-creates at that path still arrives: different content
+is applied immediately, and identical content is picked up by the next sweep.
+
 **A deletion inferred while Drivel was not running** is the dangerous case, and
 Drivel infers one **only from a baseline**: a record that it previously synced
 that exact path. A file being absent on one side is not evidence. Without a

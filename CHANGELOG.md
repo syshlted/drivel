@@ -13,6 +13,44 @@ from source with `make build`.
 
 ## Unreleased
 
+### A file you deleted could come back, and the folder it was in stayed — 2026-10-16
+
+Delete a folder full of files and, occasionally, one of them reappeared a few
+seconds later — downloaded by Drivel from your own Drive, from a change report
+describing the file you had just removed:
+
+```
+[sync] delete   notes/scratch.txt
+[pull] download notes/scratch.txt      (three seconds later)
+[pull] delete   notes/scratch.txt      (five seconds after that)
+```
+
+Google Drive moves a folder's contents to the trash along with the folder, but
+not instantly, so for a few seconds its change feed still describes the files as
+present. Drivel had no way to tell that report from somebody else creating a file
+at that path, because the record it compares against is dropped by the deletion
+itself.
+
+The file above is tidied up by the next report, as the third line shows. **The
+folder is not.** Nothing mentioned the folder at all — it was re-created only as
+somewhere to put the download — so nothing later removed it, and it sat there
+empty. Worse, the next sweep saw a local folder that the remote did not have,
+concluded it was new local work, and pushed it back to Drive, where it then
+appeared on every other machine you sync with. A folder you deleted came back
+everywhere.
+
+Drivel now remembers what it deleted for five minutes, and ignores a report
+carrying the same content at the same path within that window:
+
+```
+[pull] ignore  notes/scratch.txt (deleted here 3s ago; the remote is still reporting what we deleted)
+```
+
+A file somebody genuinely re-creates at that path is unaffected, because the
+check is on the content and not on the clock: different content is applied
+straight away, and identical content is picked up by the next sweep. Nothing
+about `-max-deletes` or the trash changes.
+
 ### A change that was uploading when Drivel was killed is now re-sent — 2026-10-16
 
 If Drivel gives up on an upload it remembers the path and the next sweep re-sends

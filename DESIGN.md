@@ -1198,6 +1198,39 @@ Uploader then pushes back up.
 4. **Loop breaker.** Any change whose resulting content hash equals the currently
    recorded hash for that fileID is a no-op — dropped regardless of origin. This makes
    the whole system convergent: identical content never generates further work.
+5. **The baseline outlives the deletion that drops it** (added 2026-10-16, after
+   the field found the hole). Items 1 and 4 both compare against a record, and a
+   *delete* push removes the record — so for a short time after a deletion the one
+   thing that can recognise a stale report of that object is gone. Drive's
+   `trashed` flag reaches a trashed folder's children asynchronously, so its feed
+   reports the child still present with exactly the content the deletion removed,
+   §4 has nothing to match, and the change reads as an ordinary remote create. A
+   deletion therefore leaves a **tombstone** — the baseline it removed, plus when
+   it removed it (`state.Tombstone`) — and the inbound path applies item 4's test
+   to it for `tombstoneWindow` afterwards. Two things about its shape:
+
+   - **Identity, not time.** The obvious discriminator is "is this change older
+     than our deletion?", and it is the wrong one: our deletion time is this
+     machine's clock, the change's timestamp is the provider's, and the comparison
+     is wrong by the skew between them in the direction that decides whether
+     somebody's file comes back. The record we kept is a better witness. A
+     re-creation carrying genuinely different content is applied whatever either
+     clock says, and one carrying the same content is suppressed and then found by
+     the next sweep — a delay, where the alternative is a resurrection.
+   - **A bucket of its own, not a flag on the echo.** M7b's delete baseline, M6's
+     gate 2, the sweep's "new locally" row and M27's lost-push row all read the
+     echo bucket, and a tombstone must be invisible to every one of them. A
+     separate bucket is invisible by construction; a flag would be invisible only
+     for as long as nobody forgot to check it.
+
+   Why the file heals and the directory does not, which is what makes this a data
+   bug rather than wasted traffic: the re-downloaded file is deleted again by the
+   next page, but nothing reported the *directory* at all — the download created
+   it as a parent — so no later page removes it. It is then permanent at
+   `-sweep-interval 0`, and with a sweep it is worse, because a local-only
+   directory with no baseline is the local walk's "new locally" row: the next
+   sweep pushes it back up and re-creates, on every other client, a directory the
+   user deleted.
 
 This checksum/version-reconciliation approach (rather than trying to perfectly track
 event provenance) is what real sync engines converge on, because FS and cloud events

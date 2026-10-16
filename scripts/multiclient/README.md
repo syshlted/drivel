@@ -180,14 +180,20 @@ empties the account's trash, which is where drivel's own deletes go
 (`-drive-delete` defaults to `trash`) and where they keep counting against the
 15 GiB quota the next case has to spend.
 
-`mc23-selfresurrect.sh` is the odd one out: it is a **reproduction of an open
+`mc23-selfresurrect.sh` is the odd one out: it is a **regression check for one
 defect** rather than a measurement, and it runs **one** client so that nothing
 else can be the source of the inbound work it is looking for. A client's own
-`rm -rf` can be handed back to it by its own change feed, re-downloading a file
+`rm -rf` could be handed back to it by its own change feed, re-downloading a file
 it just deleted and leaving the re-created directory behind for good. It is a
 race on Drive's trash propagation, so it fires in roughly one cycle in eight and
 most often in the first — **a run where every cycle reads `gone` has disproved
 nothing**, which is why it loops. Read it beside the plan's MC-23 row.
+
+Since the fix (2026-10-16) the script reports an `ignore` column, and the two
+halves have to be read together: `ignore` counts the reports drivel recognised
+as its own deletion and dropped, so it is the only evidence that the race fired
+at all, while `download` and a `PRESENT` directory are the defect. All-zero
+means the run never entered the window — not that the fix works.
 
 **`find … | head -1` is a landmine under `set -o pipefail`, and it passes the
 smoke test.** `head` closes the pipe after one line, `find` takes SIGPIPE, the

@@ -56,11 +56,17 @@ erDiagram
         string path PK "root-relative slash path"
         timestamp at "when the outbound path first gave up on it"
     }
+    TOMBSTONE {
+        string path PK "root-relative slash path"
+        json echo "the ECHO this path had when we deleted it"
+        timestamp deleted "our clock when the remote object went away"
+    }
 
     SWEEP ||--o{ SEEN : "gen namespaces the marks of one sweep"
     ECHO ||--o| SEEN : "a baseline with no mark is a delete candidate"
     ECHO ||--o| HYDRATION : "same path key; both dropped together by Forget"
     REPAIR ||--o| ECHO : "an owed path usually HAS a baseline; that is why the walk misses it"
+    ECHO ||--o| TOMBSTONE : "never both: a delete moves the record across, a sync moves it back"
 ```
 
 What each bucket costs if the file is lost:
@@ -73,6 +79,7 @@ What each bucket costs if the file is lost:
 | `sweep` | resume point of an interrupted enumeration, plus when the last one finished | the sweep restarts, and the next mount treats a periodic sweep as overdue |
 | `seen` | which paths one sweep observed remotely | a resumed sweep would infer false deletes — which is why these are on disk and not in memory |
 | `repair` | paths the uploader gave up on, for the next sweep to re-send (M27) | those files wait for `-sweep-interval` again, and are not repaired at all if it is `0` — though a lost push is still found by the walk's fingerprint row, which needs no record |
+| `tombstone` | the baseline a deletion dropped, so a provider still serving its pre-deletion view is recognised rather than applied (§4.5) | a file deleted within the last few minutes can come back, and the directory it was in comes back permanently |
 
 `local-size` / `local-mtime` fingerprint the **backing** file, not the remote one,
 and they exist for providers that publish no content checksum — every filesystem
@@ -120,6 +127,27 @@ per file per retry round. And the sweep **clears a record before re-pushing it,
 never after** — `Push` is synchronous and records a fresh debt of its own if it
 gives up again, so clearing afterwards would erase the one thing saying the file
 is still unsent.
+
+`tombstone` is the `echo` bucket's other half rather than a bucket in its own
+right: a deletion moves the record across in one transaction (`ForgetDeleted`),
+and a later sync of that path moves it back (`SetEcho` drops any tombstone, same
+transaction, no extra commit). So a path has at most one of the two, and the
+delete push still costs the single commit it cost before this existed.
+
+It is a *separate* bucket for the reason the echo is read in four places — M7b's
+delete baseline, M6's gate 2, the sweep's "new locally" row, M27's lost-push row
+— and a tombstone must be invisible to every one of them. A flag on the `echo`
+record would have been invisible only for as long as nobody forgot to check it.
+
+What reads it is the inbound path, and only for a path with no live baseline: a
+report carrying the content the deletion removed, inside `tombstoneWindow`
+(5 minutes), is this mount's own delete coming back and is dropped. The test is
+**identity and not time** — our deletion stamp is this machine's clock and the
+report's timestamp is the provider's, so comparing them is wrong by the skew
+between two clocks, in the direction that decides whether somebody's file comes
+back. The sweep prunes expired records, which is the only thing that bounds the
+bucket; a mount that never completes a sweep keeps one record per deleted path,
+of a size with the baseline that path already had.
 
 The `echo` bucket is the one that grows: a baseline is dropped when the path is
 gone on **both** sides, and only a sweep can establish that. Deletes seen while
@@ -250,7 +278,7 @@ reasons.**
 | | what is lost | what happens next | what it costs |
 |---|---|---|---|
 | `drivel-index.db` | path↔fileID hints | an unknown path falls through to a `files.list` name query, which is the authority anyway | latency and API quota |
-| `drivel-state.db` | cursor, §4 echoes, hydration bitmaps, sweep marks | no cursor means the downloader enumerates the whole tree before tailing it | a full re-sync's requests, and a §6 conflict copy per genuinely divergent path |
+| `drivel-state.db` | cursor, §4 echoes and tombstones, hydration bitmaps, sweep marks | no cursor means the downloader enumerates the whole tree before tailing it | a full re-sync's requests, and a §6 conflict copy per genuinely divergent path |
 | either, unreadable | as above | the file is renamed `.corrupt` and an empty one takes its place | as above, plus a line in the log |
 
 Neither loses data, and the state DB's case rests on a specific rule: M7b infers a

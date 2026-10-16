@@ -465,6 +465,16 @@ func (d *Downloader) runSweep(ctx context.Context, sw state.Sweep) (string, erro
 	if err := d.applyDeletes(ctx, sw, &st); err != nil {
 		d.logf("[sweep] delete pass: %v", err)
 	}
+	// Housekeeping, and the sweep is where it belongs: a tombstone older than the
+	// window is inert — suppressDeleted will not read it — so all it costs from
+	// here on is the space, and this is the one pass that already walks state.
+	// It commits only if something goes (DESIGN.md §12).
+	if n, pErr := d.state.PruneTombstones(time.Now().Add(-tombstoneWindow)); pErr != nil {
+		d.logf("[sweep] pruning deletion records: %v", pErr)
+	} else {
+		st.tombExpired = n
+	}
+
 	// Whether the debt survived its repair decides how soon the next repair sweep
 	// may fall due. Cleared rather than doubled on success, so an isolated failure
 	// does not leave a mount sweeping on an hour's delay for the rest of its life.
@@ -509,6 +519,8 @@ type sweepStats struct {
 	repaired    int // paths re-pushed after the outbound path gave up on them (M27)
 	repushed    int // paths re-pushed because the local copy no longer matched its baseline
 	unverified  int // baselines with no local fingerprint, so divergence could not be judged
+	suppressed  int // listed objects that are this mount's own deletion, not yet propagated
+	tombExpired int // deletion records dropped because nothing can still report them
 }
 
 // kindOf names a file type for the one job of telling a user which of their files
@@ -559,6 +571,12 @@ func (s sweepStats) String() string {
 	}
 	if s.unverified > 0 {
 		out += fmt.Sprintf(", %d baseline(s) with no fingerprint to check", s.unverified)
+	}
+	if s.suppressed > 0 {
+		out += fmt.Sprintf(", %d listed object(s) ignored as our own un-propagated delete", s.suppressed)
+	}
+	if s.tombExpired > 0 {
+		out += fmt.Sprintf(", %d expired deletion record(s) dropped", s.tombExpired)
 	}
 	return out
 }
@@ -614,6 +632,17 @@ func (d *Downloader) reconcileRemote(ctx context.Context, f provider.RemoteFile,
 		// representation. Deliberately no echo record either — recording one would
 		// claim we hold content we do not.
 		st.exportOnly++
+		return nil
+	}
+	// A listing can be taken inside the same window the feed's stale page comes
+	// from, so the sweep asks the same question — here rather than inside apply,
+	// where the answer would be invisible to the tally below.
+	drop, err := d.suppressDeleted(f.Path, &f)
+	if err != nil {
+		return err
+	}
+	if drop {
+		st.suppressed++
 		return nil
 	}
 	if !d.wouldMaterialize(f) {

@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/syshlted/drivel/internal/fsevent"
+	"github.com/syshlted/drivel/provider"
 )
 
 // Disk cost per synced file, as a commit count.
@@ -38,7 +39,11 @@ const (
 	// One SetEcho per pushed file — the §4 baseline, which must be committed
 	// before the change-feed reports our own upload back to us.
 	commitsPerPush = 1
-	// One ForgetMany, which drops the echo and the hydration bitmap together.
+	// One transaction, whichever of the two shapes a delete takes: a ForgetMany
+	// dropping the echo and the hydration bitmap together, or — when the baseline
+	// carries an identity a stale report could be recognised by — a ForgetDeleted
+	// doing the same and storing the tombstone in its place. Both are one commit
+	// by construction, which is what made the tombstone affordable.
 	commitsPerUnlink = 1
 )
 
@@ -64,29 +69,43 @@ func TestPushCommitsPerFile(t *testing.T) {
 	}
 }
 
+// Both stores, because a delete now branches on whether the baseline it drops
+// carries an identity: a provider that reports a digest or a version leaves a
+// tombstone behind, and one that reports neither leaves nothing. The budget is
+// the same number either way and this is what says so.
 func TestUnlinkCommitsPerFile(t *testing.T) {
 	const files = 50
 
-	dataDir := t.TempDir()
-	st := newState(t)
-	e := New(Config{Store: newFakeStore(), DataDir: dataDir, State: st})
-	ctx := context.Background()
+	for _, tc := range []struct {
+		name  string
+		store provider.Store
+	}{
+		{"no identity reported", newFakeStore()},
+		{"digest reported, so a tombstone is kept", hashedStore{newFakeStore()}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dataDir := t.TempDir()
+			st := newState(t)
+			e := New(Config{Store: tc.store, DataDir: dataDir, State: st})
+			ctx := context.Background()
 
-	for i := 0; i < files; i++ {
-		rel := fmt.Sprintf("f%d.txt", i)
-		writeFile(t, dataDir, rel, "x")
-		e.handle(ctx, fsevent.Event{Op: fsevent.OpCreate, Path: rel})
-	}
+			for i := 0; i < files; i++ {
+				rel := fmt.Sprintf("f%d.txt", i)
+				writeFile(t, dataDir, rel, "x")
+				e.handle(ctx, fsevent.Event{Op: fsevent.OpCreate, Path: rel})
+			}
 
-	base := st.Commits()
-	for i := 0; i < files; i++ {
-		e.handle(ctx, fsevent.Event{Op: fsevent.OpUnlink, Path: fmt.Sprintf("f%d.txt", i)})
-	}
+			base := st.Commits()
+			for i := 0; i < files; i++ {
+				e.handle(ctx, fsevent.Event{Op: fsevent.OpUnlink, Path: fmt.Sprintf("f%d.txt", i)})
+			}
 
-	got := st.Commits() - base
-	if want := uint64(files * commitsPerUnlink); got != want {
-		t.Errorf("unlinking %d files committed %d times, want %d (budget %d per file)",
-			files, got, want, commitsPerUnlink)
+			got := st.Commits() - base
+			if want := uint64(files * commitsPerUnlink); got != want {
+				t.Errorf("unlinking %d files committed %d times, want %d (budget %d per file)",
+					files, got, want, commitsPerUnlink)
+			}
+		})
 	}
 }
 

@@ -36,6 +36,7 @@ var (
 	bucketSweep     = []byte("sweep")
 	bucketSeen      = []byte("seen")
 	bucketRepair    = []byte("repair")
+	bucketTomb      = []byte("tombstone")
 	keyCursor       = []byte("changefeed")
 	keySweep        = []byte("current")
 	keySweepDone    = []byte("done")
@@ -152,7 +153,7 @@ func Open(path string) (*Store, error) {
 	// Through s.update, not db.Update, so Commits() counts every commit this store
 	// has made rather than every one after the first.
 	if err := s.update(func(tx *bolt.Tx) error {
-		for _, b := range [][]byte{bucketCursor, bucketEcho, bucketHydration, bucketSweep, bucketSeen, bucketRepair} {
+		for _, b := range [][]byte{bucketCursor, bucketEcho, bucketHydration, bucketSweep, bucketSeen, bucketRepair, bucketTomb} {
 			if _, err := tx.CreateBucketIfNotExists(b); err != nil {
 				return err
 			}
@@ -283,13 +284,23 @@ func (s *Store) GetEcho(path string) (e Echo, ok bool, err error) {
 // SetEcho records the content we last synced at path (from an upload or an
 // applied download) so a later change-feed report of that same content is
 // recognised as an echo and dropped.
+//
+// It also drops any tombstone for path, in the same transaction and so at no
+// extra cost: a live echo and a tombstone are contradictory claims about one
+// path — "this is what we hold there" against "we deleted what was there" — and
+// the echo is the newer of the two by construction, because this is the only
+// thing that writes one.
 func (s *Store) SetEcho(path string, e Echo) error {
 	v, err := json.Marshal(e)
 	if err != nil {
 		return err
 	}
 	return s.update(func(tx *bolt.Tx) error {
-		return tx.Bucket(bucketEcho).Put([]byte(path), v)
+		k := []byte(path)
+		if err := tx.Bucket(bucketTomb).Delete(k); err != nil {
+			return err
+		}
+		return tx.Bucket(bucketEcho).Put(k, v)
 	})
 }
 
@@ -325,12 +336,20 @@ func (s *Store) ForgetMany(paths []string) error {
 	}
 	return s.update(func(tx *bolt.Tx) error {
 		echo, hydration := tx.Bucket(bucketEcho), tx.Bucket(bucketHydration)
+		tomb := tx.Bucket(bucketTomb)
 		for _, p := range paths {
 			k := []byte(p)
 			if err := echo.Delete(k); err != nil {
 				return err
 			}
 			if err := hydration.Delete(k); err != nil {
+				return err
+			}
+			// A tombstone exists to recognise a stale report of an object we
+			// removed. The commonest caller here is the inbound path acting on a
+			// report that the object IS removed — the remote has caught up, so the
+			// record has nothing left to recognise. Free: same transaction.
+			if err := tomb.Delete(k); err != nil {
 				return err
 			}
 		}
@@ -663,4 +682,125 @@ func (s *Store) ClearRepair(path string) error {
 	return s.update(func(tx *bolt.Tx) error {
 		return tx.Bucket(bucketRepair).Delete([]byte(path))
 	})
+}
+
+// --- tombstones (the §4 loop breaker across a deletion) ---------------------
+//
+// A tombstone is an Echo kept past the deletion that removed it, plus when the
+// removal happened. It exists because clearing the baseline is what makes a
+// provider's own stale view of a path unrecognisable.
+//
+// The shape, found live on 2026-10-16: a client deletes a file, its change feed
+// serves a page taken before the deletion propagated, and the page reports the
+// object still present with exactly the content we deleted. §4's loop breaker is
+// the right test for that — "this is the content we last agreed on at this path,
+// so it is not news" — but the delete push had already dropped the record it
+// compares against, so the change read as an ordinary remote create and the file
+// came back. It heals for a file on the next page; the directory the download
+// re-created does not, and the next sweep pushes that back up as new local work,
+// re-creating remotely a directory the user deleted.
+//
+// Keeping the record in a bucket of its own, rather than flagging the Echo, is
+// what makes it safe to add to a model this much depends on: a tombstone is
+// invisible to every existing reader by construction, so M7b's delete baseline,
+// M6's gate 2, the local walk's "new locally" row and M27's lost-push row all
+// behave exactly as before. The only thing that reads one is the inbound path,
+// and only for a path with no live echo.
+
+// Tombstone is the baseline a deletion removed, and when it was removed.
+//
+// Deleted is this machine's clock at the moment the remote object went away, and
+// it is compared only against this machine's clock later (the caller's window),
+// never against a timestamp the provider reported. That is deliberate: a
+// comparison between our clock and the provider's is wrong by the skew between
+// them, in a direction that decides whether somebody's file comes back.
+type Tombstone struct {
+	Echo    Echo      `json:"echo"`
+	Deleted time.Time `json:"deleted"`
+}
+
+// ForgetDeleted drops every record for path exactly as Forget does and leaves a
+// tombstone in their place — in ONE transaction, so a delete push still costs
+// the single commit it cost before (DESIGN.md §12).
+func (s *Store) ForgetDeleted(path string, t Tombstone) error {
+	v, err := json.Marshal(t)
+	if err != nil {
+		return err
+	}
+	return s.update(func(tx *bolt.Tx) error {
+		k := []byte(path)
+		if err := tx.Bucket(bucketEcho).Delete(k); err != nil {
+			return err
+		}
+		if err := tx.Bucket(bucketHydration).Delete(k); err != nil {
+			return err
+		}
+		return tx.Bucket(bucketTomb).Put(k, v)
+	})
+}
+
+// Tombstone returns the record left by a deletion of path, if one is stored.
+//
+// Whether it is still *live* is the caller's question, not this one's: the
+// window a stale report can arrive in is a property of the provider's feed, so
+// it belongs with the engine rather than in the store. An expired record is
+// inert, never wrong, and is removed by the next PruneTombstones.
+func (s *Store) Tombstone(path string) (t Tombstone, ok bool, err error) {
+	err = s.db.View(func(tx *bolt.Tx) error {
+		v := tx.Bucket(bucketTomb).Get([]byte(path))
+		if v == nil {
+			return nil
+		}
+		if uErr := json.Unmarshal(v, &t); uErr != nil {
+			return uErr
+		}
+		ok = true
+		return nil
+	})
+	return t, ok, err
+}
+
+// PruneTombstones removes every tombstone recorded before the given instant,
+// reporting how many went.
+//
+// It scans in a read transaction and commits only if there is something to
+// remove, which is the §12 rule rather than an optimisation: bbolt advances the
+// meta page on every commit whether a data page changed or not, so an Update
+// that deletes nothing still costs ~20 KB of disk writes — and the steady state
+// here is a sweep with nothing to prune.
+//
+// Unlike an echo, a tombstone can be pruned on time alone: it is not a baseline
+// anything infers a deletion from, so dropping one early costs at most a
+// suppression that does not happen, which is the behaviour that predates it.
+func (s *Store) PruneTombstones(before time.Time) (int, error) {
+	var stale [][]byte
+	if err := s.db.View(func(tx *bolt.Tx) error {
+		return tx.Bucket(bucketTomb).ForEach(func(k, v []byte) error {
+			// An unreadable record is pruned rather than returned as an error: it
+			// can never suppress anything, so it is pure cost, and aborting the
+			// pass over it would leave every later record standing too.
+			var t Tombstone
+			if json.Unmarshal(v, &t) != nil || t.Deleted.Before(before) {
+				stale = append(stale, append([]byte(nil), k...))
+			}
+			return nil
+		})
+	}); err != nil {
+		return 0, err
+	}
+	if len(stale) == 0 {
+		return 0, nil
+	}
+	if err := s.update(func(tx *bolt.Tx) error {
+		b := tx.Bucket(bucketTomb)
+		for _, k := range stale {
+			if err := b.Delete(k); err != nil {
+				return err
+			}
+		}
+		return nil
+	}); err != nil {
+		return 0, err
+	}
+	return len(stale), nil
 }

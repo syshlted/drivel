@@ -31,6 +31,12 @@ for log in "$@"; do
   printf '  %-34s %s\n' "outbound deletes"         "$(count '[sync] delete')"
   printf '  %-34s %s\n' "outbound renames"         "$(count '[sync] rename')"
   printf '  %-34s %s\n' "inbound deletes"          "$(count '[pull] delete')"
+  # Not a volume row and not an alarm: a non-zero count is the §4.5 tombstone
+  # doing its job, suppressing a report of an object this client had just
+  # deleted. It is the positive signal for MC-23's self-resurrection defect —
+  # the negative one is a "[pull] download" of a path whose "[sync] delete" is
+  # a few seconds above it, which no counter can see.
+  printf '  %-34s %s\n' "own-delete reports ignored" "$(count '[pull] ignore')"
   printf '  %-34s %s\n' "M6 unchanged-content skips" "$(count 'remote already holds')"
   printf '  %-34s %s\n' "M5 placeholder skips"     "$(count 'unhydrated placeholder')"
   printf '  %-34s %s\n' "conflict resolutions"     "$(count '[pull] conflict')"

@@ -278,10 +278,10 @@ is worse: a local-only directory with no echo is the local walk's "new locally"
 row, so the next sweep pushes it back and re-creates remotely a directory the
 user deleted. Reproduced in a single-client probe (1 of 8 seed-and-delete cycles
 — only the cycle whose poll landed inside the window) after MC-51's N=1 row sat
-at `converge = timeout` for an hour. **Unfixed.** The shape of a fix is a
-tombstone carrying a time, so an inbound change older than our own deletion of
-that path is dropped; that is a change to §4 rather than a patch, which is why
-it is written down rather than attempted. See the test plan's MC-23 row. **Verified against real Drive on 2026-09-09**
+at `converge = timeout` for an hour. **Fixed 2026-10-16 by §4.5's tombstone**
+— see "Deletions and §4" below, and note that the fix is *not* the "inbound
+change older than our own deletion" this note first proposed: that compares our
+clock against Drive's. See the test plan's MC-23 row. **Verified against real Drive on 2026-09-09**
 via `TestLiveRemoveTrashes` (`DRIVEL_LIVE_RIG`, gated and skipped by default,
 self-cleaning); the fake models the settled state. It defaults to the recoverable
 form because **not every deletion drivel performs was typed by a user**: reconcile
@@ -1343,6 +1343,56 @@ over a LAN all beat 749 commits/s. **The cheaper thing first** is batching the
 (`flushForget`/`SetCursor` are there and already ordered) — full durability, no
 panic handling, but it needs its own reasoning about a path appearing twice in one
 page.
+
+## Deletions and §4 (the tombstone)
+
+**A delete push drops the one record that can recognise a stale report of what it
+deleted, and that is how a client's own `rm -rf` came back** (found live
+2026-10-16, fixed the same day; DESIGN.md §4.5). §4's loop breaker compares an
+inbound change against the baseline for that path — so when the baseline is
+*gone*, Drive's lagging `trashed` flag on a trashed folder's child reads as an
+ordinary remote create. A deletion therefore leaves a **tombstone** (`internal/
+state`, its own bucket: the `Echo` it removed plus when it removed it), and the
+inbound path applies §4's own test to it for `tombstoneWindow` (5 minutes).
+Five things carry it.
+
+1. **Identity, not time.** The obvious rule — drop an inbound change older than
+   our deletion — compares *our* clock against the *provider's*, so it is wrong
+   by the skew between them in the direction that resurrects a file. The record
+   we kept is a better witness: the test is `Echo.Matches`, exactly as the live
+   echo's is. A re-creation carrying different content is applied whatever either
+   clock says; one carrying the same content is suppressed and then found by the
+   next sweep — a delay, against a resurrection.
+2. **Its own bucket, not a flag on the echo.** Four passes read the echo bucket
+   (M7b's delete baseline, M6's gate 2, the local walk's "new locally" row, M27's
+   lost-push row) and a tombstone must be invisible to every one of them. A
+   separate bucket is invisible by construction; a flag is invisible only until
+   someone forgets to check it. `TestATombstoneIsNotABaseline` is the assertion.
+3. **One commit, so the §12 ratchet is argued rather than crossed.**
+   `ForgetDeleted` is `Forget` plus the record in one transaction, `SetEcho` drops
+   any tombstone in *its* transaction (a sync and a deletion are contradictory
+   claims about one path, and at most one is ever stored), and `ForgetMany` drops
+   them too — which is how the commonest retirement, the feed agreeing the object
+   is gone, costs nothing. `TestUnlinkCommitsPerFile` now runs both delete shapes.
+4. **A baseline with no identity is not entombed** — it could match nothing, so
+   storing it would spend a record to say nothing. That is the directory case on a
+   provider reporting no version for one, and it costs nothing here because
+   **nothing reported the directory in the first place**: the resurrected
+   directory was created by the *download* as its parent, so suppressing the file
+   is what keeps it away. The probe log is the evidence — `pull=2 mkdir=0`.
+5. **The sweep asks the same question and prunes the records.** A listing can be
+   taken inside the same window, so `reconcileRemote` consults it too (before
+   `wouldMaterialize`, so the summary does not count a suppression as a file it
+   reconciled), and the sweep is where expired records go. A mount that never
+   completes one keeps a record per deleted path, of a size with the baseline that
+   path already had; that residual is deliberate, because pruning anywhere else
+   would be a second answer to "is this deletion still live?".
+
+What it does **not** cover: `-max-deletes` is still the only guard on an inferred
+deletion, a tombstone is not a trash, and the §6 cases above are unchanged.
+`internal/syncengine/tombstone_test.go` carries the five mutation-checked
+conditions; `scripts/multiclient/mc23-selfresurrect.sh` is the live repro and is
+how the fix is confirmed against real Drive rather than against a fake.
 
 ## The sync path's two silences (M27)
 

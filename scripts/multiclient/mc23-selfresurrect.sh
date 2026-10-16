@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # mc23-selfresurrect.sh — does a client's own `rm -rf` come back through its own
-# change feed? Found by MC-51's N=1 sweep; reproduced here; unfixed.
+# change feed? Found by MC-51's N=1 sweep, reproduced here, and since
+# 2026-10-16 the live regression check for the fix (DESIGN.md §4.5).
 #
 #   scripts/multiclient/mc23-selfresurrect.sh -d RIGDIR [-r REPO] [-n N] [-c CYCLES]
 #
@@ -22,6 +23,13 @@
 # window. Cycle 1 is the likeliest, because the inbound cadence has not yet
 # backed off. A run where every cycle reads `gone` has not disproved anything —
 # which is the whole reason this is a loop and not a single pass.
+#
+# Against a FIXED build the same race still happens; what changes is what drivel
+# does with it. So read the two columns together: `ignore` counts the reports
+# that were recognised as this client's own deletion and dropped, and it is the
+# only positive evidence the window was entered at all. A run with
+# `ignore = 0` everywhere proves nothing either way — the race did not fire.
+# `download > 0` or a PRESENT directory is the defect, fixed build or not.
 set -euo pipefail
 
 rig=; repo=; n=20; cycles=8
@@ -71,7 +79,7 @@ for _ in $(seq 1 60); do
 done
 sleep 5
 
-printf '%-8s %-7s %-7s %-10s %-8s %s\n' cycle pull mkdir download delete "local dir"
+printf '%-8s %-7s %-7s %-10s %-8s %-8s %s\n' cycle pull mkdir download delete ignore "local dir"
 for i in $(seq 1 "$cycles"); do
   mark=$(wc -c < "$log")
   mkdir -p "$rig/c1/mnt/sub$i"
@@ -84,7 +92,8 @@ for i in $(seq 1 "$cycles"); do
   sleep 25   # the feed has to get a chance to report our own removals back
   left=gone
   if [[ -e $rig/c1/data/sub$i ]]; then left="PRESENT <-- the defect"; fi
-  printf '%-8s %-7s %-7s %-10s %-8s %s\n' "$i" \
+  printf '%-8s %-7s %-7s %-10s %-8s %-8s %s\n' "$i" \
     "$(since "$dmark" '[pull]')" "$(since "$dmark" '[pull] mkdir')" \
-    "$(since "$dmark" '[pull] download')" "$(since "$dmark" '[pull] delete')" "$left"
+    "$(since "$dmark" '[pull] download')" "$(since "$dmark" '[pull] delete')" \
+    "$(since "$dmark" '[pull] ignore')" "$left"
 done

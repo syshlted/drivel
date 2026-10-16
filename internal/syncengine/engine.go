@@ -732,10 +732,14 @@ func (e *Engine) push(ctx context.Context, ev fsevent.Event) error {
 		return e.pushContent(ctx, ev.Path, ev.Dirty)
 
 	case fsevent.OpUnlink, fsevent.OpRmdir:
+		// The baseline is read BEFORE the removal, because it is the record the
+		// removal invalidates and the only identity by which a later stale report
+		// of this object can be recognised as our own. See entombPath.
+		base := e.baselineOf(ev.Path)
 		if err := e.store.Remove(ctx, ev.Path); err != nil {
 			return err
 		}
-		e.forgetPath(ev.Path)
+		e.entombPath(ev.Path, base)
 		e.logf("[sync] delete   %s", ev.Path)
 		return nil
 
@@ -1046,6 +1050,52 @@ func (e *Engine) forgetPath(p string) {
 		return
 	}
 	if err := e.state.Forget(p); err != nil {
+		e.logf("[sync] forget state %s: %v", p, err)
+	}
+}
+
+// baselineOf returns the §4 baseline recorded for p, or the zero Echo when there
+// is none — which reads as "no identity", the same answer as a record that has
+// neither a hash nor a version. A failed read is logged and treated the same
+// way: the fallback is the behaviour that predates tombstones.
+func (e *Engine) baselineOf(p string) state.Echo {
+	if e.state == nil {
+		return state.Echo{}
+	}
+	echo, ok, err := e.state.GetEcho(p)
+	if err != nil {
+		e.logf("[sync] read baseline %s: %v", p, err)
+		return state.Echo{}
+	}
+	if !ok {
+		return state.Echo{}
+	}
+	return echo
+}
+
+// entombPath drops every state record for p exactly as forgetPath does, and
+// leaves base behind as a tombstone so that a provider still serving its
+// pre-deletion view of p is recognised as such instead of being applied.
+//
+// Without it, a deletion erases the one thing §4 compares against, so the
+// provider's own stale report of the object we just removed arrives as an
+// ordinary remote create and is downloaded back. See state.Tombstone for the
+// measurement and for why a file heals and a directory does not.
+//
+// A baseline with no identity cannot recognise anything, so it is not stored:
+// a tombstone holding neither hash nor version would match no report, and
+// writing it would spend a record to say nothing. The commit count is the
+// same either way — one.
+func (e *Engine) entombPath(p string, base state.Echo) {
+	if e.state == nil {
+		return
+	}
+	if base.Hash == "" && base.Version == "" {
+		e.forgetPath(p)
+		return
+	}
+	t := state.Tombstone{Echo: base, Deleted: time.Now()}
+	if err := e.state.ForgetDeleted(p, t); err != nil {
 		e.logf("[sync] forget state %s: %v", p, err)
 	}
 }

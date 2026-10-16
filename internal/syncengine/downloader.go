@@ -32,6 +32,24 @@ type Cadence struct {
 // DefaultCadence is the ~2s-active / ~30s-idle default.
 var DefaultCadence = Cadence{Fast: 2 * time.Second, Slow: 30 * time.Second}
 
+// tombstoneWindow is how long after deleting an object we still recognise the
+// provider's report of it as a stale view rather than as news (see
+// state.Tombstone and suppressDeleted).
+//
+// It has to exceed the lag between a deletion and the provider's feed agreeing
+// that it happened. On Drive that lag is the trash flag reaching a trashed
+// folder's children, which was single-digit seconds in the run that found this,
+// and which Drive does not specify — so the window is an order of magnitude
+// above the only number anyone has measured.
+//
+// What a window that is too long costs is bounded and heals: an object another
+// client re-creates at this exact path, with byte-identical content, inside the
+// window is not applied until the next sweep. What one that is too short costs
+// does not heal, which is why the asymmetry points this way. It is not a Config
+// knob for the same reason repairDelay is not: it describes a provider's
+// behaviour, not a preference.
+const tombstoneWindow = 5 * time.Minute
+
 // Downloader runs the inbound pull loop: it polls a provider.ChangeSource and
 // applies remote deltas to the backing directory, using the echo-suppression
 // store so it never re-applies the uploader's own writes (DESIGN.md §3–§4).
@@ -438,6 +456,19 @@ func (d *Downloader) applyTo(ctx context.Context, ch provider.RemoteChange, forg
 	if hasEcho && echo.Matches(f.Hash, f.Version) {
 		return nil
 	}
+	// The same test one step further back: a path WE deleted, whose provider is
+	// still reporting the content the deletion removed. Only when there is no
+	// live echo, because an echo means the path has been synced since and a sync
+	// clears the tombstone — so the two can never both answer.
+	if !hasEcho {
+		drop, sErr := d.suppressDeleted(ch.Path, f)
+		if sErr != nil {
+			return sErr
+		}
+		if drop {
+			return nil
+		}
+	}
 
 	if f.IsDir {
 		if err := os.MkdirAll(dst, 0o755); err != nil {
@@ -514,6 +545,39 @@ func (d *Downloader) materialize(ctx context.Context, rel, dst string, f *provid
 	}
 	d.logf("[pull] placeholder %s (%d bytes, hydrates on read)", rel, f.Size)
 	return nil
+}
+
+// suppressDeleted reports whether a remote report of rel is this mount's own
+// deletion coming back — §4's loop breaker applied across the delete that
+// cleared the baseline it normally compares against.
+//
+// Both inbound paths ask: the feed, where the defect was found, and the sweep,
+// whose listing can be taken inside the same window. Two conditions, and
+// neither is sufficient alone. The record must be live, because a provider that
+// has not caught up within tombstoneWindow is not what this describes. And the
+// report must carry the content the deletion removed — identity, not time:
+// comparing a provider's timestamp against ours is wrong by the skew between
+// two clocks, and a re-creation that is genuinely new content is applied
+// whatever either clock says.
+//
+// A tombstone with no identity never matches (state.Echo.Matches answers false
+// for an empty record), which is the safe direction and is why the engine does
+// not bother writing one.
+func (d *Downloader) suppressDeleted(rel string, f *provider.RemoteFile) (bool, error) {
+	t, ok, err := d.state.Tombstone(rel)
+	if err != nil || !ok {
+		return false, err
+	}
+	age := time.Since(t.Deleted)
+	if age > tombstoneWindow {
+		return false, nil
+	}
+	if !t.Echo.Matches(f.Hash, f.Version) {
+		return false, nil
+	}
+	d.logf("[pull] ignore  %s (deleted here %s ago; the remote is still reporting what we deleted)",
+		rel, age.Round(time.Second))
+	return true, nil
 }
 
 // resolveConflict applies the §6 policy when a remote edit collides with a
