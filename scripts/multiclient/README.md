@@ -157,6 +157,7 @@ scripts/multiclient/mc51-scaling.sh      -d rig -N "1 2 3 5" -c mc03 -k 1024
 scripts/multiclient/mc51-scaling.sh      -d rig -N "1 2 3 5" -c mc20 -m 1024
 scripts/multiclient/mc51-scaling.sh      -d rig -N "1 2 3 5" -c mc23 -n 150
 scripts/multiclient/mc60-mixed.sh        -d rig -m 1024 -n 150   # c3 lazy
+scripts/multiclient/mc23-selfresurrect.sh -d rig -n 20 -c 8   # one client only
 scripts/multiclient/mc44-throughput.sh   -m 64 -n 5          # see MC-44 below
 scripts/multiclient/rig-purge.py         rig/c1 --trash       # empty the remote
 ```
@@ -178,6 +179,15 @@ folder to empty out of a client's own `config.toml` and refuses a root of
 empties the account's trash, which is where drivel's own deletes go
 (`-drive-delete` defaults to `trash`) and where they keep counting against the
 15 GiB quota the next case has to spend.
+
+`mc23-selfresurrect.sh` is the odd one out: it is a **reproduction of an open
+defect** rather than a measurement, and it runs **one** client so that nothing
+else can be the source of the inbound work it is looking for. A client's own
+`rm -rf` can be handed back to it by its own change feed, re-downloading a file
+it just deleted and leaving the re-created directory behind for good. It is a
+race on Drive's trash propagation, so it fires in roughly one cycle in eight and
+most often in the first — **a run where every cycle reads `gone` has disproved
+nothing**, which is why it loops. Read it beside the plan's MC-23 row.
 
 **`find … | head -1` is a landmine under `set -o pipefail`, and it passes the
 smoke test.** `head` closes the pipe after one line, `find` takes SIGPIPE, the

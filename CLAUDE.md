@@ -263,10 +263,25 @@ reads a trashed file as `Removed`, `verifyLocked` already rejects a trashed inde
 hint, and Drive's `trashed` covers a trashed parent's whole subtree, so the
 recursion `Store.Remove` documents still holds — **but that last one propagates
 asynchronously**, which the live test found and no fake would have: right after a
-folder was trashed its child still read `trashed = false`. Nothing depends on the
-timing (an `rm -rf` unlinks the children first, and a sweep racing it parks the
-child on a missing parent and drops it), so don't write code that assumes the flag
-is set the moment `Remove` returns. **Verified against real Drive on 2026-09-09**
+folder was trashed its child still read `trashed = false`, so don't write code
+that assumes the flag is set the moment `Remove` returns. **This note said
+"nothing depends on the timing" until 2026-10-16, and something does: the change
+feed.** A client's own `rm -rf` can be partially undone by its own feed —
+`[sync] delete sub1/e20.txt`, three seconds later `[pull] download
+sub1/e20.txt`, five seconds after that `[pull] delete sub1/e20.txt`. The page
+still reported the child as present, and the delete push had already cleared
+that path's echo, so §4's loop breaker had nothing to match and the change read
+as an ordinary remote create. **The file heals on the next page; the re-created
+directory does not** — the later `[pull] delete` removes only the file, leaving
+an empty directory that is permanent at `sweep-interval = 0`, and *with* a sweep
+is worse: a local-only directory with no echo is the local walk's "new locally"
+row, so the next sweep pushes it back and re-creates remotely a directory the
+user deleted. Reproduced in a single-client probe (1 of 8 seed-and-delete cycles
+— only the cycle whose poll landed inside the window) after MC-51's N=1 row sat
+at `converge = timeout` for an hour. **Unfixed.** The shape of a fix is a
+tombstone carrying a time, so an inbound change older than our own deletion of
+that path is dropped; that is a change to §4 rather than a patch, which is why
+it is written down rather than attempted. See the test plan's MC-23 row. **Verified against real Drive on 2026-09-09**
 via `TestLiveRemoveTrashes` (`DRIVEL_LIVE_RIG`, gated and skipped by default,
 self-cleaning); the fake models the settled state. It defaults to the recoverable
 form because **not every deletion drivel performs was typed by a user**: reconcile
@@ -866,9 +881,12 @@ arithmetic stated** — 100 000 files is ~39 hours of pushing at the 0.71 upload
 MC-50 measured, and a 24-hour soak cannot be compressed without destroying what it
 measures — **MC-10's 5 GiB half and MC-10b**, declined together (~19 min of
 uploading plus ~19 min per puller, 20 GiB of local disk, for an assertion the
-1 GiB run already answers) — and **MC-20/MC-23 at each fleet size** (MC-51's
-remainder, Group VI variants of cases whose base rows are now run).
-**MC-60's three were finished on 2026-10-16** by
+1 GiB run already answers). **Everything else in Group VI is now run**: MC-51's
+three shapes at N = 1, 2, 3 and 5 finished 2026-10-16, holding the traffic law
+exactly at a gigabyte — 1 upload + (N−1) downloads of the whole file, 1.00
+transfers per client, up to **5120 MiB for a 4 KiB edit**, with no 403 and no
+abandoned push anywhere — and turning up the delete-resurrection bug recorded
+under `-drive-delete` above. **MC-60's three were finished the same day** by
 `scripts/multiclient/mc60-mixed.sh` and found nothing wrong: 151 feed deletes
 went through a `-max-deletes` of 100 with zero refusals (the cap bounds
 reconcile inference, not the feed), a file rename lands on a lazy peer as a
