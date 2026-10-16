@@ -4791,6 +4791,26 @@ this whole group walks through, so it is a precondition rather than a note.
     only place both halves are visible at once; it reports two repush lines where
     one is wanted the moment the record is removed.
 
+    **Verified live on 2026-10-16, on both backends, as an A/B rather than a
+    run** — the thing being tested is a silence, and a silence is not evidence on
+    its own. Over a tmpfs SFTP rig, killing a 256 MiB rewrite at a measured 25%
+    of its upload: the pre-fix build left the remote on the previous content
+    after **39 sweeps** with no repush of either kind and the peer never
+    converging, while the fixed build logged `repush … an earlier push never
+    landed` on the **first** sweep after the restart and had the remote and the
+    peer on the rewrite three seconds later. A third leg crashed on the old build
+    and restarted on the new one — the shape a user actually meets — and repaired
+    in two seconds, which also demonstrates the row working off a state DB an
+    older build wrote, as it must, since the fingerprint fields have been stored
+    since M18. The repair bucket was empty in all three, which is the premise of
+    part 4 rather than an aside. Against real Drive the two backend-specific
+    halves hold: the re-push **updates the object** rather than growing a second
+    one at the path (asked of the API directly, because same-name siblings
+    collapse into one local file), and the metadata-only case **settles after one
+    pass** — one repush, one gate-3 skip, no upload, the remote untouched — with
+    a genuinely changed file re-pushed in the same run as the control. The
+    harnesses are `scripts/multiclient/mc40b-lostpush.sh` and `mc40b-drive.sh`.
+
     **Two things M27 still deliberately does not close.** An abandoned
     **deletion** is not repaired: there is no local content to re-send, and
     inferring it later would have to go back through `-max-deletes`, which is

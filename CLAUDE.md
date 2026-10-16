@@ -1454,7 +1454,32 @@ has established that it can be.
    `hashSkipMinSize`. One commit per skipped push settles it — the same budget a
    push that uploads already has, so §12's ratchet is argued rather than crossed.
    `TestARepushedMetadataChangeSettlesAfterOneSweep` is the only place both
-   halves are visible at once. **A live re-run of MC-40 (b) is still owed.**
+   halves are visible at once.
+
+   **Re-run live on 2026-10-16, on both backends, and it is the A/B that is the
+   evidence** — the defect is a *silence*, so one leg establishes nothing.
+   `scripts/multiclient/mc40b-lostpush.sh` takes the build that crashes and the
+   build that comes back up as separate arguments and was run three times over a
+   tmpfs SFTP rig, killing a 256 MiB rewrite at a measured 25% of its upload:
+   pre-fix, **39 sweeps and no repair**; fixed, **the first sweep, 3s**; crashed
+   on the old build and restarted on the new one, **2s** — the shape a user
+   meets, and the one that shows the row reading a state DB an older build wrote,
+   which it can because `LocalSize`/`LocalMTime` have been stored since M18.
+   Exactly **one** repush in each repaired leg, and the repair bucket empty in
+   all three, which is the premise. `mc40b-drive.sh` carries the two halves only
+   Drive can answer, both passing: the re-push **updates the object** rather than
+   growing a second one at the path — one object, not two, which answers MC-40's
+   duplicate half for the repair path — and a metadata-only divergence **settles
+   after one pass** (one repush, one gate-3 skip, no upload, the remote
+   untouched), with a genuinely changed file re-pushed in the same run as the
+   control. Both rigs were interrupted mid-transfer, and the evidence is
+   per backend: the temporary's size on SFTP, and 32.6 MiB of a 64 MiB rewrite
+   already taken by the backend on Drive. Two things the rigs cost to learn: an orphaned backend must be
+   identified by **parentage**, since every live client has a `plugin-serve` of
+   its own and a command-line pattern also matches the shell doing the matching;
+   and `/proc/<pid>/io` cannot see a Drive upload at all, because QUIC sends with
+   `sendmsg` and `wchar` counts the write family — a complete 64 MiB upload moved
+   it 0.10 MiB, while the backend's `rchar` tracked it exactly.
 
 **Two things M27 does not close, and neither is an oversight.** An abandoned
 **deletion** is not repaired — no local content to re-send, and inferring it

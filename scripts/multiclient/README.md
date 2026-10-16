@@ -231,6 +231,19 @@ wants it — but comparing it would mean no case ever converges.
   its own netns and read `nstat`, or derive volume from `logcount.sh` plus the
   known file sizes.
 
+  **`/proc/<pid>/io` is not a third option, and the reason is the project's own
+  HTTP/3 requirement.** `wchar` counts the write family, and QUIC sends with
+  `sendmsg`, which is not in it: a complete 64 MiB upload through `gdrive` moved
+  the backend's `wchar` by **0.10 MiB** (measured 2026-10-16, while reading a
+  column that turned out to measure nothing). What *is* usable there is the
+  **backend's `rchar`** — it receives the file from the host over the plugin
+  socket, flow-controlled end to end, so it tracks an upload's progress closely
+  (64.83 MiB for that same transfer) and is the cheapest way to tell "this
+  transfer is under way" from "this transfer has not started". The host's own
+  counters read ~3x the file size on `rchar` and ~2x on `wchar` for one upload,
+  because the mount, the push and gate 3's hash each read it and the backing
+  write and the socket stream each write it.
+
 ## Group V: injecting failures
 
 Most of Group V is settled in Tier A (`internal/app/failure_test.go`), and what is
@@ -265,17 +278,26 @@ And since M23 the backend runs in its own process, so after the kill, check for 
 orphan:
 
 ```sh
-pgrep -af plugin-serve          # works
-pgrep -af 'drivel plugin-serve' # finds nothing, ever
-pkill  -x drivel                # does NOT reach the child
+# Note the host's pid when you start it, then find ITS child by parentage:
+ps -eo pid,ppid,args | awk -v p="$host" '$2==p && /plugin-serve/ {print $1}'
+kill -9 "$host"; sleep 3; kill -0 "$child"   # succeeds => it outlived its host
+pgrep -af 'drivel plugin-serve'              # finds nothing, ever
+pkill  -x drivel                             # does NOT reach the child
 ```
 
 **The child's command line is `/proc/self/exe plugin-serve <kind>` and its `comm`
-is `exe`**, because that is the path the host re-executes. So match on
-`plugin-serve` and nothing else; a recipe built around the program's name misses
-it and reads as "no orphan". A child that outlives its host is holding the
-account's credentials with nothing driving it — which is what this found, and
-`plugin/liveness.go` is the fix.
+is `exe`**, because that is the path the host re-executes. So a recipe built
+around the program's name misses it and reads as "no orphan". A child that
+outlives its host is holding the account's credentials with nothing driving it —
+which is what this found, and `plugin/liveness.go` is the fix.
+
+**Counting `plugin-serve` processes does not answer this, and the first MC-40 (b)
+re-run got it wrong before the result was read.** Every live client has a backend
+of its own, so a fleet of two always shows at least one; and a pattern over
+command lines matches the shell that runs the pattern, which is the trap this
+README already records for stopping clients. Parentage is the only form that
+discriminates, and it has to be sampled *before* the kill, because afterwards the
+child is reparented to pid 1 and nothing connects it to the host it belonged to.
 
 Two things about getting the kill to land mid-upload. **Trigger on the temporary
 existing, not on its size**: the destination path never holds a partial file
@@ -285,12 +307,47 @@ lose on a slow disk. **Put the rig's backing trees and the SFTP root on tmpfs** 
 a 512 MiB push took 3s there and between 25s and 95s on a 91%-full spinning
 volume, with the variance landing exactly where the kill has to be timed.
 
-And run the case in both shapes, because they do not have the same answer: a kill
+And run the case in both shapes, because they did not have the same answer: a kill
 mid-upload of a **new** file recovers on the next sweep, and a kill mid-upload of a
-**rewrite** of an already-synced file does not recover at all. Set
+**rewrite** of an already-synced file recovered not at all until M27 part 4. Set
 `sweep-interval` long enough that no sweep races the push you are interrupting
 (10m for the client being killed), or the sweep's own push of the same path
-confuses the result.
+confuses the result — and a short one for *after* the restart, which is why the
+rig below carries two configs per client.
+
+**The (b) half is scripted, because its finding is a silence.** Nothing happening
+is not evidence on its own, so the script takes the build to crash and the build
+to come back up as separate arguments and is run three times:
+
+```sh
+# The "before" build comes from a worktree, so the checkout stays where it is:
+git worktree add /tmp/pre <COMMIT_BEFORE_THE_FIX>
+(cd /tmp/pre && CGO_ENABLED=0 go build -o /tmp/pre/bin/drivel ./cmd/drivel)
+
+cp=scripts/multiclient/mc40b-lostpush.sh
+$cp -d "$rig" -b /tmp/pre/bin/drivel                  -m 256 -f 25 -w 300  # the defect
+$cp -d "$rig" -b bin/drivel                           -m 256 -f 25 -w 180  # the fix
+$cp -d "$rig" -b /tmp/pre/bin/drivel -B bin/drivel    -m 256 -f 25 -w 180  # the upgrade
+```
+
+The third is the shape a user meets: the crash happens on whatever was installed
+and the repair is whatever they upgraded to, so it is also the one that shows the
+row works off a state DB an older build wrote. Give the first leg a long watch —
+its claim is "N sweeps and nothing changed", and N is the number that makes it.
+
+Two halves of the case are Drive's alone and are in `mc40b-drive.sh`: whether the
+repair **updates** the object or grows a second one beside it (a path-addressed
+backend cannot pose that question), and whether a metadata-only divergence
+**settles**, since `gdrive` is the tree's only `ContentHasher` and M6 gate 3 runs
+nowhere else. Its oracle is `rig-ls.py`, which lists the folder with digests
+straight from the API — a peer client cannot answer "how many objects are at this
+path?", because same-name siblings collapse into one local file (MC-30).
+
+**Do not edit a script while a run of it is in flight.** bash reads a script
+incrementally and seeks back to a byte offset between commands, so inserting
+lines near the top of a file whose loop is still running resumes the run in the
+middle of a comment. It cost one 7-minute leg here, and the failure looks like a
+product problem rather than a harness one: the run simply stops reporting.
 
 ### MC-44, MC-44b — take the network away from one client
 
