@@ -866,9 +866,15 @@ arithmetic stated** — 100 000 files is ~39 hours of pushing at the 0.71 upload
 MC-50 measured, and a 24-hour soak cannot be compressed without destroying what it
 measures — **MC-10's 5 GiB half and MC-10b**, declined together (~19 min of
 uploading plus ~19 min per puller, 20 GiB of local disk, for an assertion the
-1 GiB run already answers) — plus MC-20/MC-23/MC-26 against the mixed-mode fleet
-and at each fleet size, which are Group VI variants of cases whose base rows are
-now run.
+1 GiB run already answers) — and **MC-20/MC-23 at each fleet size** (MC-51's
+remainder, Group VI variants of cases whose base rows are now run).
+**MC-60's three were finished on 2026-10-16** by
+`scripts/multiclient/mc60-mixed.sh` and found nothing wrong: 151 feed deletes
+went through a `-max-deletes` of 100 with zero refusals (the cap bounds
+reconcile inference, not the feed), a file rename lands on a lazy peer as a
+placeholder at the new path, and the MC-26b directory shape reproduces there too
+and is repaired by a forced sweep. What they *did* change is the cost model —
+see "Lazy hydration" below.
 
 **Groups II and III (2026-10-14/15) found the two worst defects this exercise has
 produced, and both were latent in shipped code**: a folder-scoped sweep that
@@ -946,6 +952,20 @@ Three invariants; breaking any of them loses user data.
    open/truncate/rewrite fetches nothing. FUSE delivers `O_TRUNC` as a separate
    `Setattr` unless `atomic_o_trunc` is negotiated, so `Open` handles only the
    atomic case (dropping the mark), and `Setattr` handles truncation.
+
+**Hydration is not durable, and that decides what lazy mode is for** (MC-60,
+2026-10-16). A hydrated file is an ordinary file with no marker, so the next
+inbound change for that path takes the eager branch: `statMD5` hashes the whole
+local copy, finds it equal to its baseline, and `materialize` replaces it with a
+fresh placeholder — `[pull] placeholder`, not `[pull] restamp`, which is how to
+tell the two apart in a log. Measured on a 1 GiB file: the lazy peer held 4096 B
+against the eager peer's gigabyte, read it in 52s on demand, and the next 4 KiB
+edit threw that copy away. So **lazy mode trades bandwidth for disk and latency,
+and only for files nobody opens** — a client that reads a file after every change
+pays exactly what an eager one pays, on the read's critical path, plus a full
+local hash per change. Nothing here is a bug: the discarded copy was synced, so
+there was nothing for §6 to protect. Don't "fix" it by keeping hydrated content,
+which would make every lazy client an eager one with extra steps.
 
 Also: a failed hydration must return `EIO`, never a short read (zeros served as
 content are silent corruption); and §6 conflict copies are always downloaded in

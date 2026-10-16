@@ -22,6 +22,12 @@ for log in "$@"; do
   # MC-03 found that a successful upload used to log nothing at all.
   printf '  %-34s %s\n' "uploads"                  "$(count '[sync] upload')"
   printf '  %-34s %s\n' "downloads"                "$(count '[pull] download')"
+  # A lazy client does almost no downloading and is not idle: it writes a
+  # placeholder where an eager one writes the file, and re-stamps that
+  # placeholder when the remote changes again. Counting only downloads reports a
+  # mixed-mode fleet's lazy peer as having received nothing at all (MC-60).
+  printf '  %-34s %s\n' "placeholders written"     "$(count '[pull] placeholder')"
+  printf '  %-34s %s\n' "placeholders re-stamped"  "$(count '[pull] restamp')"
   printf '  %-34s %s\n' "outbound deletes"         "$(count '[sync] delete')"
   printf '  %-34s %s\n' "outbound renames"         "$(count '[sync] rename')"
   printf '  %-34s %s\n' "inbound deletes"          "$(count '[pull] delete')"

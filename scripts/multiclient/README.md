@@ -148,23 +148,53 @@ taken today (see the plan, §4.17).
 
 ## Group IV and VI: the case drivers
 
-Three cases have drivers of their own, because each needs a fleet reshaped
+Four cases have drivers of their own, because each needs a fleet reshaped
 around it rather than a workload poured into a fixed one:
 
 ```sh
 scripts/multiclient/mc50-steady-state.sh -d rig -n 300 -m 5 -o rig/results/mc50
-scripts/multiclient/mc51-scaling.sh      -d rig -N "1 2 3 5" -k 1024
+scripts/multiclient/mc51-scaling.sh      -d rig -N "1 2 3 5" -c mc03 -k 1024
+scripts/multiclient/mc51-scaling.sh      -d rig -N "1 2 3 5" -c mc20 -m 1024
+scripts/multiclient/mc51-scaling.sh      -d rig -N "1 2 3 5" -c mc23 -n 150
+scripts/multiclient/mc60-mixed.sh        -d rig -m 1024 -n 150   # c3 lazy
 scripts/multiclient/mc44-throughput.sh   -m 64 -n 5          # see MC-44 below
-scripts/multiclient/rig-purge.py         rig/c1              # empty the remote
+scripts/multiclient/rig-purge.py         rig/c1 --trash       # empty the remote
 ```
 
 `mc50` drives idle / light / heavy cells against a fleet that is **already
 running with one `-pprof` port per client** (6061 upward, in client order) and
 reports through `mc50-report.sh`, which is split out so a run can be
 re-reported without being re-run. `mc51` drives the fleet *size* instead, so it
-starts and stops clients itself and needs them stopped to begin with.
-`rig-purge.py` reads the folder to empty out of a client's own `config.toml`
-and refuses a root of `root`, so it hardcodes neither a path nor an account.
+starts and stops clients itself and needs them stopped to begin with; `-c`
+picks which of MC-51's three shapes runs at each size, and they are three
+separate runs rather than one, because a fleet moving a gigabyte per size is
+nothing like one moving a megabyte and the failure of either should not take
+the other's results with it. `mc60-mixed.sh` builds the **mixed-mode** fleet
+(c1 and c2 eager, c3 `lazy = true`) and runs MC-20, MC-23 and MC-26 against it;
+it derives `config-mc60.toml` from each client's own config rather than editing
+it, so a failed attempt leaves the rig as it was. `rig-purge.py` reads the
+folder to empty out of a client's own `config.toml` and refuses a root of
+`root`, so it hardcodes neither a path nor an account; `--trash` additionally
+empties the account's trash, which is where drivel's own deletes go
+(`-drive-delete` defaults to `trash`) and where they keep counting against the
+15 GiB quota the next case has to spend.
+
+**`find … | head -1` is a landmine under `set -o pipefail`, and it passes the
+smoke test.** `head` closes the pipe after one line, `find` takes SIGPIPE, the
+command substitution returns 141, and `set -e` ends the run — but only once the
+tree is big enough that `find` is still writing when `head` leaves. A 10-entry
+rehearsal of MC-23 passed; the 150-entry run died one statement before the
+`rm -rf` the case exists for, with every counter at zero and nothing in the log
+to say why. Use `find … -print -quit`, which needs no pipe. Same family as the
+`pgrep -f` and `wait` traps above: the failure arrives as a case that "found
+nothing" rather than as an error.
+
+**Poll the cheap signal, hash only when it moves.** Both drivers wait for
+convergence by content, and the obvious implementation — hash every client's
+copy every second — costs N GiB of reads per second at MC-20's file size, which
+is more I/O than the transfers being measured and is charged to the rig rather
+than to the product. They poll `(size, mtime)` and hash a client only when its
+signature changes; a download lands by rename, so that is once per client.
 
 Two things these drivers learned the hard way, both worth copying into the next
 one. **Count after a settle, never at the moment a condition goes true**: MC-51
