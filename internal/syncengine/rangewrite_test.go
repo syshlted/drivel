@@ -477,6 +477,65 @@ func TestUnchangedContentSkipsUpload(t *testing.T) {
 	}
 }
 
+// The skip records a baseline, and the sweep is why.
+//
+// A digest match against what Stat reports now is the strongest evidence this
+// engine ever has that the two sides agree, and M27's lost-push row reads exactly
+// that record — state.Echo's local size and mtime. A metadata-only change moves
+// the mtime without moving a byte, so the row proposes a push, and until this the
+// skip left the record untouched and the same push was proposed again on the next
+// mount, forever. One commit settles it, which is the budget a push that uploads
+// already has.
+func TestUnchangedContentSkipRecordsTheBaseline(t *testing.T) {
+	dir := t.TempDir()
+	st := newState(t)
+	store := newPatchStore()
+
+	body := bigBody('a')
+	local := filepath.Join(dir, "a.bin")
+	if err := os.WriteFile(local, body, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	syncedAt(t, st, store, "a.bin", body)
+	// Same bytes, later mtime: what a touch, or an editor saving an unchanged
+	// buffer, leaves behind.
+	later := time.Now().Add(time.Minute)
+	if err := os.Chtimes(local, later, later); err != nil {
+		t.Fatal(err)
+	}
+
+	e := New(Config{Store: store, DataDir: dir, State: st})
+	base := st.Commits()
+	if err := e.pushContent(context.Background(), "a.bin", nil); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := store.ops(); len(got) != 0 {
+		t.Fatalf("unchanged content should upload nothing; got %v", got)
+	}
+	if got := st.Commits() - base; got != commitsPerPush {
+		t.Errorf("a skipped push committed %d time(s), want %d", got, commitsPerPush)
+	}
+	echo, ok, err := st.GetEcho("a.bin")
+	if err != nil || !ok {
+		t.Fatalf("no baseline after the skip (ok=%v, err=%v)", ok, err)
+	}
+	if echo.LocalMTime.IsZero() {
+		t.Fatal("the skip recorded no local fingerprint, so a sweep will propose this push again on every mount")
+	}
+	fi, err := os.Stat(local)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fingerprintDiverged(fi, echo) {
+		t.Errorf("baseline describes size %d mtime %v; the file is size %d mtime %v",
+			echo.LocalSize, echo.LocalMTime, fi.Size(), fi.ModTime())
+	}
+	if want := store.file("a.bin").Hash; echo.Hash != want {
+		t.Errorf("baseline hash = %q; want what Stat reported, %q", echo.Hash, want)
+	}
+}
+
 // The gate must open the moment the content really differs, or a real edit would
 // be silently dropped.
 func TestChangedContentStillUploads(t *testing.T) {

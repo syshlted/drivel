@@ -390,12 +390,18 @@ func (d *Downloader) runSweep(ctx context.Context, sw state.Sweep) (string, erro
 	started := time.Now()
 	var st sweepStats
 	stalled := false
+	// Paths the local walk's lost-push row must leave alone, for either of two
+	// reasons that amount to the same thing: this sweep has already acted on the
+	// path (an owed repair re-sent it), or this sweep could not establish what the
+	// remote holds there (the remote pass errored), so pushing over it would be a
+	// guess. See repushDiverged.
+	noRepush := map[string]struct{}{}
 	for {
 		files, next, err := d.enum.Enumerate(ctx, sw.Cursor)
 		if err != nil {
 			return "", fmt.Errorf("enumerate: %w", err)
 		}
-		if err := d.applyPage(ctx, sw, files, &st); err != nil {
+		if err := d.applyPage(ctx, sw, files, &st, noRepush); err != nil {
 			return "", err
 		}
 		if next != "" && next == sw.Cursor {
@@ -443,7 +449,7 @@ func (d *Downloader) runSweep(ctx context.Context, sw state.Sweep) (string, erro
 	// a fresh echo, so the walk then skips the path for the ordinary reason.
 	// Owed repairs are independent of the listing: they re-send paths this engine
 	// itself abandoned, which is true whatever the sweep saw.
-	d.pushOwedRepairs(ctx, &st)
+	d.pushOwedRepairs(ctx, &st, noRepush)
 	if stalled {
 		// Neither remaining pass may run on a prefix. The delete pass would read
 		// every unlisted path as deleted remotely; the local walk would read every
@@ -455,7 +461,7 @@ func (d *Downloader) runSweep(ctx context.Context, sw state.Sweep) (string, erro
 		d.logf("[sweep] reconcile INCOMPLETE in %s: %s", time.Since(started).Round(time.Millisecond), st)
 		return sw.Token, nil
 	}
-	d.pushLocalOnly(ctx, sw, &st)
+	d.pushLocalOnly(ctx, sw, &st, noRepush)
 	if err := d.applyDeletes(ctx, sw, &st); err != nil {
 		d.logf("[sweep] delete pass: %v", err)
 	}
@@ -501,6 +507,8 @@ type sweepStats struct {
 	orphaned    int // baselines dropped without acting: gone locally, unlisted remotely
 	special     int // local non-regular files stepped over: no byte stream to sync (M15)
 	repaired    int // paths re-pushed after the outbound path gave up on them (M27)
+	repushed    int // paths re-pushed because the local copy no longer matched its baseline
+	unverified  int // baselines with no local fingerprint, so divergence could not be judged
 }
 
 // kindOf names a file type for the one job of telling a user which of their files
@@ -546,11 +554,22 @@ func (s sweepStats) String() string {
 	if s.repaired > 0 {
 		out += fmt.Sprintf(", %d re-pushed after an abandoned upload", s.repaired)
 	}
+	if s.repushed > 0 {
+		out += fmt.Sprintf(", %d re-pushed after diverging from its baseline", s.repushed)
+	}
+	if s.unverified > 0 {
+		out += fmt.Sprintf(", %d baseline(s) with no fingerprint to check", s.unverified)
+	}
 	return out
 }
 
 // applyPage reconciles one page of remote objects.
-func (d *Downloader) applyPage(ctx context.Context, sw state.Sweep, files []provider.RemoteFile, st *sweepStats) error {
+//
+// noRepush collects the paths this page could not settle. A failed download or a
+// failed §6 conflict copy leaves us without an answer to "what does the remote
+// hold here?", and the local walk's lost-push row must not supply one by
+// uploading over it — see repushDiverged.
+func (d *Downloader) applyPage(ctx context.Context, sw state.Sweep, files []provider.RemoteFile, st *sweepStats, noRepush map[string]struct{}) error {
 	if len(files) == 0 {
 		return nil
 	}
@@ -573,6 +592,7 @@ func (d *Downloader) applyPage(ctx context.Context, sw state.Sweep, files []prov
 			if ctx.Err() != nil {
 				return ctx.Err()
 			}
+			noRepush[f.Path] = struct{}{}
 			d.logf("[sweep] %s: %v", f.Path, err)
 		}
 	}
@@ -641,7 +661,7 @@ func (d *Downloader) wouldMaterialize(f provider.RemoteFile) bool {
 // ordering is a crash in between, which loses one path's record — against a
 // clear-afterwards that would lose the repair itself, silently, every time it
 // failed twice.
-func (d *Downloader) pushOwedRepairs(ctx context.Context, st *sweepStats) {
+func (d *Downloader) pushOwedRepairs(ctx context.Context, st *sweepStats, noRepush map[string]struct{}) {
 	if d.rec.Push == nil || d.state == nil {
 		return
 	}
@@ -658,6 +678,14 @@ func (d *Downloader) pushOwedRepairs(ctx context.Context, st *sweepStats) {
 	for _, rel := range owed {
 		if ctx.Err() != nil {
 			return
+		}
+		// Claimed whether or not it is re-sent, so the walk does not make a second
+		// decision about a path this pass has already decided: a repair that was
+		// abandoned again would otherwise be pushed twice in one sweep, and a
+		// repair declined for being a placeholder or a special file would be
+		// re-examined by a row with less to go on.
+		if noRepush != nil {
+			noRepush[rel] = struct{}{}
 		}
 		ev, ok := d.repairEvent(rel)
 		if err := d.state.ClearRepair(rel); err != nil {
@@ -705,15 +733,21 @@ func (d *Downloader) repairEvent(rel string) (fsevent.Event, bool) {
 	return fsevent.Event{Op: fsevent.OpWrite, Path: rel}, true
 }
 
-// pushLocalOnly walks the backing tree and pushes files that exist only there.
+// pushLocalOnly walks the backing tree and pushes the files the remote has not
+// heard about: the ones that exist only there, and the ones whose local copy no
+// longer matches the baseline it was last synced at.
 //
-// This is the "new locally" row, and it needs a local walk because nothing else
-// knows about a file the mount never saw created — an edit made while drivel was
-// down, or in in-place mode, a file dropped into the directory between runs. The
-// walk is local I/O and its only action is a push, so unlike the delete passes it
-// needs no cap and no flag: the worst case is uploading a file that belongs in a
-// directory the user is syncing anyway.
-func (d *Downloader) pushLocalOnly(ctx context.Context, sw state.Sweep, st *sweepStats) {
+// The first is the "new locally" row, and it needs a local walk because nothing
+// else knows about a file the mount never saw created — an edit made while drivel
+// was down, or in in-place mode, a file dropped into the directory between runs.
+// The second is the lost-push row, which the same walk can answer for the price
+// of one stat because it is already visiting every file; repushDiverged has the
+// reasoning and the four things that narrow it.
+//
+// The walk is local I/O and its only action is a push, so unlike the delete
+// passes it needs no cap and no flag: the worst case is uploading a file that
+// belongs in a directory the user is syncing anyway.
+func (d *Downloader) pushLocalOnly(ctx context.Context, sw state.Sweep, st *sweepStats, noRepush map[string]struct{}) {
 	if d.rec.Push == nil {
 		return
 	}
@@ -760,8 +794,15 @@ func (d *Downloader) pushLocalOnly(ctx context.Context, sw state.Sweep, st *swee
 		if d.mat != nil && d.mat.IsPlaceholder(rel) {
 			return nil
 		}
-		if _, ok, err := d.state.GetEcho(rel); err != nil || ok {
-			return nil //nolint:nilerr // has a baseline (or the store is unreadable, which means the same here): handled by the rows that need one
+		echo, hasEcho, err := d.state.GetEcho(rel)
+		if err != nil {
+			return nil //nolint:nilerr // unreadable store: both rows below need the baseline it cannot read
+		}
+		if hasEcho {
+			// Not new locally, so the only question left is whether the local copy
+			// is still the one the baseline describes.
+			d.repushDiverged(ctx, sw, rel, p, echo, noRepush, st)
+			return nil
 		}
 		if seen, err := d.state.SeenPath(sw.Gen, rel); err != nil || seen {
 			return nil //nolint:nilerr // seen remotely (or the store is unreadable, which means the same here): apply already reconciled it
@@ -774,6 +815,84 @@ func (d *Downloader) pushLocalOnly(ctx context.Context, sw state.Sweep, st *swee
 	if err != nil && ctx.Err() == nil {
 		d.logf("[sweep] walking the backing tree: %v", err)
 	}
+}
+
+// repushDiverged is the lost-push row: a path that has a baseline whose LOCAL
+// copy no longer matches it.
+//
+// M27 repairs a push the engine gave up on, because giving up is code that runs
+// and can record the path. A push lost to kill -9, a power cut, an OOM kill or a
+// shutdown drain that timed out records nothing, and no other row of the
+// three-way table proposes it: the remote still holds the content the baseline
+// describes, so the remote pass matches the echo and correctly does nothing,
+// while the walk's own "new locally" row skips every path that has a baseline at
+// all. Measured over 44 sweeps that changed nothing (MC-40 (b)) before this
+// existed.
+//
+// Four things narrow it, and each one is a failure mode rather than a nicety.
+//
+// **The local mtime must predate this mount's open.** A write this process
+// received is one the engine is already answerable for — in the debounce map, in
+// a worker queue, in flight, or in the repair bucket if it was abandoned — and
+// within one process lifetime nothing is silently lost, because vfs.node.emit
+// blocks rather than drops. So the divergences worth re-pushing are the ones
+// that predate the process, which is exactly what openedAt dates. Without that
+// bound this row re-uploads a file a long copy is still writing, once per sweep,
+// and on a feedless backend the sweep interval is the poll interval — seconds —
+// so a single large copy would cost a whole upload per tick. It also leaves
+// push-on-close deciding when a *held-open* file is sent: its mtime keeps
+// moving, so this row never claims it.
+//
+// **A baseline with no local fingerprint is no evidence.** state.Echo's
+// LocalMTime is zero for an echo written before M18 added the field and for a
+// stat that failed, and the delete rows already refuse to read that as
+// "matches". This row refuses to read it as "differs", for the mirror reason
+// plus one of its own: a wrong guess here costs an upload and a commit for every
+// path in the tree, where the delete rows' wrong guess is bounded by
+// -max-deletes. Counted rather than logged per path, so a state DB that answers
+// this for everything says so once per sweep.
+//
+// **Never a path the sweep could not settle**, nor one pushOwedRepairs has
+// already claimed (both arrive through noRepush). If the download or the §6
+// conflict copy for this path failed, we do not know what the remote holds, and
+// a whole-file Put over it would publish one side of a conflict without keeping
+// the other — the one outcome §6 exists to prevent.
+//
+// **Only a path this sweep listed.** A baseline whose path the remote did not
+// report belongs to the delete pass, which has strictly more to go on — a local
+// copy, its fingerprint, and the fact that the remote lost the object.
+//
+// The order of the checks is cost, not taste: the local stat is what this walk is
+// already doing, and the overwhelming majority of paths stop at the fingerprint
+// comparison, so nothing else may ask the state store ahead of it. That keeps the
+// row at the one stat per file it was costed at, with a read transaction only for
+// a path about to be pushed.
+func (d *Downloader) repushDiverged(ctx context.Context, sw state.Sweep, rel, abs string, e state.Echo, noRepush map[string]struct{}, st *sweepStats) {
+	fi, err := os.Stat(abs)
+	if err != nil {
+		return // vanished or unreadable since the walk saw it; nothing to send
+	}
+	if !fi.ModTime().Before(d.openedAt) {
+		return
+	}
+	if e.LocalMTime.IsZero() {
+		st.unverified++
+		return
+	}
+	if !fingerprintDiverged(fi, e) {
+		return
+	}
+	if _, claimed := noRepush[rel]; claimed {
+		return
+	}
+	if seen, err := d.state.SeenPath(sw.Gen, rel); err != nil || !seen {
+		return //nolint:nilerr // unlisted (or unreadable, which is not evidence): the delete pass owns it
+	}
+	// Nil extents, as for an owed repair: the baseline cannot say which bytes
+	// changed, and M6's invariant is that unknown extents mean the whole file.
+	d.logf("[sweep] repush  %s (local copy diverged from its baseline; an earlier push never landed)", rel)
+	d.rec.Push.Push(ctx, fsevent.Event{Op: fsevent.OpWrite, Path: rel})
+	st.repushed++
 }
 
 // applyDeletes runs the two rows of the table that remove something. It is the
@@ -986,10 +1105,21 @@ func matchesFingerprint(dst string, e state.Echo) (bool, string) {
 	if err != nil {
 		return false, fmt.Sprintf("it could not be read (%v)", err)
 	}
-	if fi.Size() != e.LocalSize || !fi.ModTime().Equal(e.LocalMTime) {
+	if fingerprintDiverged(fi, e) {
 		return false, "it was modified locally since"
 	}
 	return true, ""
+}
+
+// fingerprintDiverged reports whether e's local fingerprint is recorded AND no
+// longer describes fi. Both halves matter, and the callers differ only in what
+// they do with "not recorded": the delete rows keep the file, the lost-push row
+// declines to send it. Neither may read it as a match.
+func fingerprintDiverged(fi os.FileInfo, e state.Echo) bool {
+	if e.LocalMTime.IsZero() || fi == nil || fi.IsDir() {
+		return false
+	}
+	return fi.Size() != e.LocalSize || !fi.ModTime().Equal(e.LocalMTime)
 }
 
 // conflictRe matches the names conflictName generates. Conflict copies are

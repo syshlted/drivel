@@ -176,7 +176,7 @@ func TestARepairThatFailsAgainStaysOwed(t *testing.T) {
 	dl := NewDownloader(nil, newFakeStore(), dir, st, DefaultCadence)
 	var stats sweepStats
 	dl.rec = ReconcileOptions{Push: engine}
-	dl.pushOwedRepairs(context.Background(), &stats)
+	dl.pushOwedRepairs(context.Background(), &stats, nil)
 
 	if stats.repaired != 1 {
 		t.Fatalf("repaired = %d; want 1 attempt", stats.repaired)
@@ -200,7 +200,7 @@ func TestARepairForAVanishedPathIsDropped(t *testing.T) {
 	dl.rec = ReconcileOptions{Push: push}
 
 	var stats sweepStats
-	dl.pushOwedRepairs(context.Background(), &stats)
+	dl.pushOwedRepairs(context.Background(), &stats, nil)
 
 	if ops := push.ops(); len(ops) != 0 {
 		t.Errorf("pushes = %v; want none for a path that is gone locally", ops)
@@ -228,7 +228,7 @@ func TestARepairForADirectoryPushesMkdir(t *testing.T) {
 	dl.rec = ReconcileOptions{Push: push}
 
 	var stats sweepStats
-	dl.pushOwedRepairs(context.Background(), &stats)
+	dl.pushOwedRepairs(context.Background(), &stats, nil)
 
 	if got, want := push.ops(), []string{"mkdir sub"}; !equal(got, want) {
 		t.Fatalf("pushes = %v; want %v", got, want)
@@ -249,7 +249,7 @@ func TestARepairNeverPushesAPlaceholder(t *testing.T) {
 	dl.rec = ReconcileOptions{Push: push}
 
 	var stats sweepStats
-	dl.pushOwedRepairs(context.Background(), &stats)
+	dl.pushOwedRepairs(context.Background(), &stats, nil)
 
 	if ops := push.ops(); len(ops) != 0 {
 		t.Fatalf("pushes = %v; a placeholder must never be re-pushed", ops)

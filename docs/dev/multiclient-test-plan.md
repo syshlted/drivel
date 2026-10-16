@@ -335,7 +335,7 @@ measure of whether a case would have hit a real user's quota.
 | `\[pull\] conflict` | §6 resolution |
 | `attempt .* failed, retrying` | Transient/quota pressure |
 | `failed after .* attempt` | **Pushes abandoned — data not sent *yet*.** `executeWithRetry` allows 5 attempts over ~7.5s of jittered backoff and then drops the event, so the local file is correct and the remote has not heard about it. **Since M27 (2026-10-12) the path is recorded** and the next sweep is brought forward ~5 minutes to re-send it — including under `sweep-interval = "0"`, which §2.3 sets for every live case — so this line now measures *latency and repair*, not permanent divergence. Count it with `\[sweep\] repush` below: the pair is the recovery, and this line alone with no repush following it is the thing to escalate. Counting the retry line without this one is still the wrong asymmetry |
-| `\[sweep\] repush` | **An abandoned push being repaired** (M27). Its absence after a `failed after` line is the signal |
+| `\[sweep\] repush` | **A push being re-sent** (M27). Two causes, and the parenthetical names which: `(an earlier push was abandoned)` is the repair bucket, so its absence after a `failed after` line is the signal; `(local copy diverged from its baseline)` is part 4's row finding a push that was *lost* — a crash, a power cut, a drain that timed out, or a backing file written while the mount was down — which no `failed after` line precedes, because nothing ran to print one |
 | `back-pressure: writes through the mount` | **The mount is blocking writes on the uploader** (M27). One line per episode, paired with `back-pressure: cleared`; an unpaired one means it is still going on. This is the thing MC-11 measured as a 1286-deep backlog and could only infer. Its first number is often well short of the 1280 bound — paths are hashed to workers, so one busy worker blocks at `eventBuffer + 64` while the others idle, first observed at 646 of 1280 — and the second (`N awaiting dispatch`) is the backlog behind it, which a bulk copy makes large. **Count both lines, which `logcount.sh` now does**: MC-12 found the report flapping 235 times in one burst, and MC-36's "exactly one line per client" was never counted by anything |
 | `\[drive\] .* share the name` | Same-name siblings — **silent data loss** |
 | `\[sweep\] REFUSING to delete` | `-max-deletes` abandoned a pass |
@@ -411,7 +411,7 @@ parallel, print the spread, and let the number be the evidence.
 | ID | Setup / action | Expected | Catches |
 |---|---|---|---|
 | **MC-40** | `kill -9` A mid-upload of a large file. Restart. | **Run 2026-10-13**, two `drivel` processes over a local sshd (the MC-47 rig; Drive's resumable-session half is still unrun — see below). It found three defects, and the one the case was written to look for was there: **the backend process outlived its host indefinitely.** go-plugin ends a plugin by having the host call `Client.Kill`, and `kill -9` runs no code, so the child went on holding the account's credentials and its connection to the provider with nothing driving it — one more per crash-restart cycle, still alive 11 minutes later. Fixed by a liveness pipe the host holds for its own lifetime (`plugin/liveness.go`); pinned by `TestABackendExitsWhenItsHostLetsGoOfThePipe`, which fails in 11s against the unguarded `Serve`. **The destination path is never left holding a partial file** — M18 rule 7's write-to-temp-then-rename, confirmed live from both sides: killed mid-transfer at 161 MB of 537 MB, the remote still held the previous content byte for byte. **A new file recovers on the next sweep and converges**, by the local walk's "no echo, therefore new locally" row, byte-identical, with no duplicate — and the duplicate half of this case is **Drive-specific by construction**, since a path-addressed backend cannot grow a second object at one path. The stranded temporary is now the normal outcome of a crash rather than a rarity, because the child exits promptly instead of unwinding; `Enumerate` skips the prefix so it is invisible, but nothing reclaims it, and that is the open follow-up the fix created. | Crash-consistency of the push path. |
-| **MC-40 (b)** | The same kill, but mid-upload of a *rewrite* of a file that is already synced. | **The divergence is never repaired, and this is M27's blind spot rather than a regression.** Local holds the rewrite, the remote holds the previous content, and 44 sweeps over 7 minutes — past `repairDelay` — changed nothing: no push, no conflict copy, no repair record. **A crash is strictly worse than an outage here.** `Engine.oweRepair` runs when a push *gives up*, which is code; `kill -9` runs none, so the repair bucket is empty, while `pushLocalOnly` skips the path for having an echo and the remote pass matches that echo and correctly does nothing — the three-way silence M27's own entry describes, reached by the one route M27 does not cover. Recording the debt *before* the push would close it and is declined for the reason DESIGN.md §12 gives: it is the persistent outbound queue, and it doubles the commit count of every push. The cheaper candidate, and the one to weigh first, is to let the local walk consult the baseline fingerprint it already stores — `state.Echo.LocalSize`/`LocalMTime`, which `matchesBaseline` reads for the delete rows — so that a path whose local file no longer matches its own baseline is pushed rather than skipped. No new state, no extra commits, one `lstat` per file per sweep on a walk that already visits every file, and it would also have covered MC-44b without a repair bucket at all. Unscheduled; see §4's item. | That M27 repairs an abandoned push and not a lost one. |
+| **MC-40 (b)** | The same kill, but mid-upload of a *rewrite* of a file that is already synced. | **As measured: the divergence was never repaired — M27's blind spot rather than a regression, and fixed since (see the end of this cell).** Local holds the rewrite, the remote holds the previous content, and 44 sweeps over 7 minutes — past `repairDelay` — changed nothing: no push, no conflict copy, no repair record. **A crash is strictly worse than an outage here.** `Engine.oweRepair` runs when a push *gives up*, which is code; `kill -9` runs none, so the repair bucket is empty, while `pushLocalOnly` skips the path for having an echo and the remote pass matches that echo and correctly does nothing — the three-way silence M27's own entry describes, reached by the one route M27 does not cover. Recording the debt *before* the push would close it and is declined for the reason DESIGN.md §12 gives: it is the persistent outbound queue, and it doubles the commit count of every push. The cheaper candidate, and the one to weigh first, is to let the local walk consult the baseline fingerprint it already stores — `state.Echo.LocalSize`/`LocalMTime`, which `matchesBaseline` reads for the delete rows — so that a path whose local file no longer matches its own baseline is pushed rather than skipped. No new state, no extra commits, one `lstat` per file per sweep on a walk that already visits every file, and it would also have covered MC-44b without a repair bucket at all. **FIXED 2026-10-16 as M27 part 4** (§4.20 has what the wiring-up changed): the walk's new `repushDiverged` row re-sends a path whose local fingerprint no longer matches its baseline, bounded to files last modified before the mount opened, and M6 gate 3 now records the baseline it verified so a metadata-only change converges after one pass. Pinned in Tier A by `internal/syncengine/lostpush_test.go`; **a live re-run of this row is still owed.** | That M27 repairs an abandoned push and not a lost one. |
 | **MC-41** | `kill -9` C mid-sweep (during MC-01's initial enumeration). Restart. | **Confirmed in Tier A**, as predicted and with the prediction's mechanism intact: a sweep paged at 2, held at its first page boundary and then stopped, leaves a sweep record carrying the page-two cursor; the next start logs `[sweep] resuming the enumeration interrupted at …` and completes over **exactly the four objects it had not reached**, deleting nothing on either side. That count is the assertion that matters — a sweep that silently restarted would list all six, mark every one of them seen, and never consult a mark. Giving the resumed sweep a fresh generation (an in-memory seen-set, in one line) deletes exactly the two files the dead run had already consumed, locally, reporting `2 deleted locally` as the ordinary resolution of a bulk remote delete. Pinned by `TestFleetResumesAnInterruptedSweepWithoutInferringDeletes`. Still Tier B: the literal `kill -9`, and a sweep large enough for the resume to matter in wall-clock. | The M7b resume path — an in-memory seen-set would delete the user's data here. |
 | **MC-42** | Delete C's `drivel-index.db` while stopped; restart. | Degrades to `files.list` name lookups. **No duplicates created, no data lost** — only latency and quota. **Answered below the seam and not in the fleet**: the index is Drive-private and a path-addressed fake has none to lose, so the regression tests for it are `TestResolutionWorksWithNoIndexAtAll`, `TestResolveFindsExistingRemoteFileWithColdIndex` and `TestStatFindsRemoteFileAfterRestart` in `internal/provider/gdrive`, which are where an index-shaped mistake is visible at all. Still Tier B: what the degradation *costs* against real Drive, which is the half nobody can fake. | M7 invariant 2. Before M7, this produced duplicate uploads beside real files. |
 | **MC-43** | With C in `-lazy` mode holding placeholders, delete C's `drivel-state.db`; restart. | **Confirmed in Tier A, in two shapes, and they do not exercise the same guard.** With the remote intact, the post-loss sweep re-stamps every placeholder and records it a fresh echo: no push, no conflict copy, the remote byte-identical, and a read through the mountpoint still hydrates the real content — so the marker that survived is a working promise and not a label. The guard doing the work there is `applyTo`'s re-stamp branch; removing it manufactures a conflict copy per placeholder and leaves the *placeholder* at the real path with the user's content parked beside it. Removing the **local walk's** placeholder skip changes nothing in that shape, because the sweep applies its pages before it walks, so every placeholder already has a baseline by then — which is why the second shape deletes one file remotely while the client is down. Then the page never mentions it, there is no re-stamp and no echo, and the walk's own check is the only thing in front of a push; without it the sweep offers the placeholder and the engine's M5 gate refuses it, which is two independent guards collapsing into one and a fallback. Pinned by `TestFleetKeepsPlaceholdersSafeWhenTheStateDBIsLost` and `TestFleetNeverPushesAPlaceholderWhoseRemoteIsGone`. | M5 invariants 1 and 2 — the data-loss guards. Run with `DRIVEL_REQUIRE_TESTENV=xattr` semantics in mind: on a filesystem without user xattrs this case is meaningless, and `app.Mount` warns as much. |
@@ -694,25 +694,48 @@ roughly in descending order of how likely they are to change a decision:
     still open, which makes the event pair one event and is a `vfs` change rather
     than an engine one.
 
-20. **A crash and an outage are not the same failure, and M27 only covers one.**
-    MC-44b's abandoned push is recorded for repair because giving up is code that
-    runs; MC-40 (b)'s is not, because `kill -9` runs none. The two then diverge
-    permanently: a rewrite of an already-synced file has an echo, which is what
-    `pushLocalOnly` skips on and what the remote pass matches, so no row of the
-    reconcile table proposes it. Measured over 44 sweeps.
+20. **A crash and an outage are not the same failure — CLOSED 2026-10-16 as M27
+    part 4.** MC-44b's abandoned push is recorded for repair because giving up is
+    code that runs; MC-40 (b)'s was not, because `kill -9` runs none, and the two
+    then diverged permanently: a rewrite of an already-synced file has an echo,
+    which is what `pushLocalOnly` skipped on and what the remote pass matches, so
+    no row of the reconcile table proposed it. Measured over 44 sweeps.
 
-    This is worth separating from "M27 is incomplete". M27's entry says plainly
-    that it records a path when a push *abandons*; the gap is that a sweep has no
-    way to notice a local file that stopped matching its own baseline, which is
-    strictly more than the crash case needs — it also covers a push lost to a
-    power cut, an OOM kill, and a backing file written while the mount was down.
-    The fingerprint for it is already stored (`state.Echo.LocalSize`/`LocalMTime`,
-    added for the hashless-provider case in M18) and already consulted by
-    `matchesBaseline` for the delete rows. Extending the walk to consult it for
-    the *push* row is the candidate; what has to be settled first is what it means
-    when the fingerprint says "not recorded" (a zero `LocalMTime` must never read
-    as "matches", the same rule M18 item 12 states for deletion), and whether a
-    sweep is allowed to push a file whose baseline it cannot verify.
+    What shipped is the candidate this item named: `repushDiverged`, a second row
+    in the sweep's local walk that reads the baseline fingerprint already stored
+    for the delete rows (`state.Echo.LocalSize`/`LocalMTime`, M18) and re-sends a
+    path whose local copy no longer matches it. One `os.Stat` per file on a walk
+    that already visits every file, no new state, and it covers the power cut, the
+    OOM kill, the drain that timed out and the backing file written while the
+    mount was down as well as the crash.
+
+    **Both open questions were answered the conservative way, and a third one
+    appeared while wiring it up.** A fingerprint that says "not recorded" is read
+    as neither match nor mismatch: the row declines and counts it, because a wrong
+    guess costs one upload and one commit for *every* path in the tree where the
+    delete rows' wrong guess is bounded by `-max-deletes`. A sweep therefore may
+    not push a file whose baseline it cannot verify — nor one it could not settle
+    remotely (a failed download or conflict copy leaves the remote side unknown,
+    and a whole-file `Put` over it would publish one side of a conflict with no
+    copy of the other), nor one `pushOwedRepairs` has already claimed. The third:
+    the row needs a boundary against the *running* engine, which is
+    `Downloader.openedAt` — a local mtime after this mount opened belongs to the
+    engine's own machinery (debounce map, worker queue, in flight, repair bucket),
+    and without that bound the row re-uploads a file a long copy is still writing
+    once per sweep, which on a feedless backend is once per poll interval. The
+    cost of the boundary is that an out-of-band write during a long-lived mount
+    waits for a restart or `-resync`; a quiet period was considered instead and
+    had no defensible constant.
+
+    **The convergence half is the thing to re-read before touching this**:
+    M6 gate 3 now records the baseline it verified. A metadata-only change moves
+    the mtime without moving a byte, so the row proposes a push, the gate sends
+    nothing, and before this the mismatch survived for the next sweep to find —
+    one full-file hash per mount forever, and a whole upload per mount below
+    `hashSkipMinSize`. Live re-run of MC-40 (b) is still owed; the Tier A pins are
+    `internal/syncengine/lostpush_test.go` plus
+    `TestUnchangedContentSkipRecordsTheBaseline`, each mutation-checked against
+    the guard it names.
 
 ---
 

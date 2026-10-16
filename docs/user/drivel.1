@@ -1127,6 +1127,36 @@ An abandoned
 is the exception. There is no local file to re-send, so it is neither retried
 nor inferred later: the remote object is still present and still indistinguishable
 from a file the user has. Delete it again.
+.SS Uploads lost to a crash
+Recording the path only happens if
+.B drivel
+runs the code that records it, which a
+.BR kill (1)
+with
+.BR SIGKILL ,
+a power cut, an out-of-memory kill or a shutdown that ran out of time does not.
+A sweep therefore has a second way to reach the same file: it records the size
+and modification time of every file as it syncs it, and re-sends any local copy
+that no longer matches.
+.PP
+.RS
+.EX
+[sweep] repush  notes/todo.md \(rs
+    (local copy diverged from its baseline; an earlier push never landed)
+.EE
+.RE
+.PP
+The same pass covers a file written into the backing directory while
+.B drivel
+was not running. It considers only files last modified
+.I before
+this mount started \(em anything newer is a change the running engine is already
+answerable for, and a file held open and never closed is still sent on close as
+described under
+.BR -push-delay .
+A baseline with no recorded size and time (anything last synced by a build
+predating 10 September 2026) is counted in the sweep summary and left alone
+rather than re-uploaded on a guess.
 .SH SPECIAL FILES AND MOUNT SAFETY
 .B drivel
 always mounts

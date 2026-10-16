@@ -4496,16 +4496,21 @@ this whole group walks through, so it is a precondition rather than a note.
     confidential by Google's own account and protecting it would imply
     otherwise.
 
-29. **M27 — The sync path's two silences.** **Shipped 2026-10-12.** Two defects
-    that are not bugs in what the engine *does* — it behaves correctly both
-    times — but in what it tells the person depending on it. They are one
-    milestone because the shape of the fix is the same in each: the engine
-    already holds the fact and discards it.
+29. **M27 — The sync path's two silences.** **Shipped 2026-10-12; part 4 added
+    2026-10-16.** Two defects that are not bugs in what the engine *does* — it
+    behaves correctly both times — but in what it tells the person depending on
+    it. They are one milestone because the shape of the fix is the same in each:
+    the engine already holds the fact and discards it. Part 4 is the same shape
+    a third time, and it closes the one gap this entry had been carrying as
+    unscheduled: a push lost to a crash rather than abandoned by the engine.
 
     **What building it changed.** Part 1 landed as designed. Part 2 did not: the
     cheapest of its three options turned out to repair nothing, which is in
     "What shipped" below and is the one thing to read before touching this
-    again.
+    again. Part 4 landed as the candidate this entry recommended, with two
+    additions that only appear once it is wired up — a boundary that keeps the
+    sweep out of the running engine's way, and a baseline record at M6's gate 3
+    without which the row cannot converge.
 
     **Part 1 — back-pressure is invisible.** The outbound path is bounded in two
     places, and at the defaults the bound is 1280 events: `eventBuffer` (1024,
@@ -4703,44 +4708,96 @@ this whole group walks through, so it is a precondition rather than a note.
     restart regardless, and a cross-object callback would write `nextSweep` from
     a worker goroutine, which is single-goroutine state by design.
 
-    **Three things M27 deliberately does not close**, and the first was measured
-    rather than predicted. **A push lost to a crash is not repaired at all**
-    (MC-40, 2026-10-13, over two processes and a local sshd). The repair record is
-    written when a push *gives up*, and giving up is code that runs; `kill -9`
-    runs none. So the bucket is empty after a crash, and for the commonest shape —
-    a rewrite of a file that is already synced — nothing else proposes the path
-    either: it has an echo, so `pushLocalOnly` skips it, and the echo still
-    describes exactly what the remote holds, so the remote pass matches it and
-    correctly does nothing. Measured over 44 sweeps and seven minutes, past
-    `repairDelay`, with the local file holding the user's rewrite and the remote
-    holding the previous content throughout. **A crash is therefore strictly worse
-    than an outage**, which is the opposite of what part 2's entry reads like on
-    its own, and the asymmetry is invisible unless the two are read together.
+    **Part 4 — a push LOST is not a push abandoned.** Parts 2 and 3 record a path
+    when the engine gives up, and giving up is code that runs; `kill -9` runs
+    none. MC-40 (b) measured what that left behind (2026-10-13, two processes and
+    a local sshd): after a crash mid-upload of a *rewrite* of an already-synced
+    file, the repair bucket is empty and no other row of the reconcile table
+    proposes the path either — it has an echo, so `pushLocalOnly` skips it, and
+    the echo still describes exactly what the remote holds, so the remote pass
+    matches it and correctly does nothing. 44 sweeps over seven minutes, past
+    `repairDelay`, changed nothing, with the local file holding the user's
+    rewrite and the remote holding the previous content throughout. **A crash was
+    therefore strictly worse than an outage**, which is the opposite of what part
+    2 reads like on its own.
 
-    Recording the debt *before* the push would close it, and is declined for the
-    reason §12 gives: that is the persistent outbound queue, and it doubles the
-    commit count of every push — the budget in §12 is a ratchet precisely so that
-    a change like this has to argue for itself. The cheaper candidate, and the one
-    to weigh first, is to let the sweep's local walk consult the baseline
-    fingerprint it already stores. `state.Echo.LocalSize`/`LocalMTime` were added
-    in M18 for the hashless-provider case and `matchesBaseline` already reads them
-    for the delete rows; extending that to the *push* row means a path whose local
-    file no longer matches its own baseline is pushed rather than skipped. No new
-    state, no extra commits, one `lstat` per file on a walk that already visits
-    every file — and it covers the power cut, the OOM kill and the file written
-    while the mount was down, none of which the repair bucket can ever see. What
-    has to be settled first is what a fingerprint that says "not recorded" means:
-    a zero `LocalMTime` must never read as "matches", which is the rule M18 item
-    12 states for the deletion direction and which here decides whether a sweep
-    may push a file whose baseline it cannot verify.
+    Recording the debt *before* the push would close it and stays declined for
+    the reason §12 gives: that is the persistent outbound queue, and it doubles
+    the commit count of every push. What shipped instead is the candidate this
+    entry recommended — **the sweep's local walk consults the baseline
+    fingerprint that was already being stored**. `state.Echo.LocalSize`/
+    `LocalMTime` were added in M18 for the hashless-provider case and
+    `matchesBaseline` already read them for the delete rows; `repushDiverged` now
+    reads them for the *push* row, so a path whose local copy no longer matches
+    its own baseline is re-sent rather than skipped. No new state, no extra
+    commits on the sweep's side, one `os.Stat` per file on a walk that already
+    visits every file — and it covers the power cut, the OOM kill, the drain that
+    timed out and the backing file written while the mount was down, none of
+    which the repair bucket can ever see. It also finishes a §6 *local newer*
+    resolution, which deliberately leaves the local edit "for the uploader to
+    push" and therefore relied on an in-memory event that a restart has
+    forgotten. One comparison serves both directions
+    (`fingerprintDiverged`), because a push row and a delete row disagreeing
+    about whether a file changed is a bug waiting to be written.
 
-    An abandoned **deletion** is
-    not repaired: there is no local content to re-send, and inferring it later
-    would have to go back through `-max-deletes`, which is the delete pass's
-    machinery rather than a re-push — the remote object is still there and still
-    marked seen, so the delete pass never considers it. `repairPathOf` therefore
-    declines to record one at all, rather than recording a path the repair pass
-    would drop for having no file. And **a shutdown cannot overtake a blocked
+    **Four things narrow the row, and the first is the one that is not obvious
+    from the proposal.** *The local mtime must predate this mount's open*
+    (`Downloader.openedAt`, taken in `NewDownloader`, which `app.Mount.Open` runs
+    before the filesystem is served). A write this process received is one the
+    engine is already answerable for — in the debounce map, in a worker queue, in
+    flight, or in the repair bucket if it was abandoned — and nothing is silently
+    lost inside one process lifetime, because `vfs.node.emit` blocks rather than
+    drops. So the divergences worth re-pushing are exactly the ones that predate
+    the process, and dating them needs no clock heuristic and no tunable. Without
+    that bound the row re-uploads a file a long copy is still writing, once per
+    sweep — and on a feedless backend the sweep interval *is* the poll interval,
+    seconds, so a single large copy would cost a whole upload per tick. It also
+    leaves push-on-close deciding when a *held-open* file is sent, since its
+    mtime keeps moving and the row never claims it. The cost is that a divergence
+    created out of band during a long-lived mount waits for the next restart or
+    `-resync`; writing the backing tree underneath a running mount is outside
+    what drivel contracts for, and the alternative was a quiet period whose
+    constant could not be defended.
+
+    *A baseline with no local fingerprint is no evidence.* A zero `LocalMTime` is
+    an echo written before M18 added the field, or a stat that failed. The delete
+    rows already refuse to read that as "matches" (M18 item 12); the push row
+    refuses to read it as "differs", for the mirror reason plus one of its own:
+    a wrong guess here costs an upload and a commit for **every path in the
+    tree**, where the delete rows' wrong guess is bounded by `-max-deletes`. It
+    is counted and reported in the sweep summary rather than logged per path, so
+    a state DB that answers this for everything says so once per sweep instead of
+    silently covering nothing. *Only a path the sweep listed*: a baseline whose
+    path the remote did not report belongs to the delete pass, which has strictly
+    more to go on. *Never a path the sweep could not settle*: if the download or
+    the §6 conflict copy for a path failed, what the remote holds is unknown, and
+    a whole-file `Put` over it would publish one side of a conflict while keeping
+    no copy of the other — so `applyPage` collects the paths it could not
+    reconcile and the walk stands down on them, as it does on the paths
+    `pushOwedRepairs` has already claimed.
+
+    **M6's gate 3 now records the baseline it verified, and without that the row
+    cannot converge.** A digest match against what `Stat` reports *now* is the
+    strongest evidence the engine ever has that the two sides agree — stronger
+    than the echo a successful `Put` writes, which is a claim about bytes we sent
+    rather than bytes we compared — and it was the one place that evidence was
+    discarded. A metadata-only change (a touch, an editor saving an unchanged
+    buffer) moves the mtime without moving a byte, so the row proposes a push,
+    gate 3 sends nothing, and the mismatch used to survive for the next sweep to
+    find again: forever, at one full-file hash per mount, and at one whole upload
+    per mount below `hashSkipMinSize`. One commit per skipped push settles it,
+    which is the budget a push that uploads already has — §12's ratchet argued
+    rather than crossed. `TestARepushedMetadataChangeSettlesAfterOneSweep` is the
+    only place both halves are visible at once; it reports two repush lines where
+    one is wanted the moment the record is removed.
+
+    **Two things M27 still deliberately does not close.** An abandoned
+    **deletion** is not repaired: there is no local content to re-send, and
+    inferring it later would have to go back through `-max-deletes`, which is
+    the delete pass's machinery rather than a re-push — the remote object is
+    still there and still marked seen, so the delete pass never considers it.
+    `repairPathOf` therefore declines to record one at all, rather than
+    recording a path the repair pass would drop for having no file. And **a shutdown cannot overtake a blocked
     dispatch**: the send into a worker queue is unconditional (dropping is the
     thing this bound exists to avoid), so a cancelled context does not unwind a
     saturated engine, the engine's `drainTimeout` is only armed after the loop

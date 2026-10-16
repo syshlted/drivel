@@ -201,6 +201,7 @@ sequenceDiagram
     dl->>dl: walk the backing tree
     Note over dl: skip conflict copies, placeholders,<br/>non-regular files, .drivel-*
     dl->>eng: Push(OpWrite) for anything with<br/>no baseline and no seen mark
+    dl->>eng: Push(OpWrite) for a baseline whose LOCAL copy<br/>diverged before this mount opened (M27 part 4)
 
     Note over dl,state: 4. DELETES — only now, only if complete
     dl->>state: EachUnseenEcho(gen)
@@ -227,9 +228,12 @@ flowchart TD
     mat -->|yes| dl2["materialise:<br/>download or placeholder"]
     mat -->|no| defer["count as deferred,<br/>still marked seen"]
 
-    ql -->|yes| qb{"matches the<br/>baseline?"}
-    qb -->|"yes / echo match"| nop["nothing to do"]
+    ql -->|yes| qb{"remote matches<br/>the baseline?"}
     qb -->|no| conf["§6 conflict copy"]
+    qb -->|"yes / echo match"| qlf{"local copy still<br/>matches it?"}
+    qlf -->|yes| nop["nothing to do"]
+    qlf -->|"no fingerprint, or<br/>modified since this<br/>mount opened"| nop
+    qlf -->|"no, and older than<br/>this mount"| repush["RE-PUSH — a push<br/>was lost (M27 pt 4)"]
 
     qb2 -->|no| push["PUSH — it is new locally"]
     qb2 -->|yes| guards{"sweep complete?<br/>baseline predates it?<br/>local unmodified?<br/>within -max-deletes?"}
@@ -266,6 +270,22 @@ baseline still describes exactly what the remote holds, so the remote rows match
 the echo and correctly do nothing. Before M27 such a file stayed local forever.
 A repair that succeeds writes a fresh echo, so the walk then skips it for the
 ordinary reason and nothing is sent twice.
+
+**M27 part 4 then gave the walk itself a second row, for the pushes no record
+could ever name**: the engine writes the repair record when it *gives up*, which
+is code that runs, and `kill -9` runs none. So `repushDiverged` compares each
+local file against the fingerprint its baseline already carries
+(`state.Echo.LocalSize`/`LocalMTime`, M18) and re-sends the ones that no longer
+match — which also covers a power cut, an OOM kill, a drain that timed out and a
+backing file written while the mount was down. Four things bound it: the local
+mtime must predate this mount's open (anything newer is the running engine's to
+finish, and without the bound a long copy is re-uploaded once per sweep); a
+baseline with no fingerprint is counted and skipped rather than guessed at; an
+unlisted path belongs to the delete pass; and a path the remote pass could not
+settle, or one the repair pass already claimed, is left alone. The converse half
+is in the *engine*: M6's gate 3 records the baseline it verified, without which a
+file whose mtime moved but whose content did not is offered for upload on every
+mount, forever.
 
 Three implementation notes. The marks are **persistent**, because an in-memory
 seen-set would report every page a *previous* process consumed as remotely

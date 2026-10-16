@@ -82,6 +82,15 @@ type Downloader struct {
 	repairDue   time.Time
 	repairFails int
 	repairBase  time.Duration
+
+	// openedAt is when this mount's pull loop was constructed, which is before
+	// the filesystem is served and therefore before any write can reach the
+	// engine (app.Mount.Open builds both; Run mounts afterwards).
+	//
+	// It is the boundary the sweep's lost-push row uses: a local file modified
+	// since this instant is one the running engine is already responsible for,
+	// and one modified before it is not. See repushDiverged.
+	openedAt time.Time
 }
 
 // Materializer is the OPTIONAL lazy-hydration hook (M5), satisfied by
@@ -134,7 +143,10 @@ func NewDownloader(src provider.ChangeSource, store provider.Store, dataDir stri
 	if cad.Slow < cad.Fast {
 		cad.Slow = DefaultCadence.Slow
 	}
-	return &Downloader{src: src, store: store, dataDir: dataDir, state: st, cad: cad, repairBase: repairDelay}
+	return &Downloader{
+		src: src, store: store, dataDir: dataDir, state: st, cad: cad,
+		repairBase: repairDelay, openedAt: time.Now(),
+	}
 }
 
 // Run polls until ctx is cancelled. It resumes from the persisted cursor, or

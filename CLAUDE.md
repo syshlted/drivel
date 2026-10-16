@@ -430,9 +430,10 @@ below for why the backing file is opened readable regardless.
 
 Independent of M9, nothing waits on either.
 
-M27 the sync path's two silences **shipped 2026-10-12**: back-pressure is
-reported, and an abandoned push is repaired rather than forgotten. See "The sync
-path's two silences" below for the invariants.
+M27 the sync path's two silences **shipped 2026-10-12, part 4 added
+2026-10-16**: back-pressure is reported, an abandoned push is repaired rather
+than forgotten, and a push *lost* to a crash is found by the next sweep. See
+"The sync path's two silences" below for the invariants.
 
 **M14** control & status API — a unix socket (`internal/control`, HTTP/JSON,
 `/v1/…`) so third-party tools can read per-path sync status and per-backend stats,
@@ -840,8 +841,10 @@ MC-45's premise turned out not to hold, **MC-47 ran for real on 2026-10-10 over 
 processes and a local sshd** (see M8 rule 2), **MC-40 ran on 2026-10-13 over that
 same rig** and produced three product fixes — a plugin child that outlived its
 host (M9 rule 10), an SFTP temp name two writers shared (SFTP rule 7), and an
-upload byte count taken before the transfer — plus the finding that **a crash is
-not an outage**: M27 repairs an abandoned push and not a lost one. **MC-44 ran the same day and completed**: its
+upload byte count taken before the transfer — plus the finding that **a crash was
+not an outage**: M27 repaired an abandoned push and not a lost one, which is what
+M27 part 4 then closed (2026-10-16, Tier A only — the live re-run is owed).
+**MC-44 ran the same day and completed**: its
 transport half found that a transient UDP block downgraded the transport
 permanently and fixed it, and its throughput half then measured the two protocols
 against live Drive (both in "Transport" below). Six of the group's findings are products of
@@ -985,6 +988,12 @@ feature safe.
    holds now**, not to the echo. A stale echo (expired cursor, reused state DB,
    missed delete) would otherwise skip the push forever and never restore the
    file. This is the gate that actually helps Drive users.
+
+   **A skip here records the baseline it just verified** (M27 part 4), at one
+   commit — a digest match against the remote's current state is stronger
+   evidence than the echo a successful `Put` writes, and dropping it left the
+   sweep's lost-push row proposing the same push on every mount for any file
+   whose mtime moved without its content. Do not "optimise" that back out.
 
 Gates 2 and 3 share one `Stat` and are both skipped below `hashSkipMinSize` (one
 block) — for a small file the round-trip costs what the upload would. Gate 2 runs
@@ -1166,6 +1175,15 @@ uploading them publishes the losing side of every conflict) and placeholders
 `Engine.Push`, never straight to the store, so they get the same M5/M6 gates, echo
 recording and retries as a write from the mount.
 
+**Since M27 part 4 the same walk carries a second row, and the two are not
+interchangeable**: "new locally" is a path with no baseline, `repushDiverged` is a
+path with one whose *local* copy no longer matches it — a push lost to a crash
+rather than abandoned by the engine. It is in this walk because the walk is
+already stat-ing every file; what it needs beyond that is the `openedAt` boundary,
+the refusal to act on an unfingerprinted baseline, and the `noRepush` set. See
+"The sync path's two silences" item 4 for all four, and do not relax any of them
+to make the row catch more.
+
 **M7c: the sweep's cost is the mount's, not the account's.** The flat `files.list`
 above scales with the *Drive* — it lists everything and sorts it out afterwards, in
 strictly sequential pages, repeated by every mount of that account on every first
@@ -1290,9 +1308,11 @@ page.
 
 ## The sync path's two silences (M27)
 
-Two places the engine did the right thing and told nobody. Both fixes live where
-the fact already was; neither is a verbosity knob (M25 rule 1 — `-debug` is
-go-fuse's protocol trace and must never come to mean two things).
+Two places the engine did the right thing and told nobody, and — since part 4 —
+one place it did the right thing and nothing else could tell. Each fix lives
+where the fact already was; none is a verbosity knob (M25 rule 1 — `-debug` is
+go-fuse's protocol trace and must never come to mean two things). Items 1–3 are
+the shipped milestone; 4 closed its one known gap on 2026-10-16.
 
 1. **Back-pressure is reported on the state *transition*, and hysteresis is what
    makes that possible.** `backpressure` in `engine.go` is driven from
@@ -1388,23 +1408,55 @@ has established that it can be.
    must be read after a restart anyway, and a callback would write `nextSweep`
    from a worker goroutine when it is single-goroutine state by design.
 
-**Three things M27 does not close, and none is an oversight.** **A push lost to
-a *crash* is not repaired at all, which MC-40 measured on 2026-10-13**: a path is
-recorded when a push gives up, and giving up is code — `kill -9` runs none, so the
-repair bucket is empty, and a rewrite of an already-synced file then has an echo
-that `pushLocalOnly` skips on and that the remote pass matches, so no row of the
-reconcile table proposes it. 44 sweeps over 7 minutes changed nothing. **A crash
-is therefore strictly worse than an outage here**, which is the opposite of what
-the MC-44b row reads like on its own. Recording the debt *before* the push closes
-it and is declined: that is the persistent outbound queue §12 prices, and it
-doubles every push's commit count. The cheaper candidate, and the one to weigh
-first, is to let the local walk consult the baseline fingerprint it already
-stores — `state.Echo.LocalSize`/`LocalMTime`, which `matchesBaseline` reads for
-the delete rows — so a path whose local file no longer matches its own baseline is
-pushed rather than skipped: no new state, no extra commits, one `lstat` on a walk
-that already visits every file, and it covers the power-cut and OOM cases too.
-Unscheduled; `docs/dev/multiclient-test-plan.md` §4.20 has what must be settled
-first. An abandoned
+4. **A push LOST is not a push abandoned, and the boundary between them is
+   process start** (part 4, 2026-10-16). MC-40 measured the gap on 2026-10-13:
+   a path is recorded when a push *gives up*, and giving up is code — `kill -9`
+   runs none, so the repair bucket is empty, and a rewrite of an already-synced
+   file then has an echo that `pushLocalOnly` skipped on and that the remote pass
+   matches, so no row of the reconcile table proposed it. 44 sweeps over 7
+   minutes changed nothing, which made **a crash strictly worse than an
+   outage**. Recording the debt *before* the push would close it and stays
+   declined: that is the persistent outbound queue §12 prices, and it doubles
+   every push's commit count. What shipped is `repushDiverged`, a second row in
+   the walk reading the fingerprint M18 already stores
+   (`state.Echo.LocalSize`/`LocalMTime`, which `matchesBaseline` reads for the
+   delete rows) — one `os.Stat` on a walk that already visits every file, and it
+   covers the power cut, the OOM kill, the drain that timed out, the backing
+   file written while the mount was down, and a §6 *local newer* resolution,
+   which leaves the local edit for an uploader a restart has forgotten. One comparison serves both directions
+   (`fingerprintDiverged`), because a push row and a delete row disagreeing about
+   whether a file changed is a bug waiting to be written.
+
+   Four things narrow it and none is optional. **The local mtime must predate
+   `Downloader.openedAt`** — a write this process received is the engine's to
+   finish (debounce map, worker queue, in flight, repair bucket) and nothing is
+   silently lost inside one process lifetime, since `vfs.node.emit` blocks rather
+   than drops; without the bound the row re-uploads a file a long copy is still
+   writing once per sweep, which on a feedless backend is once per *poll*
+   interval, and push-on-close would stop deciding when a held-open file is sent.
+   Its cost is that an out-of-band write under a live mount waits for a restart or
+   `-resync`; a quiet period was weighed instead and had no defensible constant.
+   **A baseline with no fingerprint is neither a match nor a mismatch** — counted
+   in the summary and skipped, because guessing "diverged" costs an upload and a
+   commit for every path in the tree where the delete rows' guess is bounded by
+   `-max-deletes`. **Only a path the sweep listed** (an unlisted one is the delete
+   pass's, which has more to go on). **Never a path the sweep could not settle**
+   — a failed download or conflict copy leaves the remote side unknown, and a
+   whole-file `Put` over it publishes one side of a conflict with no copy of the
+   other — nor one `pushOwedRepairs` already claimed, which is why `applyPage`
+   and the repair pass both feed the same `noRepush` set.
+
+   **M6 gate 3 now records the baseline it verified, and without that the row
+   cannot converge.** A metadata-only change (a touch, a save of identical
+   content) moves the mtime without moving a byte, so the row proposes a push,
+   the gate sends nothing, and the mismatch used to survive for the next sweep:
+   one full-file hash per mount forever, and a whole upload per mount below
+   `hashSkipMinSize`. One commit per skipped push settles it — the same budget a
+   push that uploads already has, so §12's ratchet is argued rather than crossed.
+   `TestARepushedMetadataChangeSettlesAfterOneSweep` is the only place both
+   halves are visible at once. **A live re-run of MC-40 (b) is still owed.**
+
+**Two things M27 does not close, and neither is an oversight.** An abandoned
 **deletion** is not repaired — no local content to re-send, and inferring it
 later has to go through `-max-deletes`, which is the delete pass's machinery, so
 `repairPathOf` declines to record one at all. And **a shutdown cannot overtake a

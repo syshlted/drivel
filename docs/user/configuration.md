@@ -190,6 +190,35 @@ A *deletion* that is abandoned is the exception: there is no local file to
 re-send, so Drivel does not retry it and does not infer it later. Delete it
 again if you see one fail.
 
+## When Drivel is killed mid-upload
+
+Remembering the path only works when Drivel gets to run the code that remembers
+it. A `kill -9`, a power cut, an out-of-memory kill or a shutdown that ran out of
+time records nothing — so the sweep has a second way to find the same file.
+Alongside the size and timestamp of every file it has synced, it compares each
+local file against them and re-sends the ones that no longer match:
+
+```
+[sweep] repush  notes/todo.md (local copy diverged from its baseline; an earlier push never landed)
+```
+
+The same pass covers a file written into the backing directory while Drivel was
+not running. Three things bound it:
+
+- Only files last modified **before this mount started** are considered. A file
+  modified since then is one Drivel is already dealing with — queued, uploading,
+  or waiting out its retries — and re-sending it from here would duplicate the
+  transfer. The practical consequence is that this repairs what happened while
+  Drivel was down, and a restart (or `-resync`) is what makes it look again.
+- A file held open and never closed is unaffected, exactly as under
+  `push-delay`: its timestamp keeps moving, so it is never treated as a lost
+  upload. It is sent when it is closed.
+- A file whose recorded size and timestamp are missing — anything last synced by
+  a build older than 10 September 2026 — is counted in the sweep summary as
+  `N baseline(s) with no fingerprint to check` and left alone, rather than
+  re-uploaded on a guess. The record fills itself in the next time anything syncs
+  that file.
+
 ## Transfer concurrency
 
 Two numbers, because the two directions are not alike. `upload-workers` sizes the

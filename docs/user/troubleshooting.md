@@ -218,6 +218,26 @@ If the failures keep coming, fix the cause rather than waiting: the repair is
 re-attempted on a sweep that backs off as it keeps failing, out to 80 minutes
 between tries, so it will not fix a wrong credential or a full account for you.
 
+**Drivel was killed while uploading, and the file never went up.** It does now, on
+the next start. Drivel records the size and timestamp of every file at the moment
+it syncs it, and a sweep re-sends anything whose local copy no longer matches:
+
+```
+[sweep] repush  notes/todo.md (local copy diverged from its baseline; an earlier push never landed)
+```
+
+Before this it did not, and the reason is worth knowing because it explains why
+waiting did not help: a sweep compares the remote against what Drivel last
+recorded, the crash left both of those agreeing, and the only thing that had
+changed was your local file — which nothing was looking at. Sweeping repeatedly
+could not fix it.
+
+The bounds are in [configuration](configuration.md#when-drivel-is-killed-mid-upload),
+and the one that decides what to do here is that only files modified **before the
+mount started** are considered: this is repair for what happened while Drivel was
+down, not a second uploader running beside the first. So if you suspect a file is
+still behind, restart the mount — or run `-resync` to sweep without waiting.
+
 **A file I deleted is still on the remote, and nothing retried the deletion.**
 This one is not repaired automatically. A push that is abandoned is re-sent from
 the local file, and a deletion has no local file to re-send from — so if the

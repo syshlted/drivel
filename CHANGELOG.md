@@ -13,6 +13,43 @@ from source with `make build`.
 
 ## Unreleased
 
+### A change that was uploading when Drivel was killed is now re-sent — 2026-10-16
+
+If Drivel gives up on an upload it remembers the path and the next sweep re-sends
+it (the 12 October entry below). If Drivel is *killed* mid-upload, it never gets
+to remember anything — and the file was then left behind permanently. Your copy
+held the new version, the remote held the old one, and nothing ever proposed
+sending it again: the remote still matched what Drivel last recorded, so every
+later sweep looked at the pair and correctly concluded there was nothing to do.
+In testing, 44 sweeps over seven minutes changed nothing. A crash was worse than
+an outage, which is the wrong way round.
+
+A sweep now also compares each local file against the size and timestamp it had
+when it was last synced, and re-sends the ones that no longer match:
+
+```
+[sweep] repush  notes/todo.md (local copy diverged from its baseline; an earlier push never landed)
+```
+
+That covers a `kill -9`, a power cut, an out-of-memory kill, a shutdown that ran
+out of time to finish, and a file written into the backing directory while Drivel
+was not running. Two things about it:
+
+- It only considers files last modified **before this mount started**. A file
+  modified since then is one Drivel is already dealing with — queued, uploading,
+  or waiting out the retry — and a file an application holds open and keeps
+  writing to is still only sent when it is closed, as before.
+- A file last synced by a build older than 10 September 2026 has no recorded size
+  and timestamp to compare against. Those are counted in the sweep's closing
+  summary (`N baseline(s) with no fingerprint to check`) and left alone: guessing
+  would mean re-uploading a whole tree once, and the record fills itself in the
+  next time anything syncs the file.
+
+Separately, a push that Drivel skips because the remote already holds exactly
+those bytes now records that fact, where before it discarded it. Without that, a
+file whose timestamp changed but whose contents did not would be offered for
+upload on every single start, forever.
+
 ### A folder-scoped sweep only looked at part of your Drive — 2026-10-14
 
 **This is the one to read.** When Drivel is pointed at a folder rather than at

@@ -72,7 +72,7 @@ What each bucket costs if the file is lost:
 | `hydration` | M5 present-ranges cache over the xattr marker | one stat |
 | `sweep` | resume point of an interrupted enumeration, plus when the last one finished | the sweep restarts, and the next mount treats a periodic sweep as overdue |
 | `seen` | which paths one sweep observed remotely | a resumed sweep would infer false deletes — which is why these are on disk and not in memory |
-| `repair` | paths the uploader gave up on, for the next sweep to re-send (M27) | those files wait for `-sweep-interval` again, and are not repaired at all if it is `0` |
+| `repair` | paths the uploader gave up on, for the next sweep to re-send (M27) | those files wait for `-sweep-interval` again, and are not repaired at all if it is `0` — though a lost push is still found by the walk's fingerprint row, which needs no record |
 
 `local-size` / `local-mtime` fingerprint the **backing** file, not the remote one,
 and they exist for providers that publish no content checksum — every filesystem
@@ -80,6 +80,18 @@ backend in the M17–M21 group, where `hash` is always empty. They are what M7b'
 `matchesBaseline` uses to tell "unmodified since we last agreed with the remote"
 from "edited locally", which is the question deciding whether a remote deletion is
 applied here or the local file is kept and pushed back.
+
+**Since M27 part 4 the sweep's local walk reads them too, for the opposite
+action**: a path whose fingerprint no longer matches is a push that was *lost*
+rather than abandoned (a crash, a power cut, an OOM kill, a drain that timed out,
+a backing file written while the mount was down), and it is re-sent. The two
+readings share one comparison (`fingerprintDiverged`) on purpose — a delete row
+and a push row disagreeing about whether a file changed is a bug waiting to be
+written — and they differ only in what "not recorded" does: the delete row keeps
+the file, the push row declines to send it. So **a hashless provider's fingerprint
+is now load-bearing in both directions**, and anything that stops recording it
+(or records it before a push rather than after) silently disables a repair as well
+as a deletion.
 
 Size and mtime are weaker than a digest and sufficient for this one job, because
 this is the *local* file: the kernel keeps its mtime to nanoseconds, so any write

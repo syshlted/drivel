@@ -902,6 +902,22 @@ func (e *Engine) pushShortcut(ctx context.Context, p string, f *os.File, size in
 		}
 		if unchanged {
 			e.logf("[sync] skip %s: remote already holds these bytes (%d B not uploaded)", p, size)
+			// Record it. A digest match against what Stat reports NOW is the
+			// strongest evidence this engine ever has that the two sides agree —
+			// stronger than the echo a successful Put writes, which is a claim
+			// about bytes we sent rather than bytes we compared — and until M27's
+			// lost-push row it was the one place that evidence was dropped.
+			//
+			// What dropping it costs is a loop. That row fires on a local file
+			// whose size or mtime no longer matches its baseline, and a
+			// metadata-only change (a touch, an editor saving identical content)
+			// moves the mtime without moving a byte. The push it issues lands
+			// here, sends nothing, and used to leave the mismatch exactly as it
+			// was for the next sweep to find again. One commit per skipped push
+			// ends that after one pass, and it is the same budget a push that
+			// uploads already has (DESIGN.md §12).
+			remote.Path = p // Stat need not name the path it was asked about
+			e.recordEchoOf(remote, statOf(f))
 			return true, nil
 		}
 	}

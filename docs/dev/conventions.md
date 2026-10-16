@@ -159,6 +159,13 @@ The short form:
 - The local walk must keep skipping conflict copies (uploading them publishes the
   losing side of every conflict) and placeholders (pushing one is the data-loss
   case above).
+- The walk's **second** row re-sends a baseline whose *local* copy diverged — a
+  push lost to a crash rather than abandoned by the engine (M27 part 4). Its four
+  bounds are not optional: only a local mtime predating this mount's open (newer
+  is the running engine's, and a long copy would otherwise be re-uploaded once per
+  sweep); never an unfingerprinted baseline (counted, not guessed at); only a path
+  the sweep listed; never a path the sweep could not settle or the repair pass
+  already claimed.
 - Reconcile pushes go through `Engine.Push`, never straight to the store, so they
   get the same gates, echo recording and retries as a write from the mount.
 - **A sweep must not report an empty tree it cannot vouch for.** `gdrive`
@@ -228,7 +235,10 @@ Three rules follow.
 report them; `TestPushCommitsPerFile` pins the budget at one commit per pushed
 file, and the per-store tests pin the rest. A byte count depends on the filesystem
 underneath and cannot be asserted; a commit count is deterministic. Adding a store
-write to a per-file path is a budget change that needs a reason.
+write to a per-file path is a budget change that needs a reason. The one that has
+been argued: M6's gate 3 commits a baseline for a push it skipped (M27 part 4),
+which brings the skip to the same one commit a push that uploads already costs,
+because the alternative is a sweep re-proposing that push on every mount forever.
 
 **Compare before writing, in a read transaction — never an early return inside the
 write one.** bbolt advances the meta page on every commit whether a data page
