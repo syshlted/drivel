@@ -856,13 +856,30 @@ inside the debounce window — which is also the answer to the duplicate upload
 MC-11 recorded and the plan had sent to Tier A to be chased; and the permanent
 HTTP/3 downgrade in "Transport" below.
 
-**Groups IV and V are finished and Group VI is partly done** (ran 2026-10-13/14;
-§5 of the test plan is the authority and every row carries its own result). What
-is left: **MC-52 and MC-53, both declined for wall clock with the arithmetic
-stated** — 100 000 files is ~39 hours of pushing at the 0.71 uploads/s MC-50
-measured, and a 24-hour soak cannot be compressed without destroying what it
-measures — plus MC-20/MC-23/MC-26 against the mixed-mode fleet and at each fleet
-size. **Three findings from those groups outrank the rest and are below in their
+**Groups II, III, IV and V are finished and Group VI is partly done** (ran
+2026-10-13/15; §5 of the test plan is the authority and every row carries its own
+result). What is left: **MC-52 and MC-53, both declined for wall clock with the
+arithmetic stated** — 100 000 files is ~39 hours of pushing at the 0.71 uploads/s
+MC-50 measured, and a 24-hour soak cannot be compressed without destroying what it
+measures — **MC-10's 5 GiB half and MC-10b**, declined together (~19 min of
+uploading plus ~19 min per puller, 20 GiB of local disk, for an assertion the
+1 GiB run already answers) — plus MC-20/MC-23/MC-26 against the mixed-mode fleet
+and at each fleet size, which are Group VI variants of cases whose base rows are
+now run.
+
+**Groups II and III (2026-10-14/15) found the two worst defects this exercise has
+produced, and both were latent in shipped code**: a folder-scoped sweep that
+truncated to two `Enumerate` calls and then ran its delete pass on the prefix
+(see "Enumeration & reconcile" rule 6), and M27's back-pressure report flapping
+235 times in one burst (see "The sync path's two silences"). The lesson that
+outlives both: **MC-01 is the only live cold sweep this plan records, and it ran
+two days before M7c existed** — so a feature whose only live evidence predates it
+has no live evidence, and any Group I–III result recorded before 2026-09-07 should
+be read with that date in mind. The third finding is MC-27's, and it is a shape
+rather than a bug: **renaming a directory of more than ~100 files doubles that
+subtree on every other client and does not heal**, because a folder move is left
+to the sweep and the sweep's repair then exceeds `-max-deletes` and refuses the
+whole pass. **Three findings from those groups outrank the rest and are below in their
 own sections**: §6's conflict copy protects *unsynced local work* and not content
 (MC-31, MC-60), inbound sync stalls while a client drains an outbound backlog
 (MC-36, MC-50), and §12's ~36 KB per commit is now confirmed in the field. One
