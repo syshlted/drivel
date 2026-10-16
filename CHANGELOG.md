@@ -13,6 +13,26 @@ from source with `make build`.
 
 ## Unreleased
 
+### Downloads no longer wait for uploads — 2026-10-16
+
+While a mount was uploading, it did almost nothing else. In testing, a client
+with 1000 files to send and 2000 to fetch spent 23 minutes sending and collected
+about **20** of the 2000 in that time — then took the rest in the quarter of an
+hour after its last upload landed. A client with nothing to send and 3000 files
+to fetch finished twelve minutes earlier, with 50% more to download.
+
+The Google Drive backend was holding a single internal lock for the whole
+duration of each upload, and everything else it does needs that lock for a
+moment: working out which Drive file a path refers to, reading the list of recent
+changes, walking a folder during a sweep. So an upload in progress blocked the
+whole mount — **including other uploads**, which is why `-upload-workers` made no
+difference to Drive no matter what you set it to.
+
+Uploads of one path still exclude each other, which is what stops two of them
+creating two files with the same name. Everything else now runs alongside a
+transfer. If you raised `-upload-workers` and saw nothing change, try the default
+first: it should behave differently now.
+
 ### A file you deleted could come back, and the folder it was in stayed — 2026-10-16
 
 Delete a folder full of files and, occasionally, one of them reappeared a few

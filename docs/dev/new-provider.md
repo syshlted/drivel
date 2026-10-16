@@ -335,7 +335,15 @@ coverage.
       `Enumerator` implemented if the tree can be listed, which is what gives a
       feedless provider any inbound sync at all.
 - [ ] `RangeGetter` implemented **iff** the provider serves real byte ranges.
-- [ ] Store is safe for concurrent use.
+- [ ] Store is safe for concurrent use **and holds no lock across a transfer.**
+      Nothing above the seam can observe this, and getting it wrong does not look
+      like a bug: a mount that serialises its own index behind each `Put` stops
+      pulling while it pushes, stops pushing anything else, and makes
+      `-upload-workers` a setting with no effect. `gdrive.Put` did exactly that
+      until 2026-10-16. Take the lock for the index work, drop it for the network
+      call, and scope the exclusion to the thing it protects — for a
+      resolve-then-create that is one path, so that two concurrent pushes of it
+      cannot both create.
 - [ ] A `main` calling `plugin.Serve(Factory)`, built as `drivel-provider-<name>`
       and installed somewhere on the search path; nothing else changed. In tree,
       one more line in `bundledBackends` and that `main` stays as well.

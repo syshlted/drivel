@@ -235,7 +235,10 @@ mounts.
 Raising `upload-workers` buys less than it looks like it should. Every push shares
 one HTTP/3 connection and therefore one congestion window, so extra workers
 overlap the per-file round trips — auth, the unchanged-content check, metadata —
-rather than moving more bytes. Against that:
+rather than moving more bytes. How much that is worth has not been measured: it
+could not be until 16 October 2026, because the Drive backend held one lock for
+the length of each upload and the pool ran one at a time whatever this was set
+to. Against it:
 
 - Each in-flight upload can hold a chunk buffer (16 MiB on Drive), so 32 workers
   can be half a gigabyte of buffers.

@@ -161,9 +161,11 @@ Drivel keeps a queue of pending uploads. A bulk copy of many small files can fil
 it faster than they upload, and once it is full the filesystem waits rather than
 dropping anything — so the copy proceeds at the speed of your uplink. Raising
 [`-push-delay`](configuration.md#when-a-change-is-pushed) drains that queue on a
-calmer cycle and makes it far less likely; `-upload-workers` does not help, since
-the limit is the link rather than the pool. A single large file is unaffected:
-Drivel notices it once, when it is closed.
+calmer cycle and makes it far less likely. `-upload-workers` is worth a try for
+many *small* files — until 16 October 2026 the Drive backend uploaded one at a
+time no matter what you set, and now it does not — but for anything large the
+limit is your uplink and not the pool. A single large file is unaffected: Drivel
+notices it once, when it is closed.
 
 Drivel says so when it happens, once each way:
 
@@ -181,8 +183,7 @@ The first count can be well short of the total — 256 of 1280 above — and tha
 not a contradiction. Each file is handled by one of the upload workers, chosen
 from its path, so a burst that lands mostly on one worker fills that worker's
 share and stops there while the others still have room. Raising
-`-upload-workers` raises the total, but not the share any one worker gets, and it
-does not make the copy finish sooner — the limit is the uplink.
+`-upload-workers` raises the total, but not the share any one worker gets.
 
 The second count is the rest of the backlog: changes Drivel has accepted from the
 filesystem and not yet handed to a worker. For a bulk copy that is where almost
@@ -192,6 +193,13 @@ all of it sits, so it is the number that tells you how much is left.
 siblings](data-safety.md#same-name-siblings): the path names more than one Drive
 object, deleting removed the visible one, and an older one is now visible. Resolve
 the duplicates in the Drive web UI.
+
+There was a second cause, fixed on 16 October 2026: a file could be re-downloaded
+seconds after you deleted it, from Drive's own report of the deletion being still
+in progress, and the folder it was in then stayed behind for good. If you are on
+an older build and have an empty folder you deleted, remove it again — and if a
+sweep has since pushed it back to Drive, remove it there too. See [what Drivel
+does about the race](data-safety.md#deletion).
 
 **`[sweep] REFUSING to delete: … over the -max-deletes limit`.** Drivel inferred more
 deletions than the cap allows and abandoned the entire pass rather than performing

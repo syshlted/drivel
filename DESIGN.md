@@ -1293,6 +1293,18 @@ are both lossy and racy.
   downloader still running when `Run` returns is still running when `Close` shuts
   the state DB and the backing dirfd, and in in-place mode that descriptor's number
   can be reused under it.
+- **A provider must not hold a lock across a transfer, and the engine cannot tell
+  whether it does** (2026-10-16). Everything above is the *engine's* concurrency,
+  and a backend that serialises itself silently undoes all of it: `gdrive.Put`
+  held the one mutex guarding the path index for the length of each upload, so a
+  pushing mount could not resolve a path for the pull loop, could not read a
+  change page, and could not push any other path — which is MC-36 and MC-50's
+  measured inbound stall, and is separately why `-upload-workers` bought nothing
+  on Drive. The rule is the §2.5 seam's shape applied to locks: index work under
+  the lock, the network call outside it, and exclusion no wider than the thing it
+  protects (here one path, so that resolve-then-create stays atomic and two
+  concurrent creates cannot make same-name siblings). It belongs in the review of
+  any new backend, because no test above the seam can observe it.
 
 ---
 

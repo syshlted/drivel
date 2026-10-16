@@ -318,7 +318,12 @@ worker, ordered — so no setting makes same-path writes concurrent. Raising the
 count buys latency-hiding and not bandwidth (one HTTP/3 connection, one congestion
 window), costs a chunk buffer per in-flight upload, and past the provider's
 throttle threshold costs quota for nothing — the M7c 97x measurement is the
-evidence. **The inbound pull loop is still serial and has no knob**, deliberately:
+evidence. **Until 2026-10-16 it bought nothing at all on Drive**, because
+`gdrive.Put` held the provider's `d.mu` across its transfer, so four workers
+queued on one mutex; the sentence above was describing an engine whose provider
+undid it. A backend is free to serialise itself and the engine cannot tell — see
+"Plugin architecture" rule 1 for the general version of that — so a new backend's
+`Put` has to be read for this, not assumed. **The inbound pull loop is still serial and has no knob**, deliberately:
 concurrency there is not a parameter but a change to the `forget` map, the
 cursor-advance ordering and per-path ordering within a page. Anyone adding a
 "download-workers" name must not point it at hydration — the two are different
@@ -1479,11 +1484,21 @@ nothing to push converged **twelve minutes earlier**. Three things about it. It
 is **not a deadlock** — it clears unaided, so a supervisor is not the answer.
 **Nothing is logged**, so from outside the process a suspended inbound loop and
 an idle one are indistinguishable, which is §2.6's "content equality, not log
-silence" in a third place. And **the mechanism is unidentified**: the candidates
-are the state DB's single writer (the engine commits an echo per upload), the
-per-mount plugin process serialising calls, and `gdrive`'s own `d.mu`. Naming it
-needs a goroutine dump, so run the rig with `-pprof` before chasing it — MC-50
-has established that it can be.
+silence" in a third place. And **one mechanism is now identified and fixed, by
+reading `Put` rather than by the goroutine dump this note asked for**
+(2026-10-16): `gdrive.Put` took `d.mu` and held it with a `defer` across the
+whole upload, and `d.mu` is what every other operation needs for a moment —
+`Get`/`GetRange` to resolve a path, `Changes` to resolve each entry in a page,
+`Enumerate` to register a page's folders. So while a client was pushing, its own
+inbound half could not take a step, **and neither could a push of any other
+path**. It is a per-path lock now (`lockPath`), with `d.mu` held only for the
+index work at either end; `internal/provider/gdrive/putlock_test.go` has both
+halves and both were mutation-checked. Two things not to over-read. **The other
+two candidates are not excluded** — the state DB's single writer and the plugin
+process's call serialisation are untouched, and the arithmetic says the mutex
+alone should have cost ~4s per inbound file rather than the ~70s measured, so
+run the rig with `-pprof` anyway. And **the live re-measurement of MC-36/MC-50 is
+owed**: what is proven in-tree is the exclusion, not the throughput.
 
 3. **Nothing starts a sweep on the spot.** `armRepairSweep` sets a deadline
    `repairDelay` (5m) out and says so; a repair sweep that leaves the debt

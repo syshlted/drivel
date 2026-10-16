@@ -136,6 +136,76 @@ type Drive struct {
 	// In-flight enumeration sweep (M7b), nil when none is running. See
 	// enumerate.go — it is derived state, rebuilt or restarted after a restart.
 	sweep *sweepState
+
+	// uploads serialises Puts of ONE path, and is the reason Put does not hold mu
+	// across its transfer. See lockPath.
+	uploadsMu sync.Mutex
+	uploads   map[string]*pathLock
+}
+
+// pathLock is one path's upload lock plus the count of goroutines interested in
+// it, so the map does not accumulate an entry per path ever written.
+type pathLock struct {
+	mu   sync.Mutex
+	refs int
+}
+
+// lockPath blocks until no other Put of p is in flight and returns the release.
+//
+// It exists because of what the alternative serialises. Put used to hold d.mu for
+// its whole body, transfer included, and d.mu is what every other operation needs
+// for a moment: Get and GetRange to resolve a path, Changes to resolve each entry
+// in a page, Enumerate to register a page's folders. So while a client was pushing
+// — a backlog, a bulk copy, any multi-second upload — the inbound half of the same
+// mount could not take a single step, and neither could a push of any other path.
+// That is MC-36 and MC-50's measured stall: during the 23.5 minutes its own 1000
+// uploads took, each client fetched about 20 of its peers' 2000 files, and
+// finished the remaining ~1980 in the 15 minutes after its last upload landed. It
+// is also why -upload-workers bought nothing here: four workers all queued on one
+// mutex.
+//
+// What the whole-body lock *did* protect is narrower than it looks, and this
+// keeps it: resolve-then-create must be atomic for one path, or two concurrent
+// creates of it both find nothing and Drive ends up with same-name siblings
+// (MC-30, which is bad enough when two clients do it and inexcusable within one).
+// Per path is sufficient for that, and the directory half is unaffected because
+// ensureDirLocked still runs under d.mu, so two files landing in one new folder
+// still serialise on creating it.
+//
+// Order is lockPath first, then d.mu, never the reverse.
+//
+// What this deliberately leaves alone: Stat, Move and Remove still hold d.mu
+// across their metadata round trip, and Mkdir must — ensureDirLocked resolves
+// or creates each component with the lock held, which is the only thing stopping
+// two files landing in one new folder from creating two of it (the same shape
+// MC-36 measured across three clients). The others are a round trip rather than
+// a transfer, so they are a different order of magnitude from this: Stat is the
+// one worth measuring next, because M6's gates call it before most content
+// pushes, so a push pool spends ~one round trip per file serialised there. Do
+// that with a number in hand, not on the strength of this change.
+func (d *Drive) lockPath(p string) func() {
+	d.uploadsMu.Lock()
+	if d.uploads == nil {
+		d.uploads = map[string]*pathLock{}
+	}
+	e := d.uploads[p]
+	if e == nil {
+		e = &pathLock{}
+		d.uploads[p] = e
+	}
+	e.refs++
+	d.uploadsMu.Unlock()
+
+	e.mu.Lock()
+	return func() {
+		e.mu.Unlock()
+		d.uploadsMu.Lock()
+		e.refs--
+		if e.refs == 0 {
+			delete(d.uploads, p)
+		}
+		d.uploadsMu.Unlock()
+	}
 }
 
 var (
@@ -267,33 +337,54 @@ func (d *Drive) Close() error {
 
 // --- provider.Store ---------------------------------------------------------
 
+// Put uploads p's content, replacing the object already there or creating one.
+//
+// The index work at either end is done under d.mu and the TRANSFER is not: see
+// lockPath for what that costs, what it protects, and which measurement paid for
+// finding out. The one thing it gives up is that another operation on this path
+// can now interleave with the upload — a Move, most plausibly, which would leave
+// the index naming this path for an object that has left it. That is M7
+// invariant 1's case and needs no new machinery: a persisted mapping is a hint,
+// verifyLocked re-checks name and parent before anything acts on one, and a
+// failed check drops the entry.
 func (d *Drive) Put(ctx context.Context, p string, r io.Reader) (provider.RemoteFile, error) {
-	d.mu.Lock()
-	defer d.mu.Unlock()
+	release := d.lockPath(p)
+	defer release()
 
 	// Resolve before creating. An unresolvable path is genuinely absent remotely;
 	// anything less than that check and a restart would upload a duplicate beside
 	// the real file instead of replacing it (see index.go).
-	if id, ok := d.resolveLocked(ctx, p); ok {
-		updated, err := d.svc.Files.Update(id, &drive.File{}).Media(r, mediaOptions()...).Fields(fileFields).Context(ctx).Do()
-		if err != nil {
-			return provider.RemoteFile{}, classify(err)
+	d.mu.Lock()
+	id, exists := d.resolveLocked(ctx, p)
+	parentID := ""
+	var err error
+	if !exists {
+		parentID, err = d.ensureDirLocked(ctx, path.Dir(p))
+	}
+	d.mu.Unlock()
+	if err != nil {
+		return provider.RemoteFile{}, classify(err)
+	}
+
+	var res *drive.File
+	if exists {
+		res, err = d.svc.Files.Update(id, &drive.File{}).
+			Media(r, mediaOptions()...).Fields(fileFields).Context(ctx).Do()
+	} else {
+		f := &drive.File{Name: path.Base(p)}
+		if parentID != "" {
+			f.Parents = []string{parentID}
 		}
-		return d.rememberLocked(ctx, p, updated), nil
+		res, err = d.svc.Files.Create(f).
+			Media(r, mediaOptions()...).Fields(fileFields).Context(ctx).Do()
 	}
-	parentID, err := d.ensureDirLocked(ctx, path.Dir(p))
 	if err != nil {
 		return provider.RemoteFile{}, classify(err)
 	}
-	f := &drive.File{Name: path.Base(p)}
-	if parentID != "" {
-		f.Parents = []string{parentID}
-	}
-	created, err := d.svc.Files.Create(f).Media(r, mediaOptions()...).Fields(fileFields).Context(ctx).Do()
-	if err != nil {
-		return provider.RemoteFile{}, classify(err)
-	}
-	return d.rememberLocked(ctx, p, created), nil
+
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.rememberLocked(ctx, p, res), nil
 }
 
 func (d *Drive) Mkdir(ctx context.Context, p string) (provider.RemoteFile, error) {
