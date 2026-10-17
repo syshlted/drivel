@@ -158,6 +158,8 @@ scripts/multiclient/mc51-scaling.sh      -d rig -N "1 2 3 5" -c mc20 -m 1024
 scripts/multiclient/mc51-scaling.sh      -d rig -N "1 2 3 5" -c mc23 -n 150
 scripts/multiclient/mc60-mixed.sh        -d rig -m 1024 -n 150   # c3 lazy
 scripts/multiclient/mc23-selfresurrect.sh -d rig -n 20 -c 8   # one client only
+scripts/multiclient/mc27-dirmove.sh      -d rig -n 150        # 150 > -max-deletes
+scripts/multiclient/mc36-interleave.sh   -d rig -n 120        # two clients only
 scripts/multiclient/mc44-throughput.sh   -m 64 -n 5          # see MC-44 below
 scripts/multiclient/rig-purge.py         rig/c1 --trash       # empty the remote
 ```
@@ -185,15 +187,42 @@ defect** rather than a measurement, and it runs **one** client so that nothing
 else can be the source of the inbound work it is looking for. A client's own
 `rm -rf` could be handed back to it by its own change feed, re-downloading a file
 it just deleted and leaving the re-created directory behind for good. It is a
-race on Drive's trash propagation, so it fires in roughly one cycle in eight and
-most often in the first — **a run where every cycle reads `gone` has disproved
-nothing**, which is why it loops. Read it beside the plan's MC-23 row.
+race on Drive's trash propagation, so it does not fire every cycle — **a run
+where every cycle reads `gone` has disproved nothing**, which is why it loops.
+Read it beside the plan's MC-23 row.
 
 Since the fix (2026-10-16) the script reports an `ignore` column, and the two
 halves have to be read together: `ignore` counts the reports drivel recognised
 as its own deletion and dropped, so it is the only evidence that the race fired
 at all, while `download` and a `PRESENT` directory are the defect. All-zero
 means the run never entered the window — not that the fix works.
+
+The fixed run (2026-10-17) was **4 of 8 cycles in the window**, 12 suppressions,
+zero downloads, directory gone every time — so the "one in eight, most often the
+first" estimate the defect's own run produced was pessimistic on both counts.
+Budget 8 cycles anyway: four firing is a sample of four, not a guarantee.
+
+The other two drivers here are the same kind of thing — a check for one defect
+rather than a measurement. `mc27-dirmove.sh` renames a directory of `-n` files on
+c1 and asks whether the peers rename or double it; the default 150 is the
+smallest size that reproduces the **stuck** state rather than merely the
+duplication, because the repair has to propose more deletions than the default
+`-max-deletes` of 100 for the pass to be abandoned. `mc36-interleave.sh` has two
+clients write at the same instant and reports how much of its peer's work each
+had fetched by the time its own uploads finished — the number MC-36 and MC-50
+both measured at about 1%, and the one the per-path upload lock was meant to
+move. It came out at **86%** on 2026-10-17. Read its **time series** rather than
+only the summary: the two columns climbing together is the finding, and a single
+endpoint cannot distinguish "inbound kept up" from "inbound caught up afterwards".
+Both scripts print a per-client table and leave a report under `rig/results/`.
+
+Both also hit a bug worth repeating here, because the repo had already written it
+down. `mc36-interleave.sh` ended its own run at the summary with `grep … | head -1`
+under `set -o pipefail`: `head` exits after the first line, `grep` takes SIGPIPE,
+the pipeline fails and `set -e` stops the script — and because it is a race on
+whether `grep` finished writing first, it printed one client's row and died on the
+other's. `awk 'NR==1{…}'` reads to EOF and cannot do this. `tail -1` is safe for
+the same reason.
 
 **`find … | head -1` is a landmine under `set -o pipefail`, and it passes the
 smoke test.** `head` closes the pipe after one line, `find` takes SIGPIPE, the

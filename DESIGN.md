@@ -1275,12 +1275,34 @@ Uploader then pushes back up.
 
    Why the file heals and the directory does not, which is what makes this a data
    bug rather than wasted traffic: the re-downloaded file is deleted again by the
-   next page, but nothing reported the *directory* at all — the download created
-   it as a parent — so no later page removes it. It is then permanent at
-   `-sweep-interval 0`, and with a sweep it is worse, because a local-only
+   next page, but nothing in the pre-fix trace reported the *directory* at all —
+   the download created it as a parent — so no later page removed it. It was then
+   permanent at `-sweep-interval 0`, and with a sweep worse, because a local-only
    directory with no baseline is the local walk's "new locally" row: the next
    sweep pushes it back up and re-creates, on every other client, a directory the
    user deleted.
+
+   **Confirmed live against real Drive on 2026-10-17**, by the same probe that
+   found it (`scripts/multiclient/mc23-selfresurrect.sh`, one client, 8
+   seed-and-delete cycles of 20 files). **4 of the 8 cycles entered the window**
+   — against 1 of 8 on the run that found the defect, so the race is commoner
+   than that run suggested — and produced **12 suppressions, 0 downloads, 0
+   mkdirs, and the directory gone in all eight cycles**. The trace is the pre-fix
+   one with its middle line replaced: `[sync] delete sub2/e14.txt`, then
+   `[pull] ignore sub2/e14.txt (deleted here 0s ago; the remote is still
+   reporting what we deleted)`, then `[pull] delete sub2` six seconds later when
+   the feed caught up.
+
+   Two things the run added. **The lag is measured, not just bounded**: the ages
+   in those twelve lines run from 0s to 5s, so `tombstoneWindow`'s five minutes
+   is the order of magnitude above the observed maximum that it claims to be.
+   And **on Drive the directory is entombed on its own merits**, which the
+   paragraph above did not predict — a Drive folder carries a `version`, so the
+   baseline has an identity, so the deletion leaves a tombstone for it and the
+   stale report of the folder is suppressed directly (`[pull] ignore sub2`, in
+   two of the four cycles). Suppressing the *child* is what keeps the directory
+   away on a provider that reports no version for a directory; on this one both
+   mechanisms hold, and the belt is the one that was reasoned about.
 
 This checksum/version-reconciliation approach (rather than trying to perfectly track
 event provenance) is what real sync engines converge on, because FS and cloud events
@@ -1355,6 +1377,20 @@ are both lossy and racy.
   protects (here one path, so that resolve-then-create stays atomic and two
   concurrent creates cannot make same-name siblings). It belongs in the review of
   any new backend, because no test above the seam can observe it.
+
+  **Measured live on 2026-10-17**, and the number is a ratio rather than a rate so
+  it survives the difference in shape: inbound transfers per outbound transfer
+  during a client's push phase went from **0.02 to 0.86** (two clients, 300 files
+  each written at one instant — `scripts/multiclient/mc36-interleave.sh`). What
+  the fix removed is visible in the series and not in the endpoint: the download
+  column climbs with the upload column from the first sample, where before it was
+  flat at ~0 for 23 minutes and then did 1980 files in the quarter hour after the
+  last upload landed. The arithmetic that never closed — one upload's wait per
+  acquisition predicting ~4s per inbound file against ~70s measured — is moot at
+  0.36s per inbound file: the state DB's single writer and the plugin's call
+  serialisation are *unneeded* to explain anything at this scale rather than
+  excluded, and a workload large enough to make commits the rate limiter could
+  still surface them.
 
 ---
 

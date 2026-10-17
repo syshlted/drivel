@@ -1412,9 +1412,22 @@ retry. 2200 files, permanently. Six things carry the fix.
 14 mutation checks, one per condition, in `internal/state/rename_test.go`,
 `internal/syncengine/move_test.go`, `internal/provider/gdrive/changes_test.go`
 and the fake plugin's feed (which is a real out-of-process executable, so the
-field is proven across the socket and not only in the converter). **The live
-re-run is owed** — MC-26b at 10 files and MC-27 at 1100 — and `[pull] move` is
-the line that distinguishes a fix from a coincidence. `logcount.sh` counts it.
+field is proven across the socket and not only in the converter).
+
+**Confirmed against real Drive on 2026-10-17** (`scripts/multiclient/
+mc27-dirmove.sh`, three eager clients, 150 files — the smallest size that
+reproduces the *stuck* state, since the repair must exceed the default
+`-max-deletes` of 100 to be abandoned). From the feed alone: **one `[pull] move
+wide -> wide-renamed (151 record(s) re-keyed)` per peer, 0 downloads**, old
+directory empty, new one complete on all three, applied **2s and 5s** after the
+push against the 8m37s of re-downloading MC-27 measured. Then a forced `-resync`
+on all three: `151 listed, 151 reconciled locally, 0 pushed` in ~670ms, **zero
+refusals** — and **c1 is the row that matters**, because that is the sending-side
+half, where pre-fix its own sweep found 151 baselines under a path that no longer
+existed and refused its whole delete pass. `[pull] move` is the line that tells a
+fix from a coincidence; `logcount.sh` counts it. One residue left alone on
+purpose: a peer still logs `[pull] mkdir` after the move, because the ordinary
+apply runs afterwards and a no-op `MkdirAll` still reports itself.
 
 ## Deletions and §4 (the tombstone)
 
@@ -1463,8 +1476,22 @@ Five things carry it.
 What it does **not** cover: `-max-deletes` is still the only guard on an inferred
 deletion, a tombstone is not a trash, and the §6 cases above are unchanged.
 `internal/syncengine/tombstone_test.go` carries the five mutation-checked
-conditions; `scripts/multiclient/mc23-selfresurrect.sh` is the live repro and is
-how the fix is confirmed against real Drive rather than against a fake.
+conditions; `scripts/multiclient/mc23-selfresurrect.sh` is the live repro.
+
+**Confirmed against real Drive on 2026-10-17, and the run corrected two things.**
+8 cycles, one client: **4 entered the window** (against 1 of 8 on the run that
+found the defect — the race is commoner than that suggested), 12 suppressions, **0
+downloads, 0 mkdirs, the directory gone in all eight.** The trace is the pre-fix
+one with its middle line replaced — `[sync] delete sub2/e14.txt`, `[pull] ignore
+sub2/e14.txt (deleted here 0s ago; …)`, then `[pull] delete sub2` six seconds
+later. **The lag is now measured rather than bounded**: the twelve ages run 0s to
+5s, so `tombstoneWindow` really is an order of magnitude above the observed
+maximum. And **rule 4's directory case is belt-and-braces on Drive, not the only
+mechanism** — a Drive folder carries a `version`, so its baseline has an identity,
+so the deletion entombs it and the stale report of the *folder* is suppressed
+directly (`[pull] ignore sub2`, in two of the four cycles). Suppressing the child
+is what keeps the directory away on a provider reporting no version for one; here
+both hold. Do not read rule 4 as "the directory is never entombed".
 
 ## The sync path's two silences (M27)
 
@@ -1564,8 +1591,19 @@ halves and both were mutation-checked. Two things not to over-read. **The other
 two candidates are not excluded** — the state DB's single writer and the plugin
 process's call serialisation are untouched, and the arithmetic says the mutex
 alone should have cost ~4s per inbound file rather than the ~70s measured, so
-run the rig with `-pprof` anyway. And **the live re-measurement of MC-36/MC-50 is
-owed**: what is proven in-tree is the exclusion, not the throughput.
+run the rig with `-pprof` anyway. **Re-measured live 2026-10-17 and the stall is
+gone** (`scripts/multiclient/mc36-interleave.sh`, two clients × 300 files written
+at one instant): inbound transfers per outbound transfer during the push phase
+went from **0.02 to 0.86** — c1 pushed 300 files in 96s while fetching **264** of
+its peer's 300, c2 300 in 95s while fetching **254** — and the time series is the
+evidence rather than the endpoint, because both columns climb together from the
+first sample where pre-fix the download column was flat at ~0 for 23 minutes.
+Fleet convergence 121s. **The arithmetic never closed and no longer needs to**: at
+0.36s per inbound file there is no gap left for the two other candidates to
+explain *at this scale*, so they are unneeded rather than excluded — a run large
+enough to make commits the rate limiter could still find them. Do **not** read
+3.1 uploads/s against MC-36's 0.71 as a 4× throughput win: two writers, not
+three, and 13-byte files.
 
 3. **Nothing starts a sweep on the spot.** `armRepairSweep` sets a deadline
    `repairDelay` (5m) out and says so; a repair sweep that leaves the debt
