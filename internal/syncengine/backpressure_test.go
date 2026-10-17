@@ -345,3 +345,39 @@ func TestBackPressureSurvivesABacklogTheQueuesCannotHold(t *testing.T) {
 		t.Errorf("the saturation line does not report the undispatched backlog: %s", entered)
 	}
 }
+
+// DrainedCleanly is what lets the mount clear its unclean-shutdown mark, so it
+// must be false exactly when the drain abandoned something: a drain cut off by
+// its deadline aborts in-flight uploads and records nothing, which is a lost
+// push the next start has to sweep for.
+func TestDrainedCleanlyIsFalseWhenTheDrainHitsItsDeadline(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		provide bool // let the upload through, so the drain can finish
+		want    bool
+	}{
+		{"drain finished", true, true},
+		{"drain deadline", false, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store := newBlockingStore()
+			if tc.provide {
+				store.open()
+			}
+			e := New(Config{
+				Store: store, DataDir: t.TempDir(), Workers: 1,
+				DrainTimeout: 50 * time.Millisecond, Logger: log.New(io.Discard, "", 0),
+			})
+			ch := make(chan fsevent.Event, 1)
+			ch <- fsevent.Event{Op: fsevent.OpMkdir, Path: "d"}
+			close(ch)
+			if e.DrainedCleanly() {
+				t.Fatal("DrainedCleanly before Run")
+			}
+			e.Run(context.Background(), ch)
+			if got := e.DrainedCleanly(); got != tc.want {
+				t.Errorf("DrainedCleanly = %v; want %v", got, tc.want)
+			}
+		})
+	}
+}

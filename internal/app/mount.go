@@ -379,6 +379,15 @@ func Open(ctx context.Context, spec MountSpec, reg *provider.Registry) (*Mount, 
 	src, _ := provider.AsChangeSource(m.store)
 	_, canEnum := provider.AsEnumerator(m.store)
 	if src != nil || canEnum {
+		// A previous run that never drained may have lost a push nothing recorded;
+		// see state.Running for why that has to start a sweep. A read, zero commits.
+		unclean, wasRunning, err := m.state.Running()
+		if err != nil {
+			m.logf("reading the unclean-shutdown mark: %v (treating the last run as clean)", err)
+		}
+		if !wasRunning {
+			unclean = time.Time{}
+		}
 		dl := syncengine.NewDownloader(src, m.store, backing.Path, m.state, syncengine.DefaultCadence)
 		if m.hyd != nil {
 			dl = dl.Lazy(m.hyd)
@@ -394,6 +403,7 @@ func Open(ctx context.Context, spec MountSpec, reg *provider.Registry) (*Mount, 
 			Force:      spec.Resync,
 			MaxDeletes: spec.MaxDeletes,
 			Interval:   spec.SweepInterval,
+			Unclean:    unclean,
 		})
 	}
 
@@ -410,6 +420,20 @@ func (m *Mount) Run(ctx context.Context) error {
 	// then do we close(events). Running the engine on a background context lets it
 	// drain those buffered writes and its in-flight uploads (bounded internally)
 	// instead of aborting the moment Ctrl-C cancels ctx. A second Ctrl-C hard-exits.
+	// The unclean-shutdown mark goes down before anything can emit an event and
+	// comes up only after both drains finished in time, so a run killed anywhere
+	// in between leaves it set and the next start sweeps for what it lost. Only a
+	// mount with an inbound side has anything to run that sweep.
+	marked := false
+	if m.down != nil {
+		if err := m.state.SetRunning(time.Now()); err != nil {
+			m.logf("setting the unclean-shutdown mark: %v (a crash in this run will not trigger a recovery sweep)", err)
+		} else {
+			marked = true
+		}
+	}
+	inboundStopped := true
+
 	engineDone := make(chan struct{})
 	//nolint:gosec // G118: detaching from ctx is the entire point, per the note above.
 	go func() {
@@ -487,6 +511,7 @@ func (m *Mount) Run(ctx context.Context) error {
 		case <-downDone:
 		case <-time.After(inboundDrainTimeout):
 			m.logf("inbound sync did not stop within %s; continuing shutdown without it", inboundDrainTimeout)
+			inboundStopped = false
 		}
 	}
 	// Unmount has returned, so no more events will be emitted; closing the channel
@@ -495,6 +520,11 @@ func (m *Mount) Run(ctx context.Context) error {
 	close(m.events)
 	<-engineDone
 	m.logf("sync engine drained")
+	if marked && inboundStopped && m.engine.DrainedCleanly() {
+		if cErr := m.state.ClearRunning(); cErr != nil {
+			m.logf("clearing the unclean-shutdown mark: %v (the next start will run a recovery sweep it does not need)", cErr)
+		}
+	}
 	return err
 }
 

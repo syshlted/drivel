@@ -47,6 +47,7 @@ erDiagram
         string cursor "how far the sweep itself got, for resume"
         timestamp started "baselines newer than this are not delete candidates"
         timestamp done "under key done; what -sweep-interval measures from"
+        timestamp running "under key running; set while a mount serves, cleared after a clean drain"
     }
     SEEN {
         bytes key PK "gen + NUL + path"
@@ -81,7 +82,7 @@ What each bucket costs if the file is lost:
 | `cursor` | where to resume the change feed | fresh token, then a full sweep |
 | `echo` | §4 loop breaker **and** the M7b delete baseline | first-run semantics: deletes nothing, re-pushes |
 | `hydration` | M5 present-ranges cache over the xattr marker | one stat |
-| `sweep` | resume point of an interrupted enumeration, plus when the last one finished | the sweep restarts, and the next mount treats a periodic sweep as overdue |
+| `sweep` | resume point of an interrupted enumeration, when the last one finished, and the unclean-shutdown mark | the sweep restarts, and the next mount treats a periodic sweep as overdue; a lost mark only means a crash before it was lost goes unswept, as before 2026-10-17 |
 | `seen` | which paths one sweep observed remotely | a resumed sweep would infer false deletes — which is why these are on disk and not in memory |
 | `repair` | paths the uploader gave up on, for the next sweep to re-send (M27) | those files wait for `-sweep-interval` again, and are not repaired at all if it is `0` — though a lost push is still found by the walk's fingerprint row, which needs no record |
 | `refetch` | paths whose inbound apply failed while the cursor moved past them, for the pull loop to fetch again | those changes wait for the next sweep, and are not retried at all at `-sweep-interval 0` until something else touches the path — which is how every failed download behaved before this bucket existed (MC-46) |

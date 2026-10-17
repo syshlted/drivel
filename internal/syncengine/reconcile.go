@@ -98,6 +98,15 @@ type ReconcileOptions struct {
 	// a fresh empty -data dir, a mount that came up pointing somewhere else — and
 	// in those the whole inference is wrong, not just its tail.
 	MaxDeletes int
+
+	// Unclean is when a previous run that did not drain started serving, or the
+	// zero time when the last run stopped cleanly (state.Running). Non-zero runs a
+	// sweep at startup, because that run may have lost a push — killed mid-upload,
+	// or a drain cut off by its deadline — and nothing recorded it: the walk's
+	// fingerprint row (repushDiverged) is what finds such a push, and on a
+	// provider with a feed and a stored cursor no other trigger would run it until
+	// Interval comes due, which at 0 is never.
+	Unclean time.Time
 }
 
 // DefaultMaxDeletes is the out-of-the-box cap on reconcile-inferred deletions.
@@ -162,10 +171,11 @@ func (d *Downloader) canSweep() bool { return d.enum != nil && d.state != nil }
 // startFeed returns the cursor the pull loop should poll from, running the
 // initial sweep first when one is due.
 //
-// The three ways a sweep becomes due are all "we cannot trust the feed alone":
-// an interrupted sweep to finish, a first run with no cursor at all (the remote
-// tree has never been looked at), or an explicit -resync. Cursor expiry is the
-// fourth and arrives later, through recoverCursor.
+// The ways a sweep becomes due are all "we cannot trust the feed alone": an
+// interrupted sweep to finish, a first run with no cursor at all (the remote
+// tree has never been looked at), an explicit -resync, a previous run that did
+// not shut down cleanly, an owed repair, or an overdue interval. Cursor expiry
+// arrives later, through recoverCursor.
 func (d *Downloader) startFeed(ctx context.Context) (string, error) {
 	if !d.canSweep() {
 		return d.resumeCursor(ctx)
@@ -191,6 +201,9 @@ func (d *Downloader) startFeed(ctx context.Context) (string, error) {
 		d.logf("[sweep] no change cursor yet: enumerating the remote tree before tailing it")
 	case d.rec.Force:
 		d.logf("[sweep] -resync: re-enumerating the remote tree")
+	case !d.rec.Unclean.IsZero():
+		d.logf("[sweep] the run started at %s did not shut down cleanly: re-enumerating the remote tree to find pushes it lost",
+			d.rec.Unclean.Local().Format(time.RFC3339))
 	case d.repairsOwed():
 		// An abandoned push from a previous run. The debt predates this process,
 		// so there is nothing to wait for: repairDelay exists to collapse a live

@@ -380,3 +380,34 @@ func TestCommitsCountsWritesNotReads(t *testing.T) {
 		t.Errorf("two reads counted %d commits; want 0", got)
 	}
 }
+
+// The unclean-shutdown mark: set, read back with its stamp, cleared — and left
+// alone by FinishSweep, which shares its bucket and must not discharge a debt
+// the mount has not.
+func TestRunningMarkRoundTrips(t *testing.T) {
+	s := openTestStore(t)
+	if _, ok, err := s.Running(); err != nil || ok {
+		t.Fatalf("fresh store: ok=%v err=%v; want no mark", ok, err)
+	}
+	at := time.Date(2026, 10, 17, 9, 0, 0, 0, time.UTC)
+	if err := s.SetRunning(at); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.FinishSweep(at.Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	since, ok, err := s.Running()
+	if err != nil || !ok || !since.Equal(at) {
+		t.Fatalf("Running = %v ok=%v err=%v; want %v, surviving FinishSweep", since, ok, err, at)
+	}
+	before := s.Commits()
+	if err := s.ClearRunning(); err != nil {
+		t.Fatal(err)
+	}
+	if got := s.Commits() - before; got != 1 {
+		t.Errorf("ClearRunning cost %d commits; want 1", got)
+	}
+	if _, ok, _ := s.Running(); ok {
+		t.Error("the mark survived ClearRunning")
+	}
+}

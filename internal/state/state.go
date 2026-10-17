@@ -43,6 +43,7 @@ var (
 	keyCursor       = []byte("changefeed")
 	keySweep        = []byte("current")
 	keySweepDone    = []byte("done")
+	keyRunning      = []byte("running")
 )
 
 // Echo is what we last synced for a path, from either direction. A remote change
@@ -533,6 +534,57 @@ func (s *Store) FinishSweep(done time.Time) error {
 		}
 		_, err := tx.CreateBucket(bucketSeen)
 		return err
+	})
+}
+
+// --- unclean shutdown -------------------------------------------------------
+//
+// A push lost to a crash leaves nothing behind that says so: giving up is code,
+// and kill -9 runs none, so the repair bucket stays empty. The sweep's walk can
+// still find it — the local copy no longer matches its baseline's fingerprint —
+// but only if a sweep runs, and on a provider with a change feed and a stored
+// cursor nothing else starts one until -sweep-interval comes due, which at 0 is
+// never. So the mount marks itself running when it starts serving and clears the
+// mark only when it has drained; a mark found at startup is a previous run that
+// did not, and the downloader sweeps. One commit each way per mount lifetime,
+// which is why this is not the persistent outbound queue §12 prices.
+//
+// It lives in the sweep bucket because its whole meaning is "a sweep is owed".
+
+// Running reports whether the mark is set — a previous run that started serving
+// and did not drain — and when that run started. A read transaction: zero commits.
+func (s *Store) Running() (since time.Time, ok bool, err error) {
+	err = s.db.View(func(tx *bolt.Tx) error {
+		v := tx.Bucket(bucketSweep).Get(keyRunning)
+		if v == nil {
+			return nil
+		}
+		if uErr := since.UnmarshalText(v); uErr != nil {
+			return uErr
+		}
+		ok = true
+		return nil
+	})
+	return since, ok, err
+}
+
+// SetRunning sets the mark, stamped with when this run started serving.
+func (s *Store) SetRunning(at time.Time) error {
+	stamp, err := at.UTC().MarshalText()
+	if err != nil {
+		return err
+	}
+	return s.update(func(tx *bolt.Tx) error {
+		return tx.Bucket(bucketSweep).Put(keyRunning, stamp)
+	})
+}
+
+// ClearRunning drops the mark. Only a run that drained completely may call it:
+// a drain that hit its deadline abandoned uploads, and the mark is what sends
+// the next start looking for them.
+func (s *Store) ClearRunning() error {
+	return s.update(func(tx *bolt.Tx) error {
+		return tx.Bucket(bucketSweep).Delete(keyRunning)
 	})
 }
 

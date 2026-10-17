@@ -205,8 +205,23 @@ local file against them and re-sends the ones that no longer match:
 [sweep] repush  notes/todo.md (local copy diverged from its baseline; an earlier push never landed)
 ```
 
+**A start after an unclean shutdown always runs that sweep.** Drivel marks the
+state database when a mount starts serving and clears the mark only once it has
+finished sending everything at unmount, so a run that was killed — or whose
+shutdown ran out of time — leaves the mark behind, and the next start sweeps:
+
+```
+[sweep] the run started at 2026-10-17T09:00:00Z did not shut down cleanly: re-enumerating the remote tree to find pushes it lost
+```
+
+Before 17 October 2026 nothing did that on Google Drive: with a change cursor
+already stored, the next sweep was the one `sweep-interval` scheduled — a day
+away by default, and never at `0`. SFTP sweeps on every start anyway.
+
 The same pass covers a file written into the backing directory while Drivel was
-not running. Three things bound it:
+not running — but after a *clean* shutdown nothing forces a sweep, so such a file
+waits for the next scheduled one; run `-resync` to have it picked up at once.
+Three things bound the pass:
 
 - Only files last modified **before this mount started** are considered. A file
   modified since then is one Drivel is already dealing with — queued, uploading,

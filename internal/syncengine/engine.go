@@ -33,6 +33,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/syshlted/drivel/internal/fsevent"
@@ -171,6 +172,10 @@ type Engine struct {
 	drainTimeout time.Duration
 	retry        retryPolicy
 
+	// drained is set when Run's drain finished inside drainTimeout, and is how
+	// the mount decides whether it stopped cleanly (DrainedCleanly).
+	drained atomic.Bool
+
 	// satSample is the saturation sampler's period. Not a Config field and not a
 	// flag: M25's first rule is that drivel has no verbosity control of its own,
 	// and a knob for how often an internal state machine looks at itself would be
@@ -284,6 +289,12 @@ func New(cfg Config) *Engine {
 // exists so the wiring above can be tested end to end, and so a future status
 // endpoint can report the number without reaching into Run's goroutines.
 func (e *Engine) Workers() int { return e.workers }
+
+// DrainedCleanly reports whether Run has returned having sent everything it was
+// given: false before Run returns, and false when the drain hit its deadline and
+// aborted in-flight uploads — which are then lost pushes nothing recorded, so
+// the mount leaves its unclean-shutdown mark for the next start to sweep on.
+func (e *Engine) DrainedCleanly() bool { return e.drained.Load() }
 
 // Run consumes events until events is closed or ctx is cancelled. On either it
 // drains pending (debounced) and in-flight uploads under drainTimeout before
@@ -583,6 +594,7 @@ loop:
 	go func() { wg.Wait(); close(done) }()
 	select {
 	case <-done:
+		e.drained.Store(true)
 	case <-time.After(e.drainTimeout):
 		e.logf("[sync] drain deadline (%s) exceeded; aborting in-flight uploads", e.drainTimeout)
 		opCancel()

@@ -1724,6 +1724,23 @@ three, and 13-byte files.
    `TestARepushedMetadataChangeSettlesAfterOneSweep` is the only place both
    halves are visible at once.
 
+   **The row only runs inside a sweep, and until 2026-10-17 nothing started one
+   after a crash on a provider with a feed.** `startFeed` swept for a resume, no
+   cursor, `-resync`, an owed repair or an overdue interval — none of which a
+   `kill -9` produces — so on Drive a lost push waited up to `-sweep-interval`
+   and at `0` waited forever; MC-40b's legs never saw it because SFTP sweeps on
+   every start. The fix is an **unclean-shutdown mark** (`state.SetRunning`/
+   `ClearRunning`, the `running` key in the sweep bucket): `Mount.Run` sets it
+   before anything can emit and clears it only when the inbound loop stopped in
+   time **and** `Engine.DrainedCleanly` — a drain that hit its deadline aborted
+   uploads, which are lost pushes too. `Open` reads it (zero commits) into
+   `ReconcileOptions.Unclean`. Two commits per mount *lifetime*, which is why it
+   is not §12's persistent outbound queue. After a *clean* stop an out-of-band
+   write to the backing tree still waits for a scheduled sweep or `-resync`; that
+   is deliberate, since sweeping every start is the cost the mark exists to avoid.
+   `internal/app/unclean_test.go` is the pair, and the first fails with the
+   trigger removed.
+
    **Re-run live on 2026-10-16, on both backends, and it is the A/B that is the
    evidence** — the defect is a *silence*, so one leg establishes nothing.
    `scripts/multiclient/mc40b-lostpush.sh` takes the build that crashes and the

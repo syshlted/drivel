@@ -1318,7 +1318,12 @@ with
 a power cut, an out-of-memory kill or a shutdown that ran out of time does not.
 A sweep therefore has a second way to reach the same file: it records the size
 and modification time of every file as it syncs it, and re-sends any local copy
-that no longer matches.
+that no longer matches. A mount marks its state database when it starts serving
+and clears the mark only after it has drained at unmount, so a start that finds
+the mark set \(em the previous run was killed, or its drain ran out of time \(em
+always runs that sweep, whatever
+.B -sweep-interval
+says.
 .PP
 .RS
 .EX
@@ -1329,7 +1334,10 @@ that no longer matches.
 .PP
 The same pass covers a file written into the backing directory while
 .B drivel
-was not running. It considers only files last modified
+was not running, though after a clean shutdown nothing forces the sweep that
+finds it; use
+.BR -resync .
+It considers only files last modified
 .I before
 this mount started \(em anything newer is a change the running engine is already
 answerable for, and a file held open and never closed is still sent on close as

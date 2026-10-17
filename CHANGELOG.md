@@ -13,6 +13,17 @@ from source with `make build`.
 
 ## Unreleased
 
+### A crash is followed by a sweep — 2026-10-17
+
+Drivel can find an upload that a crash, a `kill -9` or a timed-out shutdown cut
+short, by comparing each file against what it last synced. But it only looks
+during a sweep, and on Google Drive nothing started one after a crash: the next
+was the scheduled one, a day away by default and never with
+`sweep-interval = "0"`. A mount now notes when it starts and when it has finished
+sending everything at unmount; if the second never happened, the next start
+sweeps. A clean restart costs nothing extra. See
+[when Drivel is killed mid-upload](docs/user/configuration.md#when-drivel-is-killed-mid-upload).
+
 ### Lazy mode refuses to start where it cannot be safe — 2026-10-17
 
 Lazy mode records which files are placeholders in an extended attribute on the

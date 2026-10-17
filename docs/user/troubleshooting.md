@@ -247,7 +247,8 @@ re-attempted on a sweep that backs off as it keeps failing, out to 80 minutes
 between tries, so it will not fix a wrong credential or a full account for you.
 
 **Drivel was killed while uploading, and the file never went up.** It does now, on
-the next start. Drivel records the size and timestamp of every file at the moment
+the next start: a mount that did not shut down cleanly sweeps when it comes back
+up (`[sweep] the run started at … did not shut down cleanly`). Drivel records the size and timestamp of every file at the moment
 it syncs it, and a sweep re-sends anything whose local copy no longer matches:
 
 ```
