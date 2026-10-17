@@ -1977,8 +1977,13 @@ makes it different from `gdrive` follows from that plus one absence, so most of
    liveness fix (M9 rule 10) makes one *likelier*, because the backend now exits
    promptly instead of unwinding, so the `Put`'s own `Remove` of its temporary
    does not run. It stays invisible (`Enumerate` skips it) and costs quota.
-   Reclaiming old temporaries is the open follow-up; the threshold has to exceed
-   the longest plausible upload, because a young one may be another client's.
+   **Reclaimed since 2026-10-17**: `Enumerate` removes a temporary whose mtime is
+   older than `staleTempAge` (24h). The clock that matters is *time since the last
+   write*, not upload duration — SSH_FXP_WRITE moves the server's mtime, so a live
+   upload of any length stays young and only a dead one ages — which is why the
+   threshold need not exceed the longest plausible upload after all, only
+   comfortably exceed clock skew between client and server. A failed `Remove` is
+   ignored; the next sweep tries again.
 8. **`Remove` is permanent and there is nothing behind it** — the group-wide
    decision above, arrived at here first. `-max-deletes` is the only guard, and
    `docs/user/sftp.md` says so in those words. Don't re-open it per backend.

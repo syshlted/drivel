@@ -15,6 +15,7 @@ import (
 	"sort"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/syshlted/drivel/provider"
 	"github.com/syshlted/drivel/ranges"
@@ -648,5 +649,51 @@ func TestTempNameIsUniqueColocatedAndRecognised(t *testing.T) {
 	}
 	if n := len(path.Base(long)); n > 255 {
 		t.Errorf("temporary name is %d bytes, which most servers refuse", n)
+	}
+}
+
+// A temporary stranded by a dropped connection or a killed backend used to stay
+// on the server forever: invisible, and paid for. Enumerate now removes one that
+// has gone unwritten for staleTempAge — and only that one, since a young
+// temporary may be another client's upload still in flight.
+func TestEnumerateReclaimsOnlyStaleUploadTemporaries(t *testing.T) {
+	ts := startServer(t)
+	s := ts.open(t)
+	if err := os.MkdirAll(ts.path("sub"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	stale := ts.path("sub/" + tempPrefix + "old.bin.0123456789abcdef")
+	fresh := ts.path(tempPrefix + "new.bin.fedcba9876543210")
+	for _, p := range []string{stale, fresh} {
+		if err := os.WriteFile(p, []byte("partial"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	old := time.Now().Add(-staleTempAge - time.Hour)
+	if err := os.Chtimes(stale, old, old); err != nil {
+		t.Fatal(err)
+	}
+
+	var cursor string
+	for {
+		files, next, err := s.Enumerate(t.Context(), cursor)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, f := range files {
+			if isTemp(path.Base(f.Path)) {
+				t.Errorf("Enumerate reported temporary %s", f.Path)
+			}
+		}
+		if next == "" {
+			break
+		}
+		cursor = next
+	}
+	if _, err := os.Stat(stale); !os.IsNotExist(err) {
+		t.Errorf("the stale temporary is still there (%v)", err)
+	}
+	if _, err := os.Stat(fresh); err != nil {
+		t.Errorf("a young temporary — possibly an upload in flight — was removed: %v", err)
 	}
 }

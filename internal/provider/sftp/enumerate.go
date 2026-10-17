@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"path"
+	"time"
 
 	"github.com/syshlted/drivel/provider"
 )
@@ -19,6 +20,10 @@ import (
 // re-does — and how much of the tree is held in memory at once. A page is
 // metadata only; a thousand entries is a few hundred kilobytes.
 const enumPageSize = 1000
+
+// staleTempAge is how long an upload temporary must have gone unwritten before
+// Enumerate treats it as abandoned and removes it. See the isTemp branch.
+const staleTempAge = 24 * time.Hour
 
 // enumCursor is the sweep's resume point: the directories still to be listed.
 //
@@ -63,8 +68,9 @@ func (s *Store) Enumerate(ctx context.Context, cursor string) ([]provider.Remote
 		pending := decodeCursor(cursor)
 
 		var (
-			out     []provider.RemoteFile
-			skipped int
+			out       []provider.RemoteFile
+			skipped   int
+			reclaimed int
 		)
 		for len(pending) > 0 && len(out) < enumPageSize {
 			if err := ctx.Err(); err != nil {
@@ -87,11 +93,27 @@ func (s *Store) Enumerate(ctx context.Context, cursor string) ([]provider.Remote
 
 			for _, fi := range entries {
 				name := fi.Name()
-				if name == "." || name == ".." || isTemp(name) {
-					// A temp file is an upload of ours in flight, or one a dropped
-					// connection abandoned. Either way it is not a file the user has:
-					// reporting it would materialise a .drivel-upload.* beside every
-					// interrupted push, and on the next sweep infer its deletion.
+				if name == "." || name == ".." {
+					continue
+				}
+				if isTemp(name) {
+					// A temp file is an upload in flight (ours or another client's),
+					// or one a dropped connection or a killed backend abandoned.
+					// Either way it is not a file the user has: reporting it would
+					// materialise a .drivel-upload.* beside every interrupted push,
+					// and on the next sweep infer its deletion.
+					//
+					// An abandoned one used to stay forever — invisible, costing
+					// quota — because nothing else visits the tree. One whose last
+					// write is older than staleTempAge is removed: an upload in
+					// flight moves its mtime with every write, so only a dead one
+					// gets that old, and the margin is far wider than any clock
+					// skew between this host and the server.
+					if time.Since(fi.ModTime()) > staleTempAge {
+						if c.cli.Remove(c.abs(path.Join(dir, name))) == nil {
+							reclaimed++
+						}
+					}
 					continue
 				}
 				rel := path.Join(dir, name)
@@ -114,6 +136,9 @@ func (s *Store) Enumerate(ctx context.Context, cursor string) ([]provider.Remote
 		}
 		if skipped > 0 {
 			s.lg.Printf("[sftp] enumerate: skipped %d special file(s): no byte stream to sync", skipped)
+		}
+		if reclaimed > 0 {
+			s.lg.Printf("[sftp] enumerate: removed %d abandoned upload temporary(ies) untouched for over %s", reclaimed, staleTempAge)
 		}
 
 		next, err := encodeCursor(pending)

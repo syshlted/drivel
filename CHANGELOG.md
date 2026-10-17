@@ -13,6 +13,12 @@ from source with `make build`.
 
 ## Unreleased
 
+### SFTP cleans up abandoned upload temporaries — 2026-10-17
+
+An upload that was cut off (a killed mount, a power cut) left a hidden
+`.drivel-upload.*` file on the server indefinitely. A sweep now removes one that
+nothing has written to for 24 hours. See [SFTP](docs/user/sftp.md).
+
 ### Duplicate file names on Google Drive are reported by sweeps too — 2026-10-17
 
 Google Drive lets two files in one folder share a name. Drivel uses the most
