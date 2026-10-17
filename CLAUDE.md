@@ -2314,10 +2314,26 @@ reports `fuse.drivel` (rule 1, from the other side), `systemctl stop` unmounts
 cleanly — and **the daemon is in the unit's cgroup**, which is what this note
 feared and could not check: `CGroup: /system.slice/mnt-<x>.mount └─ /sbin/
 mount.fuse.drivel …`. Reached directly from a shell it lands in `/init.scope`
-instead. **Two things are still unrun**, so don't widen this to "M16 is done":
-mounting at boot (the run used `noauto`, so `local-fs.target` ordering is
-untested), and whether M8's bounded drain completes when systemd kills the
-cgroup on stop — that second one is the one that could lose a write.
+instead. **One thing is still unrun**, so don't widen this to "M16 is done": mounting
+at boot (the run used `noauto`, so `local-fs.target` ordering is untested).
+
+**The drain-on-stop question was answered on 2026-10-17, and the premise was
+wrong**: systemd does *not* kill the cgroup on `stop`. A mount unit's stop is
+`umount`, which returns in ~0.2s; the unit goes inactive and the journal says
+`Unit process N (exe) remains running after unit stopped` — for the host *and*
+the backend. So the drain runs **outside the unit's lifetime**, completes (40 MiB
+over a throttled SFTP loopback, remote byte-identical), and nothing waits for
+it. What *does* signal every leftover is system shutdown (systemd-shutdown's
+kill-all, and WSL's idle stop does the same), which is where the backend dying on
+SIGTERM mattered — fixed, see M9 rule 10; the A/B with a SIGTERM to both
+processes mid-drain is "connection refused → relaunch → drain deadline" before
+and a completed upload after. A shutdown that still cuts the drain short leaves
+the unclean-shutdown mark, so the next start sweeps (M27 item 4). Anyone who
+needs `stop` to *wait* should use a service unit (`drivel mount -config`,
+`TimeoutStopSec`): measured, `stop` returned after the 20s drain with nothing
+left running; `docs/user/fstab.md` carries the unit. The same run found Serve's
+unmount goroutine re-unmounting an already-unmounted filesystem at exit and
+printing the failure to stdout; it now exits with the mount and logs per mount.
 
 ## Shell completions
 

@@ -8,6 +8,7 @@ package vfs
 import (
 	"context"
 	"fmt"
+	"log"
 
 	"github.com/hanwen/go-fuse/v2/fs"
 	"github.com/hanwen/go-fuse/v2/fuse"
@@ -61,15 +62,31 @@ func (backend) Serve(ctx context.Context, opts mount.Options) error {
 		opts.Ready()
 	}
 
+	// Unmount on cancellation — but only while the mount is still ours to
+	// unmount. Waiting on ctx alone meant a mount ended from outside (umount(8),
+	// `systemctl stop`, which is how every fstab mount ends) left this goroutine
+	// behind until the process exited, and then had it unmount a filesystem that
+	// was already gone: "unmount … failed: Invalid argument", on stdout, after a
+	// shutdown that had gone perfectly well.
+	served := make(chan struct{})
 	go func() {
-		<-ctx.Done()
+		select {
+		case <-ctx.Done():
+		case <-served:
+			return
+		}
 		if err := server.Unmount(); err != nil {
 			// Unmount can fail if the mount is busy; the process is shutting down
 			// anyway. Surface a hint for a manual cleanup.
-			fmt.Printf("unmount %s failed: %v (try: fusermount3 -u %s)\n", opts.Mountpoint, err, opts.Mountpoint)
+			lg := opts.Logger
+			if lg == nil {
+				lg = log.Default()
+			}
+			lg.Printf("unmount %s failed: %v (try: fusermount3 -u %s)", opts.Mountpoint, err, opts.Mountpoint)
 		}
 	}()
 
 	server.Wait()
+	close(served)
 	return nil
 }

@@ -13,6 +13,14 @@ from source with `make build`.
 
 ## Unreleased
 
+### fstab mounts and `systemctl stop` — 2026-10-17
+
+Stopping an fstab mount with systemd detaches the filesystem at once and leaves
+Drivel finishing its uploads in the background; it does not wait for them. The
+[fstab page](docs/user/fstab.md#what-systemctl-stop-waits-for) now says so and
+shows a service unit to use if you want `stop` to wait. A spurious
+`unmount … failed: Invalid argument` message after a clean stop is gone.
+
 ### Stopping an fstab mount no longer cuts its uploads short — 2026-10-17
 
 When systemd stops a mount it signals every process belonging to it. Drivel's

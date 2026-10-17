@@ -209,12 +209,49 @@ September 2026: `systemctl start` brings the mount up, `findmnt` reports it as
 `fuse.drivel`, the daemon is listed under the unit's own cgroup, and
 `systemctl stop` unmounts it cleanly.
 
-Two things are still untested. Mounting **at boot** has not been exercised — the
-check used `noauto` — so if a boot mount misbehaves, `nofail` and
-`x-systemd.automount` above are the first things to reach for. And it is not yet
-known whether drivel finishes flushing pending uploads if systemd kills the unit's
-cgroup rather than unmounting first, which is what happens when a unit is stopped
-while the mount is wedged. Please report what you see.
+### What `systemctl stop` waits for
+
+**Not for the uploads.** Stopping a mount unit runs `umount`, which returns as
+soon as the filesystem is detached — 0.2 seconds in the October 2026 run — and
+systemd then marks the unit stopped and leaves Drivel running. The journal says
+so, and this line is expected rather than a fault:
+
+```
+mnt-drive.mount: Unit process 380 (exe) remains running after unit stopped.
+```
+
+Drivel goes on sending what was still queued (for up to 30 seconds) and then
+exits. Nothing is lost in the ordinary case. At **system shutdown**, though,
+systemd stops the mount early and then sends every leftover process `SIGTERM`
+and eventually `SIGKILL`, with the network possibly already down. Drivel keeps
+draining through `SIGTERM`, and anything the shutdown cuts short is sent again
+on the next start, which sweeps for exactly that — so the cost is a delay, not a
+lost file. If you need `stop` to wait until everything has been sent, run Drivel
+as a **service** instead of an fstab line; `stop` then sends `SIGTERM`, which
+drains, and waits up to `TimeoutStopSec`:
+
+```ini
+# /etc/systemd/system/drivel-work.service
+[Unit]
+Description=Drivel mount for work
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+User=j
+ExecStart=/usr/local/bin/drivel mount -config /home/j/.config/drivel/config.toml -name work
+TimeoutStopSec=90
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Measured on the same host: a 40 MiB upload in flight, `systemctl stop` returned
+after 20 seconds with the remote copy complete and no process left behind.
+
+Mounting **at boot** is still untested — the checks used `noauto` — so if a boot
+mount misbehaves, `nofail` and `x-systemd.automount` above are the first things to
+reach for. Please report what you see.
 
 ## When it does not come up
 
