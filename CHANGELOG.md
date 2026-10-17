@@ -13,6 +13,17 @@ from source with `make build`.
 
 ## Unreleased
 
+### Two machines editing one file no longer lose an edit — 2026-10-17
+
+When two machines changed the same file within seconds and both uploaded their
+copy, the second upload replaced the first and the first edit was gone, with no
+conflict copy anywhere. Drivel now checks, before uploading over a file it has
+synced before, whether someone else has changed it since; if so it saves their
+version as a conflict copy first. If your copy is unchanged since the last sync,
+it no longer uploads it over the newer one at all. Two uploads that start at
+practically the same instant can still pass each other. See
+[data safety](docs/user/data-safety.md#when-both-machines-upload).
+
 ### fstab mounts and `systemctl stop` — 2026-10-17
 
 Stopping an fstab mount with systemd detaches the filesystem at once and leaves

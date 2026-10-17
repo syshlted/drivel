@@ -1030,12 +1030,15 @@ func (e *Engine) pushContent(ctx context.Context, p string, dirty *ranges.Set) e
 	}
 	size := fi.Size()
 
-	done, err := e.pushShortcut(ctx, p, f, size, dirty)
+	done, seen, err := e.pushShortcut(ctx, p, f, size, dirty)
 	if err != nil {
 		return err
 	}
 	if done {
 		return nil
+	}
+	if proceed, err := e.preserveDivergedRemote(ctx, p, f, seen); err != nil || !proceed {
+		return err
 	}
 
 	// Whole file. Rewind: the gates above may have read from f.
@@ -1092,21 +1095,25 @@ func (c *countingReader) Read(p []byte) (int, error) {
 // read to avoid a 4 MiB upload. If the content turns out not to have really
 // changed, the range write rewrites identical bytes, which is wasteful but not
 // wrong.
-func (e *Engine) pushShortcut(ctx context.Context, p string, f *os.File, size int64, dirty *ranges.Set) (bool, error) {
+//
+// seen is the Stat it took, when it took one, so the divergence check after it
+// does not pay for a second round trip.
+func (e *Engine) pushShortcut(ctx context.Context, p string, f *os.File, size int64, dirty *ranges.Set) (done bool, seen remoteView, err error) {
 	rp, canPatch := provider.AsRangePutter(e.store)
 	patchable := canPatch && rangeWorthIt(dirty, size)
 	hashable := size >= hashSkipMinSize
 	if !patchable && !hashable {
-		return false, nil
+		return false, seen, nil
 	}
 
 	remote, exists, err := e.store.Stat(ctx, p)
 	if err != nil {
 		e.logf("[sync] stat %s: %v (uploading whole file)", p, err)
-		return false, nil
+		return false, seen, nil
 	}
+	seen = remoteView{statted: true, exists: exists, rf: remote}
 	if !exists {
-		return false, nil // nothing to patch or compare against; this is a create
+		return false, seen, nil // nothing to patch or compare against; this is a create
 	}
 
 	if patchable && remote.Size == size && e.remoteIsOurs(p, remote) {
@@ -1120,14 +1127,14 @@ func (e *Engine) pushShortcut(ctx context.Context, p string, f *os.File, size in
 			e.mon.count(cRangePuts, 1)
 			e.mon.count(cRangeBytes, dirty.Bytes())
 			e.recordEchoOf(rf, statOf(f))
-			return true, nil
+			return true, seen, nil
 		}
 	}
 
 	if hashable {
 		unchanged, err := e.contentMatches(f, remote)
 		if err != nil {
-			return false, err
+			return false, seen, err
 		}
 		if unchanged {
 			e.logf("[sync] skip %s: remote already holds these bytes (%d B not uploaded)", p, size)
@@ -1149,10 +1156,10 @@ func (e *Engine) pushShortcut(ctx context.Context, p string, f *os.File, size in
 			// uploads already has (DESIGN.md §12).
 			remote.Path = p // Stat need not name the path it was asked about
 			e.recordEchoOf(remote, statOf(f))
-			return true, nil
+			return true, seen, nil
 		}
 	}
-	return false, nil
+	return false, seen, nil
 }
 
 // rangeWorthIt reports whether dirty is a usable, profitable description of the
@@ -1174,9 +1181,9 @@ func rangeWorthIt(dirty *ranges.Set, size int64) bool {
 // last synced at p, per the §4 echo record.
 //
 // This is the check that makes a partial write safe. A whole-file Put over a
-// remote someone else has edited loses their edit, which is the documented §6
-// last-writer-wins policy and is at least recoverable — the loser's bytes existed
-// as one coherent version. Splicing our extents into their file produces a hybrid
+// remote someone else has edited replaces their edit, which since 2026-10-17 is
+// kept as a §6 conflict copy first (preserveDivergedRemote) — the loser's bytes
+// exist as one coherent version. Splicing our extents into their file produces a hybrid
 // that never existed anywhere, silently, with no conflict copy, and no version of
 // the file left intact. So a range write may only ever be applied to the exact
 // version we based it on; anything else — a divergent remote, no echo record at

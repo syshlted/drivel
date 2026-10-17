@@ -35,6 +35,32 @@ A conflict copy is only created when both sides genuinely diverged from the last
 synced state. A remote change to a file you have not touched is simply applied,
 and a local change that has not yet uploaded is simply uploaded.
 
+### When both machines upload
+
+The case above is a remote change arriving *before* your edit is sent. The
+other order is common too: two machines edit the same file within seconds, and
+both send their copy before hearing about the other's. Before uploading over a
+file it has synced before, Drivel checks whether the remote still holds what it
+last synced. If not, someone else's edit is there, so Drivel saves it as a
+conflict copy first and then uploads yours:
+
+```
+[sync] conflict report.txt: the remote changed since the last sync; saved it as report (conflict 2026-10-17 09-30-00).txt before uploading the local copy
+```
+
+Your edit is the one at the real path everywhere; the other one is in the copy,
+on the machine that uploaded second. If your local file is *unchanged* since the
+last sync (you only touched it, or saved the same bytes) Drivel does not upload
+it at all, and the newer remote version arrives as an ordinary change.
+
+Two limits. **The check and the upload are two steps**, so two uploads that start
+within the same instant can still pass each other, and then the first one's edit
+is lost; on Google Drive it survives in the file's revision history. And a file
+Drivel has never synced before has nothing to compare against, so a first upload
+over a file that already exists remotely replaces it as it always has. Before 17
+October 2026 neither machine checked, and the edit that uploaded first was lost
+every time.
+
 ## Deletion
 
 This is the half of syncing that can lose data, so it is guarded hard.

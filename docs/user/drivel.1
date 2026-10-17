@@ -1266,6 +1266,21 @@ and the files remain in place after unmount. In-place mode is Linux-only; on
 other platforms supply a separate
 .I -data
 directory.
+.SH CONFLICTS
+When a remote change arrives for a file that has also changed locally since the
+last sync, the newer modification time wins the path and the other version is
+kept beside it as
+.IR "name (conflict YYYY-MM-DD HH-MM-SS).ext" .
+Conflict copies are local-only and are never uploaded.
+.PP
+The same check runs before an upload. Before replacing a file it has synced
+before,
+.B drivel
+asks whether the remote still holds what it last synced; if another machine has
+changed it, that version is saved as a conflict copy first and the local file is
+then uploaded. A local file unchanged since the last sync is not uploaded over a
+newer remote at all. Two uploads that start at practically the same moment can
+still pass each other, and a file with no sync history is not checked.
 .SH ABANDONED UPLOADS
 Every push is retried with a growing delay between attempts \(em five attempts
 over roughly seven seconds \(em and an error the backend reports as permanent is
@@ -1629,6 +1644,19 @@ forces an immediate exit.
 (with
 .BR -control )
 takes the same path, and the log says which of the two it was.
+.PP
+A backend process started by
+.B drivel
+ignores
+.BR SIGTERM :
+it is ended by
+.B drivel
+itself, or when
+.B drivel
+exits, so a signal sent to every process at once \(em as
+.BR systemd (1)
+does at shutdown \(em cannot stop it while uploads are still draining through
+it.
 .SH FILES
 .TP
 .I $XDG_RUNTIME_DIR/drivel/control.sock

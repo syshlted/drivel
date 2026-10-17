@@ -1348,6 +1348,22 @@ are both lossy and racy.
 - If both sides changed since last sync (divergent versions): **last-writer-wins by
   modifiedTime**, and the losing side is preserved as a conflict copy
   (`name (conflict 2026-07-17 …).ext`). Log it. No interactive resolution in v1.
+- **The push side applies it too (2026-10-17).** The rule above runs on the pull,
+  so it only fired when the remote change arrived before our push; when both
+  clients pushed, the second whole-file `Put` replaced a remote that had moved
+  since its baseline and the first edit existed nowhere (MC-31, MC-60). Before a
+  whole-file `Put` of a path with a baseline, `syncengine.preserveDivergedRemote`
+  now `Stat`s the remote (reusing the M6 gates' `Stat` where one was taken) and,
+  on a mismatch with the echo, downloads the remote into a conflict copy named
+  for *its* mtime — the name the pull's "local newer" branch would have used, so
+  the two never make the same copy twice — before uploading. Who wins the path is
+  unchanged (the pusher); only the loser's survival is new. Two refinements, both
+  needing the provider's digest: local bytes equal to the remote ⇒ record the
+  baseline and skip; local bytes equal to the *baseline* ⇒ the push carries no
+  edit, so it is dropped and the pull applies the remote. A copy that cannot be
+  downloaded fails the push, never the copy. Costs one `Stat` per rewrite of a
+  small file with a baseline (creates still cost none); narrows the race to the
+  `Stat`→`Put` gap, which only a conditional write could close.
 
 ---
 

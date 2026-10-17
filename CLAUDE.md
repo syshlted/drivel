@@ -1064,14 +1064,31 @@ difference is where the fleet loses data** (MC-31 and MC-60, 2026-10-14). A
 client that has already pushed has a local file matching its own echo, so there
 is nothing local for §6 to protect and an incoming remote change applies
 cleanly — which is correct, and which means two clients editing one file
-concurrently end with the later *pusher*'s bytes and **no conflict copy
-anywhere**. The loss happens on the winner's whole-file `Put`, which replaces a
-remote that moved since its own baseline: documented last-writer-wins, not a
-bug. On Drive the loser survives in the revision history, which drivel neither
-creates nor exposes; on SFTP and every M17–M21 backend it is simply gone. Do not
-write a test or a doc that asserts "no content is lost" without saying which
-interleaving it means — three expectations in the multiclient plan said it and
-all three were wrong.
+concurrently ended with the later *pusher*'s bytes and **no conflict copy
+anywhere**. The loss happened on the winner's whole-file `Put`, which replaced a
+remote that moved since its own baseline. On Drive the loser survives in the
+revision history, which drivel neither creates nor exposes; on SFTP and every
+M17–M21 backend it was simply gone. Do not write a test or a doc that asserts
+"no content is lost" without saying which interleaving it means — three
+expectations in the multiclient plan said it and all three were wrong.
+
+**Fixed 2026-10-17 on the push side, narrowed rather than closed**
+(`syncengine/diverged.go`, DESIGN.md §6). Before a whole-file `Put` of a path
+with a baseline, the engine checks that the remote still matches the echo, and
+on a mismatch downloads it into a §6 copy before uploading — named for the
+remote's mtime, so the pull's "local newer" copy of the same version is reused,
+not duplicated. Three things are load-bearing. **The pusher still wins the
+path**; nothing about who wins changed, only whether the loser survives. **A
+copy that cannot be fetched fails the push** (the engine's retry decides), never
+falls through to an overwrite. And **a local copy equal to its baseline is not
+pushed at all** over a newer remote — a touch used to push stale bytes over
+someone's edit — which needs the provider's digest, so hashless backends keep a
+copy instead. What remains: two pushes whose `Stat`s both precede either `Put`
+still lose one edit (no shipped backend has a conditional write), and a path
+with no baseline is unguarded. It costs one `Stat` per small-file rewrite, which
+`TestSmallFileChecksTheRemoteOnlyWhenItHasABaseline` pins; creates cost none.
+MC-31a (`TestFleetConcurrentEditsKeepTheOverwrittenEdit`) now asserts the copy,
+ordered with a pause because a race would decide nothing.
 
 ## Range writes (M6)
 

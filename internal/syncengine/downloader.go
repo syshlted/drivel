@@ -801,37 +801,13 @@ func (d *Downloader) conflicted(rel, copyRel string) {
 // download streams the object at path into dst atomically (temp file + rename in
 // the destination directory) and stamps its mtime to the remote modified time.
 func (d *Downloader) download(ctx context.Context, path, dst string, modified time.Time) error {
-	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
-		return err
-	}
-	rc, err := d.store.Get(ctx, path)
-	d.mon.observe(err)
+	n, err := fetchTo(ctx, d.store, path, dst, modified, d.mon.observe)
 	if err != nil {
-		return err
-	}
-	defer rc.Close()
-
-	tmp, err := os.CreateTemp(filepath.Dir(dst), ".drivel-*")
-	if err != nil {
-		return err
-	}
-	tmpName := tmp.Name()
-	defer os.Remove(tmpName) // no-op after a successful rename
-
-	n, err := io.Copy(tmp, rc)
-	if err != nil {
-		tmp.Close()
 		return err
 	}
 	d.mon.count(cDownloads, 1)
 	d.mon.count(cDownloadBytes, n)
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	if !modified.IsZero() {
-		_ = os.Chtimes(tmpName, modified, modified)
-	}
-	return os.Rename(tmpName, dst)
+	return nil
 }
 
 // rememberApplied records what we just wrote so a subsequent change-feed report

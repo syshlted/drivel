@@ -604,49 +604,67 @@ func TestFleetPropagatesABulkDelete(t *testing.T) {
 	}
 }
 
-// --- MC-31a: both peers push, and the loser's bytes are gone ------------------
+// --- MC-31a: both peers push, and the loser's edit is kept -------------------
 
-func TestFleetConcurrentEditsConvergeWithoutAConflictCopy(t *testing.T) {
+// Until 2026-10-17 this case asserted the opposite: that two edits which both
+// reached the remote converged on the second with NO conflict copy anywhere,
+// because the second pusher's whole-file Put replaced a remote it never checked
+// and the first edit existed nowhere afterwards. The push side now asks whether
+// the remote still holds its baseline (syncengine/diverged.go) and keeps the
+// remote's version as a §6 copy before overwriting it.
+//
+// The ordering is made deterministic with a pause, because the guard narrows the
+// window rather than closing it: two pushes whose Stats both land before either
+// Put still lose one edit, and a test that let goroutine scheduling decide would
+// assert nothing. Pausing c2 holds its write in the debounce map AND stops its
+// pull loop, which is exactly "c2 edited, and has not heard about c1's push".
+func TestFleetConcurrentEditsKeepTheOverwrittenEdit(t *testing.T) {
 	f := newFleet(t, 3)
+	c1, c2 := f.peers[0], f.peers[1]
 
-	f.peers[0].write("shared.txt", "the common ancestor")
+	c1.write("shared.txt", "the common ancestor")
 	f.waitConverged(fanoutWait)
 
-	// As close to simultaneous as two goroutines get: both writes land inside the
-	// 300ms debounce window, so both peers push before either polls.
-	var wg sync.WaitGroup
-	start := make(chan struct{})
-	for i, body := range map[int]string{0: "edited on c1", 1: "edited on c2"} {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			<-start
-			f.peers[i].write("shared.txt", body)
-		}()
+	if _, err := c2.mount.Pause(t.Context(), time.Minute); err != nil {
+		t.Fatalf("pausing c2: %v", err)
 	}
-	close(start)
-	wg.Wait()
-
+	c2.write("shared.txt", "edited on c2")
+	c1.write("shared.txt", "edited on c1")
+	if !waitFor(fanoutWait, func() bool {
+		b, ok := f.store.content("shared.txt")
+		return ok && string(b) == "edited on c1"
+	}) {
+		t.Fatal("c1's edit never reached the remote")
+	}
+	if err := c2.mount.Resume(t.Context()); err != nil {
+		t.Fatalf("resuming c2: %v", err)
+	}
 	f.waitConverged(fanoutWait)
 
-	// What actually happens, and it is worth stating plainly because it is not what
-	// "conflict policy" suggests: when both peers succeed in pushing, the store
-	// serialises them and the second write wins outright. Neither peer ever sees a
-	// divergence — each one's local content still matches its own echo — so §6
-	// never runs and the losing edit is gone with no copy kept.
-	//
-	// §6 resolves the case where a local edit could NOT be pushed (the peer was
-	// offline, or its push is still failing), which is the case below. If this
-	// assertion ever starts failing, the conflict policy has begun firing on
-	// ordinary concurrent writes, and every busy fleet will fill with copies.
+	// c2 pushed second, so c2's edit holds the path — who wins is unchanged —
+	// and c1's edit, which c2's Put replaced, is kept on c2 as the copy.
 	for _, p := range f.peers {
-		if got := p.conflicts(); len(got) != 0 {
-			t.Errorf("%s made conflict copies %v for edits that both reached the remote", p.name, got)
+		if got, _ := p.read("shared.txt"); got != "edited on c2" {
+			t.Errorf("%s holds %q; want the second push, \"edited on c2\"", p.name, got)
 		}
 	}
-	winner, _ := f.peers[2].read("shared.txt")
-	if winner != "edited on c1" && winner != "edited on c2" {
-		t.Errorf("the fleet settled on %q, which neither peer wrote", winner)
+	held := map[string]bool{}
+	total := 0
+	for _, p := range f.peers {
+		for _, c := range p.conflicts() {
+			total++
+			b, err := os.ReadFile(p.data(c))
+			if err != nil {
+				t.Fatal(err)
+			}
+			held[string(b)] = true
+		}
+	}
+	if !held["edited on c1"] {
+		t.Errorf("no conflict copy holds c1's overwritten edit; it has been lost (%d copies in the fleet)", total)
+	}
+	if total != 1 {
+		t.Errorf("%d conflict copies in the fleet; want exactly the one", total)
 	}
 }
 

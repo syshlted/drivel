@@ -613,29 +613,40 @@ func TestNoRemoteObjectStillUploads(t *testing.T) {
 	}
 }
 
-// A small file is not worth a round-trip to interrogate: the gates would spend a
-// request to save a request, so they are skipped entirely and the push is exactly
-// what it was before M6.
-func TestSmallFileSkipsTheRemoteCheck(t *testing.T) {
+// A small file is not worth a round-trip for the M6 gates — they would spend a
+// request to save a request — so they are skipped. What is left is the one Stat
+// the divergence check needs (diverged.go), and only for a path with a baseline:
+// a rewrite of a synced file costs that Stat, because it is what keeps a
+// concurrent edit from being overwritten unseen, while a create still costs
+// nothing beyond its Put, because there is no baseline to have diverged from.
+func TestSmallFileChecksTheRemoteOnlyWhenItHasABaseline(t *testing.T) {
 	dir := t.TempDir()
 	st := newState(t)
 	store := newPatchStore()
 
 	body := []byte("small enough not to bother")
-	if err := os.WriteFile(filepath.Join(dir, "a.txt"), body, 0o644); err != nil {
-		t.Fatal(err)
+	for _, p := range []string{"a.txt", "new.txt"} {
+		if err := os.WriteFile(filepath.Join(dir, p), body, 0o644); err != nil {
+			t.Fatal(err)
+		}
 	}
-	syncedAt(t, st, store, "a.txt", body) // identical content, but too small to check
+	syncedAt(t, st, store, "a.txt", body) // identical content, but too small to gate
 
 	e := New(Config{Store: store, DataDir: dir, State: st})
-	if err := e.pushContent(context.Background(), "a.txt", nil); err != nil {
+	if err := e.pushContent(context.Background(), "new.txt", nil); err != nil {
 		t.Fatal(err)
 	}
 	if got := store.statCount(); got != 0 {
-		t.Errorf("a small file cost %d Stat call(s); want 0", got)
+		t.Errorf("a small create cost %d Stat call(s); want 0", got)
 	}
-	if got := store.ops(); len(got) != 1 {
-		t.Fatalf("ops = %v; want the plain single Put", got)
+	if err := e.pushContent(context.Background(), "a.txt", nil); err != nil {
+		t.Fatal(err)
+	}
+	if got := store.statCount(); got != 1 {
+		t.Errorf("a small rewrite cost %d Stat call(s); want the divergence check's 1", got)
+	}
+	if got := store.ops(); len(got) != 2 {
+		t.Fatalf("ops = %v; want two plain Puts", got)
 	}
 }
 
