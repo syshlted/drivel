@@ -59,7 +59,7 @@ conflict     draft.md      conflict copies: draft (conflict 2026-10-17 09-30-00)
 | `pending` | a change is waiting to go out — in the [push delay](configuration.md#when-a-change-is-pushed), queued behind other uploads, or held by a pause |
 | `uploading` | going out now |
 | `retrying` | the last attempt failed; another is scheduled |
-| `error` | Drivel gave up on it; the next sweep re-sends it. See [when an upload is abandoned](configuration.md#when-an-upload-is-abandoned) |
+| `error` | A failure is recorded: either Drivel gave up uploading it and the next sweep re-sends it ([when an upload is abandoned](configuration.md#when-an-upload-is-abandoned)), or a remote change to it failed to apply here and is being retried ([when a download fails](configuration.md#when-a-download-fails)). The detail line says which |
 | `placeholder` | [lazy mode](lazy-mode.md): the file's content has not been fetched yet |
 | `conflict` | a conflict copy sits beside it — see [data safety](data-safety.md) |
 | `local-only` | deliberately not synced: a conflict copy, a pipe, socket or symlink, or one of Drivel's own temporary files |

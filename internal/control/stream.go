@@ -149,6 +149,8 @@ func (s *Server) metrics(w http.ResponseWriter, _ *http.Request) {
 		{"drivel_hydrations_total", "counter", "Placeholders filled on first read (M5).", func(s syncengine.Stats) float64 { return float64(s.Hydrations) }},
 		{"drivel_hydrated_bytes_total", "counter", "Bytes faulted in by hydration.", func(s syncengine.Stats) float64 { return float64(s.HydratedBytes) }},
 		{"drivel_hydration_failures_total", "counter", "Hydrations that failed.", func(s syncengine.Stats) float64 { return float64(s.HydrationFailures) }},
+		{"drivel_apply_failures_total", "counter", "Remote changes that failed to apply locally and were recorded for retry.", func(s syncengine.Stats) float64 { return float64(s.ApplyFailures) }},
+		{"drivel_refetched_total", "counter", "Recorded failures settled by a retry.", func(s syncengine.Stats) float64 { return float64(s.Refetched) }},
 		{"drivel_conflicts_total", "counter", "Conflict copies written.", func(s syncengine.Stats) float64 { return float64(s.Conflicts) }},
 		{"drivel_polls_total", "counter", "Change-feed pages fetched.", func(s syncengine.Stats) float64 { return float64(s.Polls) }},
 		{"drivel_poll_errors_total", "counter", "Change-feed requests that failed.", func(s syncengine.Stats) float64 { return float64(s.PollErrors) }},

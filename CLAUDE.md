@@ -459,8 +459,9 @@ below for why the backing file is opened readable regardless.
 Independent of M9, nothing waits on either.
 
 M27 the sync path's two silences **shipped 2026-10-12, part 4 added
-2026-10-16**: back-pressure is reported, an abandoned push is repaired rather
-than forgotten, and a push *lost* to a crash is found by the next sweep. See
+2026-10-16, part 5 2026-10-17**: back-pressure is reported, an abandoned push is
+repaired rather than forgotten, a push *lost* to a crash is found by the next
+sweep, and a failed download is retried by the pull loop. See
 "The sync path's two silences" below for the invariants.
 
 **M14** control & status API **shipped 2026-10-17**: `drivel mount -control`
@@ -866,7 +867,7 @@ permanently and fixed it, and its throughput half then measured the two protocol
 against live Drive (both in "Transport" below). Six of the group's findings are products of
 running it and not of the plan: an **abandoned push and a failed download were
 both repaired only by a sweep**, which `-sweep-interval 0` disables — the push
-half is M27, the **download half is not and still waits for a sweep**; the
+half is M27, and so since 2026-10-17 is the download half (part 5, no sweep); the
 shutdown gap in M8 rule 1 above; **an eager SFTP mount without
 `-materialize` never receives anything** (SFTP rule 2); the orphaned plugin
 child (M9 rule 10); **one `cp` of a large file costing two full uploads**,
@@ -1446,7 +1447,7 @@ retry. 2200 files, permanently. Six things carry the fix.
    move does not preserve. SFTP sets it nowhere: it has no feed at all, so the
    sweep is its inbound path and a rename there is already just two listings.
 4. **`state.RenameSubtree` is the load-bearing half, and it is one commit however
-   large the subtree.** It carries `echo`, `hydration` and `repair`; `tombstone`
+   large the subtree.** It carries `echo`, `hydration`, `repair` and `refetch`; `tombstone`
    and `seen` deliberately stay put (a tombstone describes the object that *left*
    a path, and seen marks belong to a generation whose listing predates this).
    A baseline is not a cache — it is §4's loop breaker, M6's gate, M7b's delete
@@ -1747,6 +1748,27 @@ three, and 13-byte files.
    and `/proc/<pid>/io` cannot see a Drive upload at all, because QUIC sends with
    `sendmsg` and `wchar` counts the write family — a complete 64 MiB upload moved
    it 0.10 MiB, while the backend's `rchar` tracked it exactly.
+
+5. **A failed inbound apply is retried by path, from the pull loop, with no
+   sweep** (part 5, 2026-10-17 — MC-46's finding). The cursor still advances
+   past a page with a failure in it, **and must**: holding it for one change
+   that can never apply (a full disk, a refused name) stops inbound sync for
+   every path, for good. So the path goes into `internal/state`'s `refetch`
+   bucket and `refetch.go` retries it `refetchDelay` (1m) later, doubling to
+   64m, at once after a restart. Four rules. **A retry `Stat`s the path and
+   applies what the remote holds *now*** through the feed's own `apply` —
+   never a replay of the failed change, which is why the record holds no
+   version. **A removal is never recorded**, nor does a retry that finds the
+   path gone touch anything local: re-applying a deletion later deletes
+   whatever is there by then, which may be unpushed work — part 2's
+   abandoned-deletion rule from the inbound side. **It runs on the pull loop's
+   goroutine, between polls**, so it cannot interleave with a feed apply.
+   And **`SetEcho`, `ForgetMany` and `ForgetDeleted` discharge it inside the
+   transaction they already commit**, so a retry that downloads costs one
+   commit and §12's ratchet does not move; a push's `SetEcho` discharging it
+   is right too, since the retry would have found that echo and done
+   nothing. `RenameSubtree` carries it. Not run live; real ENOSPC is still
+   MC-46's Tier B half.
 
 **Two things M27 does not close, and neither is an oversight.** An abandoned
 **deletion** is not repaired — no local content to re-send, and inferring it

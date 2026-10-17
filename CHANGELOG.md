@@ -13,6 +13,23 @@ from source with `make build`.
 
 ## Unreleased
 
+### A download that fails is tried again — 2026-10-17
+
+If a remote change could not be applied on this machine (the connection dropped
+partway through a download, or the disk was full), the file used to stay out of
+date until the next full sweep. That is a day away by default for Google Drive,
+and never with `sweep-interval = "0"`. Drivel now remembers the file and tries
+again a minute later, backing off to about once an hour if it keeps failing. A
+restart retries straight away. Each retry fetches what the remote holds at that
+moment, not the version that failed.
+
+A remote *deletion* that fails to apply is not retried this way: by the time a
+retry ran, the file at that path might be new work of yours. The next sweep
+still handles it, as before.
+
+`drivel status FILE` reports a file that is waiting for a retry as `error`, and
+`drivel status` counts these failures and how many a retry has since fixed.
+
 ### Status for fstab mounts, and for lazy mounts you only read from — 2026-10-17
 
 A mount from `/etc/fstab` can now have a control socket: add `control` to its

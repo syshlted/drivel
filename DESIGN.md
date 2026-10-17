@@ -4739,7 +4739,7 @@ this whole group walks through, so it is a precondition rather than a note.
     otherwise.
 
 29. **M27 — The sync path's two silences.** **Shipped 2026-10-12; part 4 added
-    2026-10-16.** Two defects that are not bugs in what the engine *does* — it
+    2026-10-16, part 5 (the download half) 2026-10-17.** Two defects that are not bugs in what the engine *does* — it
     behaves correctly both times — but in what it tells the person depending on
     it. They are one milestone because the shape of the fix is the same in each:
     the engine already holds the fact and discards it. Part 4 is the same shape
@@ -5069,7 +5069,59 @@ this whole group walks through, so it is a precondition rather than a note.
     writing down because part 1 is precisely about that bound.
 
     Unsettled: whether an abandoned push is also a per-path status through M14,
-    where `unknown` as a first-class status already points.
+    where `unknown` as a first-class status already points. (M14 settled it:
+    `error`, with a `detail`.)
+
+    **Part 5, 2026-10-17: the download half.** MC-46 found that a failed inbound
+    apply does not hold the cursor — the page's error is logged, the cursor
+    advances, and the feed never offers the object again — so a dropped
+    connection mid-download left the file stale until a sweep, which is a day on
+    Drive's default and never at `-sweep-interval 0`. Holding the cursor was the
+    rejected fix, and the reason is head-of-line blocking: a change that can
+    *never* apply (a full disk, a name the backing filesystem refuses) would
+    then stop inbound sync for every other path, for good. So the shape is
+    part 2's, mirrored — a `refetch` bucket in `internal/state`, path → first
+    failure — and four things about it differ from the push side on purpose.
+
+    - **The retry is not a sweep.** A repair has to be a sweep because the walk
+      is what re-derives an event from the backing file; a refetch needs only
+      the remote's current state at one path, which is one `Stat`. So
+      `refetchPass` Stats each owed path and runs the result through the feed's
+      own `apply` — §4's echo test, the tombstone, the placeholder branch and
+      §6's conflict copy all hold unchanged — on the pull loop's goroutine,
+      between polls, so it can never interleave with a feed apply. That is also
+      why the delay is a minute (`refetchDelay`) where `repairDelay` is five:
+      there is no expensive operation to amortise, only a transient failure to
+      let clear. Doubling to 64 minutes; a record from an earlier run is retried
+      at once, by part 2's reasoning.
+    - **It fetches what the remote holds now, never the change that failed.**
+      The record holds no version for exactly that reason. A stale description
+      replayed later is the one outcome worse than not retrying.
+    - **A removal is not recorded**, part 2's abandoned-deletion rule from the
+      other side: re-applying a deletion later deletes whatever is at the path
+      by then, which may be unpushed work. A failed removal leaves the local
+      copy in place, which is the state every delete guard prefers, and the
+      sweep's delete pass has the evidence to finish it. Likewise a path the
+      retry finds gone remotely is dropped with nothing local touched — the
+      feed reports that removal itself, and if it already has, `ForgetMany`
+      discharged the record first.
+    - **It is discharged for free.** `SetEcho`, `ForgetMany` and
+      `ForgetDeleted` each drop it inside the transaction they already commit —
+      a path in agreement, a path gone remotely, a path we removed — so a retry
+      that downloads costs the one commit the download costs, and §12's ratchet
+      is untouched. A push's `SetEcho` discharging it is correct too: the retry
+      would have found that echo matching and done nothing. It follows a
+      directory move in `RenameSubtree`, as `repair` does.
+
+    A sweep's failed apply is recorded as well, since the next sweep may be a
+    day away; it was already withheld from the lost-push row through
+    `noRepush`, and still is. M14 shows the path as `error` and counts
+    `inbound.apply_failures` against `inbound.refetched`.
+    `internal/syncengine/refetch_test.go` carries it; removing the record call
+    in the pull loop and removing the discharge in `SetEcho` were each checked
+    to fail the test that names them. **Not run live**: the in-tree fault
+    injection fails the read side, and real ENOSPC on the write side is still
+    MC-46's Tier B half.
 
 
 

@@ -636,6 +636,9 @@ func (d *Downloader) applyPage(ctx context.Context, sw state.Sweep, files []prov
 			}
 			noRepush[f.Path] = struct{}{}
 			d.logf("[sweep] %s: %v", f.Path, err)
+			// The next sweep would retry it too, but that may be a day away, or
+			// never at -sweep-interval 0.
+			d.oweRefetch(provider.RemoteChange{Path: f.Path, File: &f})
 		}
 	}
 	return nil

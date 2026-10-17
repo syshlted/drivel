@@ -101,6 +101,14 @@ type Downloader struct {
 	repairFails int
 	repairBase  time.Duration
 
+	// refetchDue is when the paths whose inbound apply failed are next retried,
+	// and refetchFails counts the consecutive retry passes that left one
+	// standing. Same goroutine, same absence of a lock; refetchBase is
+	// refetchDelay, a field only for tests. See refetch.go.
+	refetchDue   time.Time
+	refetchFails int
+	refetchBase  time.Duration
+
 	// openedAt is when this mount's pull loop was constructed, which is before
 	// the filesystem is served and therefore before any write can reach the
 	// engine (app.Mount.Open builds both; Run mounts afterwards).
@@ -193,7 +201,7 @@ func NewDownloader(src provider.ChangeSource, store provider.Store, dataDir stri
 	}
 	return &Downloader{
 		src: src, store: store, dataDir: dataDir, state: st, cad: cad,
-		repairBase: repairDelay, openedAt: time.Now(),
+		repairBase: repairDelay, refetchBase: refetchDelay, openedAt: time.Now(),
 	}
 }
 
@@ -210,6 +218,7 @@ func (d *Downloader) Run(ctx context.Context) {
 		return
 	}
 	d.nextSweep = d.sweepDeadline()
+	d.resumeRefetches()
 
 	wait := d.cad.Fast
 	for {
@@ -228,6 +237,7 @@ func (d *Downloader) Run(ctx context.Context) {
 		if fresh, swept := d.dueSweep(ctx); swept {
 			cursor, wait = fresh, d.cad.Fast
 		}
+		d.dueRefetch(ctx)
 
 		changes, next, err := d.src.Changes(ctx, cursor)
 		d.mon.observe(err)
@@ -270,6 +280,10 @@ func (d *Downloader) Run(ctx context.Context) {
 					return
 				}
 				d.logf("[pull] apply %s: %v", ch.Path, err)
+				// The cursor still advances past this page, so the feed will
+				// not offer the object again: record the path, or only a sweep
+				// would ever notice (MC-46).
+				d.oweRefetch(ch)
 			}
 		}
 		if err := d.flushForget(forget); err != nil {
@@ -333,6 +347,7 @@ func (d *Downloader) runWithoutFeed(ctx context.Context) {
 	} else {
 		d.nextSweep = d.sweepDeadline()
 	}
+	d.resumeRefetches()
 
 	if d.nextSweep.IsZero() {
 		// -sweep-interval 0 disables the only *scheduled* inbound path there is.
@@ -353,9 +368,11 @@ func (d *Downloader) runWithoutFeed(ctx context.Context) {
 		// the two halves already share the state store and nothing else, and the
 		// record has to be consulted after a restart regardless.
 		wait := d.repairBase
-		if !d.nextSweep.IsZero() {
-			if w := time.Until(d.nextSweep); w < wait {
-				wait = w
+		for _, due := range []time.Time{d.nextSweep, d.refetchDue} {
+			if !due.IsZero() {
+				if w := time.Until(due); w < wait {
+					wait = w
+				}
 			}
 		}
 		if wait < time.Second {
@@ -372,6 +389,7 @@ func (d *Downloader) runWithoutFeed(ctx context.Context) {
 		// dueSweep reschedules before it runs, so a failure backs off by a whole
 		// interval rather than spinning.
 		d.dueSweep(ctx)
+		d.dueRefetch(ctx)
 	}
 }
 

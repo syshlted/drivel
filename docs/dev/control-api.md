@@ -130,6 +130,7 @@ gauges.
     "remote_deletes": 2, "remote_moves": 0, "conflicts": 0,
     "suppressed_own_deletes": 1,
     "polls": 900, "poll_errors": 0,
+    "apply_failures": 0, "refetched": 0,
     "last_poll": "2026-10-17T09:11:58Z", "last_cursor_advance": "2026-10-17T09:10:02Z"
   },
   "hydration": {"hydrations": 0, "bytes": 0, "failures": 0},
@@ -160,6 +161,12 @@ The three content gates are counted separately because they are the point:
 no bytes), `range_puts` sent only the changed extents, `unchanged_skips` sent
 nothing because the remote already held the bytes. `uploads` is whole-file
 uploads only.
+
+`inbound.apply_failures` counts remote changes that could not be applied here
+(a download that failed, a full disk) and were recorded for retry;
+`inbound.refetched` counts those a retry settled. The feed moves on past a
+failure, so a gap between the two that does not close is a path still out of
+date locally.
 
 `sweep.last.complete` is `false` for a sweep that ended early (a provider that
 could not advance its listing): it materialised what it saw and concluded
@@ -215,7 +222,7 @@ One path.
 | `pending` | an upload, delete or rename is waiting: in the push delay, queued, or held by a pause |
 | `uploading` | an operation on it is running now |
 | `retrying` | the last attempt failed and another is scheduled |
-| `error` | drivel gave up; the path is recorded and the next sweep re-sends it |
+| `error` | a failure is recorded for the path: an upload drivel gave up on, which the next sweep re-sends, or a remote change that failed to apply here, which the pull loop retries. `detail` says which |
 | `placeholder` | lazy mode: the file exists with its size and no content, which is fetched on first read |
 | `conflict` | a conflict copy sits beside it (`conflicts` names them) |
 | `local-only` | exists here and is deliberately not synced: a conflict copy, a special file (pipe, socket, device, symlink), or one of drivel's own temporary files |

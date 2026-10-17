@@ -222,6 +222,34 @@ not running. Three things bound it:
   re-uploaded on a guess. The record fills itself in the next time anything syncs
   that file.
 
+## When a download fails
+
+The other direction has its own failure: a remote change that cannot be applied
+on this machine — the connection drops partway through a download, the disk is
+full, the backing filesystem refuses the name. Drivel cannot simply stop and
+wait for that one file, because then nothing else would come in either, so it
+moves on and **remembers the path**:
+
+```
+[pull] apply notes/todo.md: … connection reset by peer
+[pull] a remote change could not be applied: retrying in 1m0s
+[pull] refetch notes/todo.md (an earlier apply failed)
+```
+
+A retry asks the remote what the file is *now* and applies that, with every
+check an ordinary download gets, so a file edited again in the meantime arrives
+at its newest version and a local edit still gets its conflict copy. No sweep is
+involved, so this works at any `-sweep-interval`, including `0`. Retries that
+keep failing back off from one minute to about an hour, and a restart retries
+at once.
+
+Two cases are deliberately left alone. A file that no longer exists remotely by
+the time of the retry is simply dropped from the list — the deletion reaches
+you the ordinary way. And a remote **deletion** that fails to apply is not
+retried, because by the time a retry ran, the file at that path could be new
+work of yours that has not been uploaded yet; the next sweep deals with it,
+with the safeguards it applies to every deletion.
+
 ## Transfer concurrency
 
 Two numbers, because the two directions are not alike. `upload-workers` sizes the

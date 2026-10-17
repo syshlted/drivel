@@ -614,6 +614,8 @@ const (
 	cSuppressed
 	cPolls
 	cPollErrors
+	cApplyFailures
+	cRefetched
 	// gauges
 	cQueued
 	cInflight
@@ -642,6 +644,7 @@ type Stats struct {
 	RemoteDeletes, RemoteMoves      int64
 	Conflicts, SuppressedOwnDeletes int64
 	Polls, PollErrors               int64
+	ApplyFailures, Refetched        int64
 	Hydrations, HydratedBytes       int64
 	HydrationFailures               int64
 
@@ -689,6 +692,7 @@ func (m *Monitor) Snapshot() Stats {
 		RemoteDeletes: c.get(cRemoteDeletes), RemoteMoves: c.get(cRemoteMoves),
 		Conflicts: c.get(cConflicts), SuppressedOwnDeletes: c.get(cSuppressed),
 		Polls: c.get(cPolls), PollErrors: c.get(cPollErrors),
+		ApplyFailures: c.get(cApplyFailures), Refetched: c.get(cRefetched),
 		Queued: c.get(cQueued), InFlight: c.get(cInflight), Coalescing: c.get(cCoalescing),
 	}
 	m.mu.Lock()

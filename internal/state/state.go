@@ -39,6 +39,7 @@ var (
 	bucketSeen      = []byte("seen")
 	bucketRepair    = []byte("repair")
 	bucketTomb      = []byte("tombstone")
+	bucketRefetch   = []byte("refetch")
 	keyCursor       = []byte("changefeed")
 	keySweep        = []byte("current")
 	keySweepDone    = []byte("done")
@@ -155,7 +156,7 @@ func Open(path string) (*Store, error) {
 	// Through s.update, not db.Update, so Commits() counts every commit this store
 	// has made rather than every one after the first.
 	if err := s.update(func(tx *bolt.Tx) error {
-		for _, b := range [][]byte{bucketCursor, bucketEcho, bucketHydration, bucketSweep, bucketSeen, bucketRepair, bucketTomb} {
+		for _, b := range [][]byte{bucketCursor, bucketEcho, bucketHydration, bucketSweep, bucketSeen, bucketRepair, bucketTomb, bucketRefetch} {
 			if _, err := tx.CreateBucketIfNotExists(b); err != nil {
 				return err
 			}
@@ -290,6 +291,9 @@ type Record struct {
 	HasEcho  bool
 	OwesPush bool      // an abandoned push is recorded for repair
 	OwedAt   time.Time // when it was first abandoned
+
+	OwesFetch   bool      // a failed inbound apply is recorded for retry
+	FetchOwedAt time.Time // when it first failed
 }
 
 // Lookup reads the records for every path in one read transaction. It never
@@ -300,6 +304,7 @@ func (s *Store) Lookup(paths []string) (map[string]Record, error) {
 	out := make(map[string]Record, len(paths))
 	err := s.db.View(func(tx *bolt.Tx) error {
 		echo, repair := tx.Bucket(bucketEcho), tx.Bucket(bucketRepair)
+		refetch := tx.Bucket(bucketRefetch)
 		for _, p := range paths {
 			var r Record
 			if v := echo.Get([]byte(p)); v != nil {
@@ -312,7 +317,11 @@ func (s *Store) Lookup(paths []string) (map[string]Record, error) {
 				r.OwesPush = true
 				_ = r.OwedAt.UnmarshalText(v)
 			}
-			if r.HasEcho || r.OwesPush {
+			if v := refetch.Get([]byte(p)); v != nil {
+				r.OwesFetch = true
+				_ = r.FetchOwedAt.UnmarshalText(v)
+			}
+			if r.HasEcho || r.OwesPush || r.OwesFetch {
 				out[p] = r
 			}
 		}
@@ -330,6 +339,13 @@ func (s *Store) Lookup(paths []string) (map[string]Record, error) {
 // path — "this is what we hold there" against "we deleted what was there" — and
 // the echo is the newer of the two by construction, because this is the only
 // thing that writes one.
+//
+// It drops an owed refetch the same way and for the same price. A refetch says
+// "the remote moved here and we failed to follow"; a fresh echo says this path
+// and the remote now agree, whichever direction made them agree — an applied
+// download settled the debt, and a push replaced the content the download was
+// going to fetch, which is what a retry would have found and then done nothing
+// about. See OweRefetch.
 func (s *Store) SetEcho(path string, e Echo) error {
 	v, err := json.Marshal(e)
 	if err != nil {
@@ -338,6 +354,9 @@ func (s *Store) SetEcho(path string, e Echo) error {
 	return s.update(func(tx *bolt.Tx) error {
 		k := []byte(path)
 		if err := tx.Bucket(bucketTomb).Delete(k); err != nil {
+			return err
+		}
+		if err := tx.Bucket(bucketRefetch).Delete(k); err != nil {
 			return err
 		}
 		return tx.Bucket(bucketEcho).Put(k, v)
@@ -376,7 +395,7 @@ func (s *Store) ForgetMany(paths []string) error {
 	}
 	return s.update(func(tx *bolt.Tx) error {
 		echo, hydration := tx.Bucket(bucketEcho), tx.Bucket(bucketHydration)
-		tomb := tx.Bucket(bucketTomb)
+		tomb, refetch := tx.Bucket(bucketTomb), tx.Bucket(bucketRefetch)
 		for _, p := range paths {
 			k := []byte(p)
 			if err := echo.Delete(k); err != nil {
@@ -390,6 +409,10 @@ func (s *Store) ForgetMany(paths []string) error {
 			// report that the object IS removed — the remote has caught up, so the
 			// record has nothing left to recognise. Free: same transaction.
 			if err := tomb.Delete(k); err != nil {
+				return err
+			}
+			// A path the remote no longer holds has nothing left to fetch.
+			if err := refetch.Delete(k); err != nil {
 				return err
 			}
 		}
@@ -724,6 +747,99 @@ func (s *Store) ClearRepair(path string) error {
 	})
 }
 
+// --- failed inbound applies -------------------------------------------------
+//
+// The refetch bucket is the inbound mirror of the repair bucket. The pull loop
+// advances its cursor past a page whether or not every change in it applied —
+// it has to, or one change that can never apply (a full disk, a path the
+// backing filesystem refuses) would stop inbound sync for good — so before this
+// existed a failed download was logged once and then forgotten: the feed never
+// offered the object again, and only the next sweep could notice, which is 24
+// hours away on Drive's default and never at -sweep-interval 0 (MC-46).
+//
+// A record here says "the remote moved at this path and we failed to follow".
+// Like repair it holds a path and nothing else — not the change, not a version
+// — because what to fetch is re-derived from the provider when the retry runs:
+// a stale description of the remote would be the one thing worse than none.
+//
+// Three writes discharge it at no commit of their own, because each already
+// commits for its own reasons: SetEcho (the path is in agreement again),
+// ForgetMany (the remote no longer has it) and ForgetDeleted (we removed it).
+
+// OweRefetch records that applying a remote change to path failed. at is when,
+// kept for the log and the status API.
+//
+// Re-recording a path already owed costs no commit, and keeps the first time:
+// a backing filesystem that refuses every write fails every change in every
+// page, and that is the shape where a blind Put per failure would turn a full
+// disk into a disk-wear workload as well (DESIGN.md §12).
+func (s *Store) OweRefetch(path string, at time.Time) error {
+	if path == "" {
+		return nil
+	}
+	already := false
+	if err := s.db.View(func(tx *bolt.Tx) error {
+		already = tx.Bucket(bucketRefetch).Get([]byte(path)) != nil
+		return nil
+	}); err != nil {
+		return err
+	}
+	if already {
+		return nil
+	}
+	stamp, err := at.UTC().MarshalText()
+	if err != nil {
+		return err
+	}
+	return s.update(func(tx *bolt.Tx) error {
+		return tx.Bucket(bucketRefetch).Put([]byte(path), stamp)
+	})
+}
+
+// RefetchesOwed reports whether any failed apply is waiting to be retried. A
+// read transaction over one key, so the pull loop can ask at startup for free.
+func (s *Store) RefetchesOwed() (owed bool, err error) {
+	err = s.db.View(func(tx *bolt.Tx) error {
+		k, _ := tx.Bucket(bucketRefetch).Cursor().First()
+		owed = k != nil
+		return nil
+	})
+	return owed, err
+}
+
+// EachRefetch calls fn for every owed path, in path order. fn runs inside a read
+// transaction and must not write to this store.
+func (s *Store) EachRefetch(fn func(path string, at time.Time) error) error {
+	return s.db.View(func(tx *bolt.Tx) error {
+		return tx.Bucket(bucketRefetch).ForEach(func(k, v []byte) error {
+			var at time.Time
+			if err := at.UnmarshalText(v); err != nil {
+				at = time.Time{} // the path is the load-bearing half
+			}
+			return fn(string(k), at)
+		})
+	})
+}
+
+// ClearRefetch drops the record for one path, and costs no commit when there is
+// none — which is the usual case, because a retry that downloads anything has
+// already dropped it inside SetEcho.
+func (s *Store) ClearRefetch(path string) error {
+	present := false
+	if err := s.db.View(func(tx *bolt.Tx) error {
+		present = tx.Bucket(bucketRefetch).Get([]byte(path)) != nil
+		return nil
+	}); err != nil {
+		return err
+	}
+	if !present {
+		return nil
+	}
+	return s.update(func(tx *bolt.Tx) error {
+		return tx.Bucket(bucketRefetch).Delete([]byte(path))
+	})
+}
+
 // --- tombstones (the §4 loop breaker across a deletion) ---------------------
 //
 // A tombstone is an Echo kept past the deletion that removed it, plus when the
@@ -773,6 +889,11 @@ func (s *Store) ForgetDeleted(path string, t Tombstone) error {
 			return err
 		}
 		if err := tx.Bucket(bucketHydration).Delete(k); err != nil {
+			return err
+		}
+		// We deleted the object remotely, so whatever a failed download was
+		// trying to fetch is gone too.
+		if err := tx.Bucket(bucketRefetch).Delete(k); err != nil {
 			return err
 		}
 		return tx.Bucket(bucketTomb).Put(k, v)
@@ -864,7 +985,7 @@ func (s *Store) PruneTombstones(before time.Time) (int, error) {
 // RenameSubtree re-keys every record at oldPath and beneath it to newPath, in
 // one transaction, and reports how many records moved.
 //
-// Three buckets move and three deliberately do not.
+// Four buckets move and three deliberately do not.
 //
 //   - echo, hydration and repair all answer "what do we know about the object at
 //     this path", so they follow the object. hydration is M5's present-ranges
@@ -873,7 +994,9 @@ func (s *Store) PruneTombstones(before time.Time) (int, error) {
 //     therefore moves with the file whatever this store does. repair is M27's
 //     "this path is owed a push", and the content that is owed is at the new
 //     path now; a dropped debt would be repaired only by the divergence row,
-//     which is a weaker test on a slower schedule.
+//     which is a weaker test on a slower schedule. refetch is the inbound
+//     mirror of repair — the remote object we failed to follow — and the object
+//     that is owed is the one now at the new path.
 //   - tombstone does NOT move. It records the deletion of the object that *used*
 //     to be at a path, and the object arriving there is a different one — so
 //     carrying it across would arm a five-minute suppression against content
@@ -903,7 +1026,7 @@ func (s *Store) RenameSubtree(oldPath, newPath string) (int, error) {
 	if within(newPath, oldPath) || within(oldPath, newPath) {
 		return 0, nil
 	}
-	buckets := [][]byte{bucketEcho, bucketHydration, bucketRepair}
+	buckets := [][]byte{bucketEcho, bucketHydration, bucketRepair, bucketRefetch}
 
 	// Ask before writing, in a read transaction: bbolt advances the meta page on
 	// every commit whether or not a data page changed, so an Update that moves

@@ -266,6 +266,14 @@ the local file, and a deletion has no local file to re-send from — so if the
 Drivel never infers that deletion for you, because the remote object is still
 there and still looks like a file you have.
 
+**`[pull] apply PATH: …` — a remote change did not arrive.** The download or
+the local write failed. Drivel retries it on its own about a minute later
+(`[pull] refetch PATH`), then less and less often if it keeps failing, out to
+about an hour, so a cause that does not clear on its own — a full disk, a name
+the backing filesystem will not accept — needs fixing, and the next retry then
+succeeds. `drivel status PATH` shows such a file as `error` until it does. See
+[when a download fails](configuration.md#when-a-download-fails).
+
 **Inbound sync stopped silently.** Google expires change cursors. Drivel
 recognises the expiry and recovers by re-enumerating; if you suspect it has not,
 `-resync` forces the sweep.

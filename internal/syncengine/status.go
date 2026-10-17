@@ -234,6 +234,8 @@ func (r StatusReader) one(e entry, t Transient, rec state.Record) (PathStatus, e
 		switch {
 		case rec.OwesPush:
 			ps.Status, ps.Detail = StatusError, "an abandoned push is recorded for this path, which no longer exists locally"
+		case rec.OwesFetch:
+			ps.Status, ps.Detail = StatusError, "a remote change to this path failed to apply here; it is retried"
 		case rec.HasEcho:
 			ps.Status, ps.Detail = StatusUnknown, "absent locally but a sync record remains; the next sweep decides whether it was deleted"
 		default:
@@ -277,6 +279,8 @@ func (r StatusReader) one(e entry, t Transient, rec state.Record) (PathStatus, e
 	switch {
 	case rec.OwesPush:
 		ps.Status, ps.Detail = StatusError, "an earlier push was abandoned; the next sweep re-sends it"
+	case rec.OwesFetch:
+		ps.Status, ps.Detail = StatusError, "a remote change to this path failed to apply here; it is retried"
 	case !rec.HasEcho:
 		ps.Status, ps.Detail = StatusUnknown, "no sync record: never pushed or pulled by this mount"
 	case mode.IsDir():

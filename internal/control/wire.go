@@ -76,6 +76,8 @@ type inboundBody struct {
 	SuppressedOwnDeletes int64  `json:"suppressed_own_deletes"`
 	Polls                int64  `json:"polls"`
 	PollErrors           int64  `json:"poll_errors"`
+	ApplyFailures        int64  `json:"apply_failures"`
+	Refetched            int64  `json:"refetched"`
 	LastPoll             string `json:"last_poll,omitempty"`
 	LastCursorAdvance    string `json:"last_cursor_advance,omitempty"`
 }
@@ -204,6 +206,7 @@ func detailOf(m Mount, s syncengine.Stats) mountDetail {
 			PlaceholdersCreated: s.PlaceholdersCreated, Restamps: s.Restamps,
 			RemoteDeletes: s.RemoteDeletes, RemoteMoves: s.RemoteMoves, Conflicts: s.Conflicts,
 			SuppressedOwnDeletes: s.SuppressedOwnDeletes, Polls: s.Polls, PollErrors: s.PollErrors,
+			ApplyFailures: s.ApplyFailures, Refetched: s.Refetched,
 			LastPoll: ts(s.LastPoll), LastCursorAdvance: ts(s.LastCursorAdvance),
 		},
 		Hydration: hydrationBody{Hydrations: s.Hydrations, Bytes: s.HydratedBytes, Failures: s.HydrationFailures},

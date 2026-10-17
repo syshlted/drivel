@@ -307,7 +307,8 @@ caps the listing, default 1000). The statuses are
 .BR uploading ,
 .BR retrying ,
 .B error
-(given up; the next sweep re-sends it),
+(an upload given up on, which the next sweep re-sends, or a remote change that
+failed to apply here, which is retried),
 .BR placeholder ,
 .B conflict
 (a conflict copy sits beside it),
@@ -1337,6 +1338,32 @@ described under
 A baseline with no recorded size and time (anything last synced by a build
 predating 10 September 2026) is counted in the sweep summary and left alone
 rather than re-uploaded on a guess.
+.SH FAILED DOWNLOADS
+A remote change that cannot be applied locally \(em a download cut off partway,
+a full disk, a name the backing filesystem refuses \(em does not stop inbound
+sync: the change feed moves on, and the
+.I path
+is recorded and retried about a minute later.
+.PP
+.RS
+.EX
+[pull] a remote change could not be applied: retrying in 1m0s
+[pull] refetch notes/todo.md (an earlier apply failed)
+.EE
+.RE
+.PP
+A retry asks the provider what the path holds
+.I now
+and applies that exactly as the feed would have, so a file changed again in the
+meantime arrives at its newest version and a divergent local edit still gets its
+conflict copy. No sweep is involved, so
+.B -sweep-interval 0
+does not switch it off. Repeated failures double the delay to about an hour; a
+restart retries at once. A path that no longer exists remotely is dropped from
+the list and nothing local is touched. A remote
+.I deletion
+that fails to apply is not retried: by then the local file may be new, unsent
+work, and the next sweep's delete guards are the right place to decide.
 .SH SPECIAL FILES AND MOUNT SAFETY
 .B drivel
 always mounts

@@ -56,6 +56,10 @@ erDiagram
         string path PK "root-relative slash path"
         timestamp at "when the outbound path first gave up on it"
     }
+    REFETCH {
+        string path PK "root-relative slash path"
+        timestamp at "when applying a remote change there first failed"
+    }
     TOMBSTONE {
         string path PK "root-relative slash path"
         json echo "the ECHO this path had when we deleted it"
@@ -67,6 +71,7 @@ erDiagram
     ECHO ||--o| HYDRATION : "same path key; both dropped together by Forget"
     REPAIR ||--o| ECHO : "an owed path usually HAS a baseline; that is why the walk misses it"
     ECHO ||--o| TOMBSTONE : "never both: a delete moves the record across, a sync moves it back"
+    ECHO ||--o| REFETCH : "a sync of the path discharges it, in the same transaction"
 ```
 
 What each bucket costs if the file is lost:
@@ -79,6 +84,7 @@ What each bucket costs if the file is lost:
 | `sweep` | resume point of an interrupted enumeration, plus when the last one finished | the sweep restarts, and the next mount treats a periodic sweep as overdue |
 | `seen` | which paths one sweep observed remotely | a resumed sweep would infer false deletes — which is why these are on disk and not in memory |
 | `repair` | paths the uploader gave up on, for the next sweep to re-send (M27) | those files wait for `-sweep-interval` again, and are not repaired at all if it is `0` — though a lost push is still found by the walk's fingerprint row, which needs no record |
+| `refetch` | paths whose inbound apply failed while the cursor moved past them, for the pull loop to fetch again | those changes wait for the next sweep, and are not retried at all at `-sweep-interval 0` until something else touches the path — which is how every failed download behaved before this bucket existed (MC-46) |
 | `tombstone` | the baseline a deletion dropped, so a provider still serving its pre-deletion view is recognised rather than applied (§4.5) | a file deleted within the last few minutes can come back, and the directory it was in comes back permanently |
 
 `local-size` / `local-mtime` fingerprint the **backing** file, not the remote one,
@@ -111,10 +117,10 @@ existed a hashless provider answered "no baseline to compare against" for every
 file, so a deletion made on the remote was undone on the very next sweep — found
 against a live OpenSSH server, not in a test.
 
-`repair` is the only bucket written by the *failure* path, and it is deliberately
-not a queue: it holds a path and a time, never an operation and never content.
-The sweep re-derives what to send from the backing file as it stands when it gets
-there, which is the only honest answer once an arbitrary amount of time has
+`repair` and `refetch` are the two buckets written by a *failure* path, one per
+direction, and both are deliberately not queues: each holds a path and a time,
+never an operation and never content. For `repair` the sweep re-derives what to
+send from the backing file as it stands when it gets there, which is the only honest answer once an arbitrary amount of time has
 passed — and it is what keeps this from becoming the persistent outbound queue
 DESIGN.md §9/M27 declines to build, with a second durability surface over the one
 §12 already prices.
@@ -127,6 +133,19 @@ per file per retry round. And the sweep **clears a record before re-pushing it,
 never after** — `Push` is synchronous and records a fresh debt of its own if it
 gives up again, so clearing afterwards would erase the one thing saying the file
 is still unsent.
+
+`refetch` exists because the pull loop **cannot hold its cursor for one change**:
+a change that can never apply (a full disk, a name the backing filesystem
+refuses) would then stop inbound sync for every other path, for good. So the
+cursor advances, and the path is recorded instead. The retry is far cheaper than
+M27's, and so needs no sweep: one `Stat` of the path and the feed's own apply of
+whatever the remote holds *then* — never a replay of the change that failed. A
+failed **removal** is not recorded, for the reason M27 declines an abandoned
+deletion: re-applying it later deletes whatever is at the path by then. Like
+`repair` it compares before writing; unlike `repair` it is usually discharged for
+free — `SetEcho`, `ForgetMany` and `ForgetDeleted` each drop it in the
+transaction they already commit, so a retry that downloads costs one commit, the
+same as the download would have.
 
 `tombstone` is the `echo` bucket's other half rather than a bucket in its own
 right: a deletion moves the record across in one transaction (`ForgetDeleted`),
@@ -149,8 +168,8 @@ back. The sweep prunes expired records, which is the only thing that bounds the
 bucket; a mount that never completes a sweep keeps one record per deleted path,
 of a size with the baseline that path already had.
 
-**A move re-keys three of these buckets and deliberately not the other two.**
-`state.RenameSubtree` carries `echo`, `hydration` and `repair` from the old path
+**A move re-keys four of these buckets and deliberately not the other two.**
+`state.RenameSubtree` carries `echo`, `hydration`, `repair` and `refetch` from the old path
 and everything beneath it to the new one, in a single transaction whatever the
 subtree's size — they all answer "what do we know about the object at this path",
 so they follow the object. `tombstone` stays where it is: it records the deletion
