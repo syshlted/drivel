@@ -18,6 +18,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/syshlted/drivel/internal/claim"
 	"github.com/syshlted/drivel/internal/fsevent"
 	"github.com/syshlted/drivel/internal/state"
 	"github.com/syshlted/drivel/provider"
@@ -546,6 +547,7 @@ type sweepStats struct {
 	unverified  int // baselines with no local fingerprint, so divergence could not be judged
 	suppressed  int // listed objects that are this mount's own deletion, not yet propagated
 	tombExpired int // deletion records dropped because nothing can still report them
+	foreign     int // subtrees skipped: another drivel's backing store or mount (MC-47)
 }
 
 // report is the tally as the status API serves it.
@@ -596,6 +598,9 @@ func (s sweepStats) String() string {
 	}
 	if s.orphaned > 0 {
 		out += fmt.Sprintf(", %d stale record(s) dropped", s.orphaned)
+	}
+	if s.foreign > 0 {
+		out += fmt.Sprintf(", %d directory(ies) skipped as another drivel mount's", s.foreign)
 	}
 	if s.special > 0 {
 		out += fmt.Sprintf(", %d local special file(s) skipped", s.special)
@@ -820,6 +825,9 @@ func (d *Downloader) pushLocalOnly(ctx context.Context, sw state.Sweep, st *swee
 	if d.rec.Push == nil {
 		return
 	}
+	// Another drivel's mountpoint inside this tree (MC-47 (c)): read once per
+	// walk, since mountinfo is a snapshot of the whole namespace.
+	foreignMounts := claim.MountsUnder(d.dataDir)
 	err := filepath.WalkDir(d.dataDir, func(p string, e fs.DirEntry, err error) error {
 		if err != nil {
 			return nil //nolint:nilerr // unreadable entry: skip it, never abandon the walk
@@ -840,6 +848,20 @@ func (d *Downloader) pushLocalOnly(ctx context.Context, sw state.Sweep, st *swee
 			return nil
 		}
 		if e.IsDir() {
+			// Another drivel's backing store or live mount is not content, and
+			// syncing it is the MC-47 multiplication: that mount syncs it, we push
+			// it again, it materialises our copy one level deeper, forever. The
+			// marker catches a nested backing store whichever process started
+			// first; mountinfo catches a nested mountpoint (Linux only).
+			if claim.Marked(p) || foreignMounts[rel] {
+				what := "backing store"
+				if foreignMounts[rel] {
+					what = "mountpoint"
+				}
+				d.logf("[sweep] skip    %s/ (another drivel mount's %s: its contents are that mount's to sync)", rel, what)
+				st.foreign++
+				return filepath.SkipDir
+			}
 			return nil // Put creates ancestors; an empty dir is not worth a request
 		}
 		if !e.Type().IsRegular() {

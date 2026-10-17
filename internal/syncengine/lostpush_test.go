@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/syshlted/drivel/internal/claim"
 	"github.com/syshlted/drivel/internal/state"
 	"github.com/syshlted/drivel/provider"
 )
@@ -368,5 +369,26 @@ func TestARepushedMetadataChangeSettlesAfterOneSweep(t *testing.T) {
 	}
 	if got := store.ops(); len(got) != 0 {
 		t.Errorf("ops = %v; want none across both sweeps", got)
+	}
+}
+
+// MC-47 (b), the direction a refusal at open cannot catch: this mount started
+// AFTER a mount whose backing store is nested inside its tree. The walk must
+// leave that subtree alone — pushing it is what multiplied one file into a dozen
+// at bdata/bdata/bdata/… — while still pushing this mount's own new files.
+func TestTheWalkSkipsAnotherMountsBackingStore(t *testing.T) {
+	f := newSweepFixture(t, ReconcileOptions{Fetch: true}, nil)
+	captureLogs(f)
+	writeFile(t, f.dir, "mine.txt", "ours")
+	writeFile(t, f.dir, "bdata/theirs.txt", "belongs to the nested mount")
+	writeFile(t, f.dir, "bdata/"+claim.Name, "drivel backing store for mount b\n")
+
+	f.run(t)
+
+	if got, want := f.push.ops(), []string{"write mine.txt"}; !equal(got, want) {
+		t.Fatalf("pushes = %v; want only %v — the nested backing store was synced", got, want)
+	}
+	if f.logs.count("[sweep] skip    bdata/ (another drivel mount's backing store") != 1 {
+		t.Errorf("the skip was not reported\n%s", strings.Join(f.logs.lines(), "\n"))
 	}
 }

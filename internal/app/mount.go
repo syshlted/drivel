@@ -28,6 +28,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/syshlted/drivel/internal/claim"
 	"github.com/syshlted/drivel/internal/fsevent"
 	"github.com/syshlted/drivel/internal/hydrate"
 	"github.com/syshlted/drivel/internal/mount"
@@ -204,6 +205,10 @@ type Mount struct {
 	// store that does announces it by implementing io.Closer.
 	closeStore func() error
 
+	// claim marks the backing store as this process's (internal/claim), so a
+	// second drivel can see it. Held from Open to Close.
+	claim *claim.Claim
+
 	lg     *log.Logger
 	closed bool
 }
@@ -266,6 +271,9 @@ func Open(ctx context.Context, spec MountSpec, reg *provider.Registry) (*Mount, 
 		return nil, err
 	}
 	m.backing = backing
+	if err := m.claimBacking(spec, backing); err != nil {
+		return nil, err
+	}
 	if backing.InPlace {
 		m.logf("in-place mode: %s is its own backing store (via %s)", spec.Mountpoint, backing.Path)
 	} else {
@@ -554,6 +562,9 @@ func (m *Mount) Close() error {
 	if m.state != nil {
 		errs = append(errs, m.state.Close())
 	}
+	if m.claim != nil {
+		errs = append(errs, m.claim.Release())
+	}
 	if m.closeStore != nil {
 		errs = append(errs, m.closeStore())
 	}
@@ -597,3 +608,59 @@ var xattrsUsable = hydrate.XattrsUsableIn
 // engineDrainTimeout bounds the engine's shutdown drain, a variable so a test of
 // a stuck shutdown need not wait out the production 30 seconds.
 var engineDrainTimeout = syncengine.DefaultDrainTimeout
+
+// claimBacking is the cross-process half of Validate's overlap rules (MC-47). It
+// refuses a mount whose backing store, mountpoint or state DB sits inside the
+// backing store of another drivel that is running — the shapes that multiply
+// content without bound, or upload one client's sync history to the shared
+// remote — and then claims this mount's own backing store, which also refuses a
+// second process serving the same directory. A marker whose owner is no longer
+// running is only a warning: it is an old directory, not a live mount, and the
+// sweep's walk keeps such a subtree out of the sync either way.
+//
+// What it cannot see is the parent that starts second; that is the walk's job
+// (syncengine pushLocalOnly), and the reason the marker exists at all.
+func (m *Mount) claimBacking(spec MountSpec, backing *mount.Backing) error {
+	root := spec.DataDir
+	if backing.InPlace {
+		root = spec.Mountpoint
+	}
+	checks := []struct{ what, dir string }{
+		// Strictly above the backing root: a marker AT it is this mount's own,
+		// from its last run.
+		{"backing store " + root, filepath.Dir(root)},
+	}
+	if !backing.InPlace {
+		checks = append(checks, struct{ what, dir string }{"mountpoint " + spec.Mountpoint, spec.Mountpoint})
+	}
+	if spec.StateDB != "" {
+		checks = append(checks, struct{ what, dir string }{"state DB " + spec.StateDB, filepath.Dir(spec.StateDB)})
+	}
+	for _, c := range checks {
+		found, ok := claim.Enclosing(c.dir)
+		if !ok {
+			continue
+		}
+		if found.Live {
+			return fmt.Errorf("%s: the %s is inside %s, the backing store of the running drivel mount %q; "+
+				"syncing it from here would sync that mount's files a second time, nested one level deeper on every sweep",
+				spec.label(), c.what, found.Dir, found.Owner)
+		}
+		m.logf("note: the %s is inside %s, which was the backing store of drivel mount %q (not running now); "+
+			"if that mount is started again, its sweep will leave this tree alone, but the two should not overlap",
+			c.what, found.Dir, found.Owner)
+	}
+
+	c, err := claim.Acquire(backing.Path, spec.controlName())
+	if errors.Is(err, claim.ErrHeld) {
+		return fmt.Errorf("%s: backing store %s is already being served by another drivel process: %w", spec.label(), root, err)
+	}
+	if err != nil {
+		// Not fatal: a backing store we cannot write a marker into is one the
+		// mount will have its own trouble with, and it says so itself.
+		m.logf("could not mark %s as this mount's backing store (%v); another drivel will not be able to tell", root, err)
+		return nil
+	}
+	m.claim = c
+	return nil
+}

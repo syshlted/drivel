@@ -1252,6 +1252,21 @@ reads would be routed back through
 .BR drivel ;
 and a state database may not sit inside any backing tree, or it would sync itself
 to the cloud and its own writes would generate the events causing more.
+.PP
+Separate
+.B drivel
+processes cannot see each other's configuration, so each mount also writes a
+marker,
+.IR .drivel-backing ,
+at its backing directory's root and locks it while running. A mount refuses to
+start when its backing directory, mountpoint or state database lies inside the
+backing directory of another running
+.BR drivel ,
+or when another one already serves the same directory; a marker whose mount is
+not running is only noted. A sweep skips any subdirectory holding a marker, and on
+Linux any other
+.B drivel
+mountpoint, rather than syncing another mount's files a second time.
 .SH IN-PLACE MODE
 Omitting
 .I -data

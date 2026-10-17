@@ -675,9 +675,13 @@ roughly in descending order of how likely they are to change a decision:
     the ones inside *its own* backing tree already — what it cannot see is
     someone else's.
 
-    Nothing here is scheduled. It is recorded so the next session does not have to
-    rediscover which of the three shapes is actually dangerous, and so that
-    "unguarded across processes" is not mistaken for "undetectable".
+    **Built 2026-10-17 (`internal/claim`), as the options above describe**: a
+    marker at each backing root under an exclusive flock, an up-walk at open that
+    refuses a *live* claim above the backing root, mountpoint or state DB, the
+    walk's prune of marked subdirectories, and — for (c) — the walk skipping any
+    `fuse.drivel` mountpoint listed in mountinfo (Linux). The fourth shape is
+    covered only when the nested mount starts second. Tier A only; MC-47's live
+    rig has not been re-run against it.
 
 19. **One `cp` of a large file costs two full uploads, and this is what MC-11's
     extra upload was.** §5.3 below records a single duplicate in the 1000-file

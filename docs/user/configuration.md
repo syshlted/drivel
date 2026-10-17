@@ -425,6 +425,38 @@ break each other in ways one cannot. These are startup errors naming both mounts
 - a **state database inside a backing tree** — it would sync itself to the cloud,
   and its own writes would generate the events causing more.
 
+### Several Drivel processes
+
+Those checks compare the mounts *one* process was given. Two separate Drivels —
+two fstab lines, two service units, a second `drivel mount` in another terminal —
+cannot see each other's configuration, and pointing them at nesting directories
+used to multiply files without bound: one syncs the other's backing directory as
+ordinary content, the other downloads that copy one level deeper, and so on every
+sweep.
+
+So each mount leaves a small marker file, `.drivel-backing`, at the root of its
+backing directory and holds a lock on it while it runs. A mount refuses to start
+when its backing directory, mountpoint or state database is inside the backing
+directory of another Drivel that is **running**, or when that other Drivel is
+already serving the same directory:
+
+```
+mount b: the backing store /srv/a/bdata is inside /srv/a, the backing store of the running drivel mount "a"; …
+```
+
+If the other mount is *not* running, Drivel only notes it — the directory is
+then just an old directory. And when the outer mount is the one started second,
+its sweep leaves the inner directory alone and says so:
+
+```
+[sweep] skip    bdata/ (another drivel mount's backing store: its contents are that mount's to sync)
+```
+
+On Linux the sweep also skips another Drivel's *mountpoint* inside its tree. The
+marker file stays behind when a mount stops; it is harmless, and deleting it
+only removes the protection. Keep the layouts apart anyway: the outer mount
+still syncs the marker's directory if someone deletes the marker.
+
 Logging is per mount and prefixed with the mount name — except when there is only
 one, where the output is unprefixed.
 

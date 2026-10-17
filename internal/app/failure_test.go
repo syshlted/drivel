@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/syshlted/drivel/internal/claim"
 	"github.com/syshlted/drivel/internal/hydrate"
 	"github.com/syshlted/drivel/internal/state"
 	"github.com/syshlted/drivel/internal/testenv"
@@ -619,7 +620,8 @@ func strays(t *testing.T, p *peer) []string {
 		if err != nil {
 			return skipVanished(err)
 		}
-		if e.IsDir() || e.Name() == mountProbe {
+		// The claim marker is drivel's too, and permanent by design: not a stray.
+		if e.IsDir() || e.Name() == mountProbe || e.Name() == claim.Name {
 			return nil
 		}
 		if strings.HasPrefix(e.Name(), ".drivel-") {

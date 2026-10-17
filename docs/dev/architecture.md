@@ -130,6 +130,7 @@ flowchart TD
     vfs["internal/vfs<br/>go-fuse loopback backend"]
     syncengine["internal/syncengine<br/>Engine + Downloader"]
     state["internal/state<br/>bbolt cursor + echo store"]
+    claimpkg["internal/claim<br/>backing-store marker + flock (leaf)"]
     hydrate["internal/hydrate<br/>placeholders · fault-in"]
     rangespkg["ranges (public)<br/>extent bitmap (present + dirty)"]
     pluginpkg["plugin (public)<br/>Loader · proxy · Serve"]
@@ -177,6 +178,7 @@ flowchart TD
     app --> vfs
     app --> fsevent
     app --> hydrate
+    app --> claimpkg
 
     vfs --> mount
     vfs --> fsevent
@@ -186,6 +188,7 @@ flowchart TD
     syncengine --> fsevent
     syncengine --> state
     syncengine --> rangespkg
+    syncengine --> claimpkg
 
     hydrate --> provider
     hydrate --> rangespkg

@@ -108,6 +108,11 @@ bidirectional sync — don't regress it.
   `hydrate.XattrName` xattr marker (per platform since M10), and whole-file
   hydrate-on-first-I/O with
   singleflight. Provider-agnostic.
+- `internal/claim` — leaf: the `.drivel-backing` marker each mount writes at its
+  backing root and holds an flock on, so a second drivel *process* can see it
+  (MC-47's cross-process overlap; `app.Validate` covers one process only). Read by
+  `app.Open` (refuse inside a live claim) and the sweep's walk (prune a marked
+  subtree, and on Linux a foreign `fuse.drivel` mountpoint).
 - `internal/testenv` — test-only leaf: turns "this machine has no user xattrs / no
   `/dev/fuse`" from a silent `t.Skip` into a failure when `DRIVEL_REQUIRE_TESTENV`
   names the facility (`fuse`, `xattr`, `all`). Skipping is right on a laptop and
@@ -2076,10 +2081,26 @@ composition — and about the ways several mounts can corrupt each other.
    materialises a remote one, and the paths just keep getting longer. What does
    *not* happen is a delete storm, and the reason is structural: `applyDeletes`
    walks `EachUnseenEcho`, so a path hidden *locally* (an emptied mountpoint) is
-   the "would materialise" row and never a delete row. Options for a real guard are
-   in the test plan's §4 (the cross-process item) and none is scheduled; don't reach for a lock file
-   without reading it, because the cheap half is that the sweep's walk already
-   visits every file.
+   the "would materialise" row and never a delete row.
+
+   **Guarded since 2026-10-17 by `internal/claim`**, the test plan's §4.18 options
+   built as written. Each mount writes `.drivel-backing` at its backing root and
+   holds an exclusive **flock** on it from `Open` to `Close` — flock and not fcntl,
+   because an fcntl lock drops when *any* descriptor on the file closes, so the
+   probe would release the holder's own claim. Three readers, and the split is
+   the point: `Open` walks **up** from its backing root (exclusive), mountpoint
+   and state-DB directory and refuses a *live* claim (the child started second),
+   and `Acquire` refuses a second process on the same directory; the sweep's walk
+   prunes any subdirectory holding a marker (the parent started second, which no
+   up-walk can see) and, on Linux, any `fuse.drivel` mountpoint from mountinfo
+   (shape (c), deliberately narrower than "do not cross filesystems", which is
+   the user's call). **The lock is what "live" means**: a stale marker is a note,
+   never a refusal, or an old directory becomes a permanent veto. Not covered:
+   another process's *state DB* inside this tree when this mount starts second
+   (an ordinary file with a configurable name), a write *through* this mount into
+   the nested tree (bounded at one level, because the nested mount's copy lands
+   under the marker the walk prunes), and a remote object named `.drivel-backing`
+   at the root, which a materialise would write over the marker.
 3. **The registry is a value, not a package-global.** No `init()` registration, no
    import for side effect. It would be the only process-global mutable state in the
    tree, in the milestone whose premise is that there isn't any — and the explicit
