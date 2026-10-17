@@ -13,6 +13,14 @@ from source with `make build`.
 
 ## Unreleased
 
+### Unmounting no longer hangs when the backend stops answering — 2026-10-17
+
+If the remote stopped responding while files were waiting to upload, stopping
+the mount could hang until it was killed: the queue of waiting uploads held up
+the filesystem, and the unmount gave up after its first attempt. Drivel now
+stops 30 seconds after you ask, records whatever it could not send so the next
+start sends it, and keeps retrying the unmount until the mountpoint is free.
+
 ### Two machines editing one file no longer lose an edit — 2026-10-17
 
 When two machines changed the same file within seconds and both uploaded their

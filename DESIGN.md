@@ -5084,6 +5084,12 @@ this whole group walks through, so it is a precondition rather than a note.
     out of scope here; the honest fix is a per-attempt deadline on the provider
     call, which §6 declines for `ChunkTransferTimeout` for a stated reason. Worth
     writing down because part 1 is precisely about that bound.
+    **Closed 2026-10-17 without that deadline**: `Engine.BeginShutdown` arms an
+    abort from the shutdown *request*, and only a dispatch still blocked when it
+    fires gives up — its event recorded for repair, the stop reported unclean.
+    That bounds everything but a provider call ignoring its own cancellation,
+    which is the part a per-attempt deadline would still be for. It also needed
+    `vfs.Serve` to retry an unmount that failed EBUSY, which it had tried once.
 
     Unsettled: whether an abandoned push is also a per-path status through M14,
     where `unknown` as a first-class status already points. (M14 settled it:

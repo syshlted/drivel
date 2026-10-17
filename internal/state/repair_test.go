@@ -137,3 +137,27 @@ func TestOweRepairIgnoresTheEmptyPath(t *testing.T) {
 		t.Errorf("an empty path cost %d commit(s); want 0", got)
 	}
 }
+
+// The shutdown deadline records everything it shed at once: one commit however
+// many paths, and a path already owed keeps the stamp of its first abandonment.
+func TestOweRepairsIsOneCommitAndKeepsTheFirstStamp(t *testing.T) {
+	s := openTestStore(t)
+	first := time.Date(2026, 10, 17, 8, 0, 0, 0, time.UTC)
+	if err := s.OweRepair("a.txt", first); err != nil {
+		t.Fatal(err)
+	}
+	before := s.Commits()
+	if err := s.OweRepairs([]string{"a.txt", "b.txt", "", "c/d.txt"}, first.Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if got := s.Commits() - before; got != 1 {
+		t.Errorf("OweRepairs cost %d commits; want 1", got)
+	}
+	got := map[string]time.Time{}
+	if err := s.EachRepair(func(p string, at time.Time) error { got[p] = at; return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 3 || !got["a.txt"].Equal(first) {
+		t.Errorf("repairs = %v; want a.txt (first stamp kept), b.txt, c/d.txt", got)
+	}
+}

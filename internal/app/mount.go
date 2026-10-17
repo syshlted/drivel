@@ -369,6 +369,8 @@ func Open(ctx context.Context, spec MountSpec, reg *provider.Registry) (*Mount, 
 		Workers:  spec.UploadWorkers,
 		Debounce: spec.PushDelay,
 		Monitor:  m.mon,
+
+		DrainTimeout: engineDrainTimeout,
 	})
 
 	// Inbound sync. A change feed (M3) is one way in and the M7b sweep is the
@@ -439,6 +441,18 @@ func (m *Mount) Run(ctx context.Context) error {
 	go func() {
 		m.engine.Run(context.Background(), m.events)
 		close(engineDone)
+	}()
+	// The engine runs detached so the drain can finish, which is also why it
+	// cannot see the shutdown begin: with a provider that stopped answering, its
+	// run loop sits in a send to a full worker queue, FUSE requests block in emit
+	// behind it, and the unmount below never completes. Arming its deadline from
+	// the request rather than from close(events) is what bounds that.
+	go func() {
+		select {
+		case <-ctx.Done():
+			m.engine.BeginShutdown()
+		case <-engineDone:
+		}
 	}()
 
 	var (
@@ -579,3 +593,7 @@ func (m *Mount) logger() *log.Logger {
 // xattrsUsable is the lazy-mode probe, a variable so a test can stand in a
 // backing store with no user xattrs — a filesystem the test machine may not have.
 var xattrsUsable = hydrate.XattrsUsableIn
+
+// engineDrainTimeout bounds the engine's shutdown drain, a variable so a test of
+// a stuck shutdown need not wait out the production 30 seconds.
+var engineDrainTimeout = syncengine.DefaultDrainTimeout

@@ -1645,6 +1645,11 @@ forces an immediate exit.
 .BR -control )
 takes the same path, and the log says which of the two it was.
 .PP
+The drain is bounded even when the backend has stopped answering: 30 seconds
+after the request, anything still waiting for an upload slot is recorded for
+repair instead, and the next start sweeps for it. An unmount that fails because
+the mountpoint is busy is retried every second until it succeeds.
+.PP
 A backend process started by
 .B drivel
 ignores

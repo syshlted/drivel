@@ -229,6 +229,24 @@ func (m *Monitor) enqueued(ev fsevent.Event) {
 	}
 }
 
+// unqueued records that ev, counted by enqueued, will never reach a worker — the
+// shutdown deadline caught it (Engine.BeginShutdown).
+func (m *Monitor) unqueued(ev fsevent.Event) {
+	if m == nil {
+		return
+	}
+	m.c[cQueued].Add(-1)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, p := range pathsOf(ev) {
+		t := m.trackLocked(p)
+		if t.queued > 0 {
+			t.queued--
+		}
+		m.settleLocked(p, t, "")
+	}
+}
+
 // began records that a worker has started on ev.
 func (m *Monitor) began(ev fsevent.Event) {
 	if m == nil {

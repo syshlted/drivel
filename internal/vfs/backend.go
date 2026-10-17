@@ -9,6 +9,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"time"
 
 	"github.com/hanwen/go-fuse/v2/fs"
 	"github.com/hanwen/go-fuse/v2/fuse"
@@ -68,6 +69,14 @@ func (backend) Serve(ctx context.Context, opts mount.Options) error {
 	// behind until the process exited, and then had it unmount a filesystem that
 	// was already gone: "unmount … failed: Invalid argument", on stdout, after a
 	// shutdown that had gone perfectly well.
+	//
+	// And retried while it is still ours, because one failure is not final: the
+	// commonest EBUSY is a FUSE request still in flight — a write blocked in emit
+	// while the engine sheds its queues at the shutdown deadline — which clears
+	// by itself a moment later. Trying once left server.Wait waiting forever on a
+	// mount nothing would unmount. A mountpoint some process is sitting in stays
+	// busy until it leaves; retrying then costs one fusermount a second, said
+	// once, and unmounts the moment it can.
 	served := make(chan struct{})
 	go func() {
 		select {
@@ -75,14 +84,27 @@ func (backend) Serve(ctx context.Context, opts mount.Options) error {
 		case <-served:
 			return
 		}
-		if err := server.Unmount(); err != nil {
-			// Unmount can fail if the mount is busy; the process is shutting down
-			// anyway. Surface a hint for a manual cleanup.
-			lg := opts.Logger
-			if lg == nil {
-				lg = log.Default()
+		lg := opts.Logger
+		if lg == nil {
+			lg = log.Default()
+		}
+		for attempt := 1; ; attempt++ {
+			err := server.Unmount()
+			if err == nil {
+				if attempt > 1 {
+					lg.Printf("unmounted %s on attempt %d", opts.Mountpoint, attempt)
+				}
+				return
 			}
-			lg.Printf("unmount %s failed: %v (try: fusermount3 -u %s)", opts.Mountpoint, err, opts.Mountpoint)
+			if attempt == 1 {
+				lg.Printf("unmount %s failed: %v (retrying every %s; if it stays busy, find what is using it: fuser -vm %s)",
+					opts.Mountpoint, err, unmountRetry, opts.Mountpoint)
+			}
+			select {
+			case <-served:
+				return // unmounted from outside meanwhile
+			case <-time.After(unmountRetry):
+			}
 		}
 	}()
 
@@ -90,3 +112,6 @@ func (backend) Serve(ctx context.Context, opts mount.Options) error {
 	close(served)
 	return nil
 }
+
+// unmountRetry is how often Serve retries an unmount that failed at shutdown.
+const unmountRetry = time.Second

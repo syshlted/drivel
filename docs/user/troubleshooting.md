@@ -27,6 +27,17 @@ backing store through the mountpoint path, which recurses into Drivel's own
 handler. Nothing in a normal setup does this; it usually means a script or backup
 tool is pointed at the mounted directory *as if* it were the backing directory.
 
+**`unmount … failed: … Device or resource busy (retrying every 1s …)`.**
+Something is still using the mountpoint — a shell sitting in it, an editor with
+a file open, or a write still being accepted while Drivel shuts down. Drivel
+keeps retrying and unmounts the moment it can; `fuser -vm MOUNTPOINT` shows
+what is holding it.
+
+**`[sync] shutdown deadline (30s): N event(s) never reached an upload worker`.**
+The backend stopped answering while changes were still queued, so Drivel
+stopped waiting for it. Nothing is lost: those paths are recorded and the next
+start sends them.
+
 **`state db … was unreadable and has been replaced`.** The sync-state database was
 damaged — typically a power cut mid-write, or a disk going bad. Drivel kept the old
 file with `.corrupt` appended and started with an empty one, which is safe:

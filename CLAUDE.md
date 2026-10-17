@@ -1804,16 +1804,32 @@ three, and 13-byte files.
    nothing. `RenameSubtree` carries it. Not run live; real ENOSPC is still
    MC-46's Tier B half.
 
-**Two things M27 does not close, and neither is an oversight.** An abandoned
+**One thing M27 does not close, and it is not an oversight.** An abandoned
 **deletion** is not repaired — no local content to re-send, and inferring it
 later has to go through `-max-deletes`, which is the delete pass's machinery, so
-`repairPathOf` declines to record one at all. And **a shutdown cannot overtake a
-blocked dispatch**: the send into a worker queue is unconditional (dropping is
-what the bound exists to prevent), so a cancelled context does not unwind a
-saturated engine, `drainTimeout` is only armed after the loop exits, and
-`app.Run`'s `<-engineDone` is unbounded. Pre-existing, found while building part
-1, and the honest fix is a per-attempt provider deadline — which §6 declines for
-`ChunkTransferTimeout` for a stated reason.
+`repairPathOf` declines to record one at all.
+
+**A shutdown now overtakes a blocked dispatch (2026-10-17)**, which this section
+listed as the second thing M27 did not close. The send into a worker queue is
+still unconditional *while running* — dropping is what the bound exists to
+prevent — but `Engine.BeginShutdown` arms an abort `drainTimeout` after the
+shutdown *request* (`app.Run` calls it from `ctx.Done()`; `Run` calls it at loop
+exit too), and a send still blocked then gives up. The request and not
+`close(events)` is the only usable start: with the run loop parked, FUSE
+requests park in `vfs.node.emit`, so the unmount cannot complete and
+`close(events)` is never reached. What is shed goes to the repair bucket in **one**
+commit (`state.OweRepairs` — a stuck provider can leave a thousand events) and
+makes `DrainedCleanly` false, so the unclean-shutdown mark stays and the next
+start sweeps. It needed a second fix below it that nothing had seen: **`vfs.Serve`
+tried `Unmount` exactly once**, and the EBUSY from a request still in emit made
+it final, so `server.Wait` waited forever even after the engine let go — it now
+retries every second while the mount is still being served.
+`TestAStopEndsWhileTheProviderIsNotAnswering` is the whole chain over a real
+mount (1435 events shed, unmounted on attempt 3, 4.5s);
+`TestShutdownOvertakesABlockedDispatch` and `TestABusyUnmountIsRetried` are the
+halves, each mutation-checked. What is still unbounded: an in-flight provider
+call that ignores its cancelled context — the per-attempt-deadline question §6
+declines, now the only one left.
 
 ## Special files & mount safety (M15 items 1–3)
 

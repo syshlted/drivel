@@ -176,6 +176,14 @@ type Engine struct {
 	// the mount decides whether it stopped cleanly (DrainedCleanly).
 	drained atomic.Bool
 
+	// abort closes drainTimeout after BeginShutdown, and is the one thing a
+	// dispatch blocked on a full worker queue will give up for. shed counts the
+	// events it gave up on, which makes the stop unclean. See BeginShutdown.
+	abort    chan struct{}
+	shutOnce sync.Once
+	shed     atomic.Int64
+	shedOwed []string // repair paths of the shed events; run-loop goroutine only
+
 	// satSample is the saturation sampler's period. Not a Config field and not a
 	// flag: M25's first rule is that drivel has no verbosity control of its own,
 	// and a knob for how often an internal state machine looks at itself would be
@@ -254,6 +262,7 @@ func New(cfg Config) *Engine {
 		ctl:          make(chan ctlReq),
 		pauseCap:     cfg.PauseCap,
 		stopped:      make(chan struct{}),
+		abort:        make(chan struct{}),
 	}
 	if e.pauseCap <= 0 {
 		e.pauseCap = DefaultPauseCap
@@ -294,7 +303,44 @@ func (e *Engine) Workers() int { return e.workers }
 // given: false before Run returns, and false when the drain hit its deadline and
 // aborted in-flight uploads — which are then lost pushes nothing recorded, so
 // the mount leaves its unclean-shutdown mark for the next start to sweep on.
-func (e *Engine) DrainedCleanly() bool { return e.drained.Load() }
+func (e *Engine) DrainedCleanly() bool { return e.drained.Load() && e.shed.Load() == 0 }
+
+// BeginShutdown arms the shutdown deadline: drainTimeout from now, any dispatch
+// still waiting for room in a worker queue gives up, and the event it held is
+// recorded for repair exactly as an abandoned push is. Safe to call more than
+// once and from any goroutine; only the first call counts.
+//
+// It exists because a cancelled context could not overtake a blocked dispatch.
+// The send into a worker queue is unconditional — dropping is what the bound
+// exists to prevent — so with a provider that had stopped answering, the run
+// loop sat in that send, stopped reading events, and vfs.node.emit blocked
+// behind it; a FUSE request stuck in emit kept the unmount from completing, so
+// the mount never reached close(events), the drain deadline (armed only after
+// the loop exits) was never armed, and app.Run's <-engineDone waited forever.
+// The deadline therefore has to start from the shutdown REQUEST — the mount
+// calls this when its context is cancelled — and Run calls it too when its loop
+// ends, so a caller that only closes the channel gets the same bound.
+//
+// What it gives up is bounded and repaired: the shed events are paths in the
+// repair bucket, DrainedCleanly reports false so the unclean-shutdown mark
+// stays, and the next start sweeps. An abandoned deletion is still not
+// repaired (repairPathOf), as everywhere else.
+func (e *Engine) BeginShutdown() {
+	e.shutOnce.Do(func() {
+		time.AfterFunc(e.drainTimeout, func() { close(e.abort) })
+	})
+}
+
+// shedAtShutdown gives up on an event the shutdown deadline caught undispatched.
+// Only the run loop calls it (it is reached from send), so shedOwed needs no
+// lock; Run records the lot in one commit once the drain is over.
+func (e *Engine) shedAtShutdown(ev fsevent.Event) {
+	e.shed.Add(1)
+	e.mon.unqueued(ev)
+	if rel, ok := repairPathOf(ev); ok {
+		e.shedOwed = append(e.shedOwed, rel)
+	}
+}
 
 // Run consumes events until events is closed or ctx is cancelled. On either it
 // drains pending (debounced) and in-flight uploads under drainTimeout before
@@ -404,6 +450,12 @@ func (e *Engine) Run(ctx context.Context, events <-chan fsevent.Event) {
 			pz.held = append(pz.held, ev)
 			return
 		}
+		select {
+		case <-e.abort:
+			e.shedAtShutdown(ev)
+			return
+		default:
+		}
 		ch := in[workerFor(ev.Path, len(in))]
 		select {
 		case ch <- ev:
@@ -422,6 +474,9 @@ func (e *Engine) Run(ctx context.Context, events <-chan fsevent.Event) {
 		for {
 			select {
 			case ch <- ev:
+				return
+			case <-e.abort:
+				e.shedAtShutdown(ev)
 				return
 			case req := <-ctlC:
 				if req.op != ctlPause {
@@ -568,6 +623,7 @@ loop:
 	}
 
 	draining = true
+	e.BeginShutdown()
 	// A shutdown drains exactly as it would have unpaused — pause is not
 	// persisted, and the drain is what stops a queued write being lost — so a
 	// paused engine resumes first and says why.
@@ -601,6 +657,20 @@ loop:
 		<-done
 	}
 	opCancel()
+	if n := e.shed.Load(); n > 0 {
+		recorded := "recorded for repair, and the next start sweeps"
+		if e.state == nil {
+			recorded = "no state store to record them in"
+		} else if err := e.state.OweRepairs(e.shedOwed, time.Now()); err != nil {
+			recorded = fmt.Sprintf("recording them for repair failed: %v; the next start still sweeps", err)
+		}
+		first := ""
+		if len(e.shedOwed) > 0 {
+			first = " (first: " + e.shedOwed[0] + ")"
+		}
+		e.logf("[sync] shutdown deadline (%s): %d event(s) never reached an upload worker%s; %s",
+			e.drainTimeout, n, first, recorded)
+	}
 	// An episode open at shutdown would otherwise never be closed in the log, and
 	// an unterminated "queue full" is exactly the kind of thing that gets read as
 	// a hang. The drain above has ended it one way or the other by now.

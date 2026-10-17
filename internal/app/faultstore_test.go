@@ -41,6 +41,27 @@ type faultStore struct {
 	pageSize int              // Enumerate pages at this size; 0 = one page
 	hold     chan struct{}    // closed to release a held enumeration
 	held     chan struct{}    // closed once an enumeration has been held
+	stalled  bool             // Put and Mkdir wait for their context: a provider that stopped answering
+}
+
+// stallWrites makes every Put and Mkdir wait until its context is cancelled — a
+// provider that accepted the connection and then stopped answering, which is the
+// shape that fills the engine's queues and holds the run loop in a send.
+func (s *faultStore) stallWrites() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.stalled = true
+}
+
+func (s *faultStore) stall(ctx context.Context) error {
+	s.mu.Lock()
+	on := s.stalled
+	s.mu.Unlock()
+	if !on {
+		return nil
+	}
+	<-ctx.Done()
+	return ctx.Err()
 }
 
 // offlineError is what a partitioned peer's calls fail with. Retryable, because
@@ -149,11 +170,17 @@ func (s *faultStore) Put(ctx context.Context, p string, r io.Reader) (provider.R
 	if err := s.check("put " + p); err != nil {
 		return provider.RemoteFile{}, err
 	}
+	if err := s.stall(ctx); err != nil {
+		return provider.RemoteFile{}, err
+	}
 	return s.memStore.Put(ctx, p, r)
 }
 
 func (s *faultStore) Mkdir(ctx context.Context, p string) (provider.RemoteFile, error) {
 	if err := s.check("mkdir " + p); err != nil {
+		return provider.RemoteFile{}, err
+	}
+	if err := s.stall(ctx); err != nil {
 		return provider.RemoteFile{}, err
 	}
 	return s.memStore.Mkdir(ctx, p)

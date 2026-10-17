@@ -7,8 +7,11 @@ package syncengine
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"log"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -379,5 +382,67 @@ func TestDrainedCleanlyIsFalseWhenTheDrainHitsItsDeadline(t *testing.T) {
 				t.Errorf("DrainedCleanly = %v; want %v", got, tc.want)
 			}
 		})
+	}
+}
+
+// A shutdown must overtake a dispatch blocked on a full worker queue. Against a
+// provider that has stopped answering, the run loop sits in that send and stops
+// reading events, so neither closing the channel nor cancelling a context could
+// reach it, and Run never returned. BeginShutdown's deadline is what does; the
+// events it sheds are recorded for repair, and the stop is reported unclean.
+// Remove the abort case from send and this test times out.
+func TestShutdownOvertakesABlockedDispatch(t *testing.T) {
+	const events = 200
+	dir := t.TempDir()
+	st := newState(t)
+	store := newBlockingStore() // no tickets: nothing ever completes
+	e := New(Config{
+		Store: store, DataDir: dir, State: st, Workers: 1,
+		DrainTimeout: 100 * time.Millisecond, Logger: log.New(io.Discard, "", 0),
+	})
+	for i := range events {
+		if err := os.MkdirAll(filepath.Join(dir, fmt.Sprintf("d%03d", i)), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	ch := make(chan fsevent.Event, 16)
+	done := make(chan struct{})
+	go func() { defer close(done); e.Run(context.Background(), ch) }()
+	sent := make(chan struct{})
+	go func() {
+		defer close(sent)
+		for i := range events {
+			ch <- fsevent.Event{Op: fsevent.OpMkdir, Path: fmt.Sprintf("d%03d", i)}
+		}
+	}()
+
+	// Saturated: one Mkdir in flight forever, the worker queue full, the run loop
+	// parked in the send, and the writer parked behind it.
+	time.Sleep(200 * time.Millisecond)
+	select {
+	case <-sent:
+		t.Fatal("every event was accepted; the engine never saturated, so this tests nothing")
+	default:
+	}
+
+	e.BeginShutdown()
+	select {
+	case <-sent:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the writer is still blocked: the shutdown deadline never released the run loop")
+	}
+	close(ch)
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Run did not return after the shutdown deadline")
+	}
+
+	if e.DrainedCleanly() {
+		t.Error("DrainedCleanly after shedding events; the unclean-shutdown mark would be cleared")
+	}
+	if owed, err := st.RepairsOwed(); err != nil || !owed {
+		t.Errorf("RepairsOwed = %v, %v; the shed events were not recorded for repair", owed, err)
 	}
 }

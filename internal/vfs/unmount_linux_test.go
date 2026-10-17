@@ -11,6 +11,7 @@ import (
 	"log"
 	"os"
 	"os/exec"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -95,4 +96,67 @@ func errString(err error) string {
 		return "<nil>"
 	}
 	return err.Error()
+}
+
+// One failed unmount is not final. A mountpoint something is still using answers
+// EBUSY — at shutdown, most often a FUSE request still in flight — and trying
+// once left server.Wait waiting forever for an unmount nothing would retry.
+// Here a held-open file stands in for the in-flight request: the first attempt
+// fails, and once the file is closed the mount must come down by itself.
+func TestABusyUnmountIsRetried(t *testing.T) {
+	if _, err := os.Stat("/dev/fuse"); err != nil {
+		testenv.Unavailable(t, testenv.FUSE, "no /dev/fuse: "+err.Error())
+	}
+	backing, mnt := t.TempDir(), t.TempDir()
+	if err := os.WriteFile(backing+"/held.txt", []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	logs := &lockedBuf{}
+	ready := make(chan struct{})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	served := make(chan error, 1)
+	go func() {
+		served <- NewBackend().Serve(ctx, mount.Options{
+			Mountpoint: mnt, Backing: backing, Events: make(chan fsevent.Event, 16),
+			FsName: "drivel-test", Logger: log.New(logs, "", 0),
+			Ready: func() { close(ready) },
+		})
+	}()
+	select {
+	case <-ready:
+	case <-time.After(10 * time.Second):
+		testenv.Unavailable(t, testenv.FUSE, "mount did not come up within 10s")
+	}
+
+	held, err := os.Open(mnt + "/held.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cancel()
+	time.Sleep(1500 * time.Millisecond)
+	select {
+	case <-served:
+		held.Close()
+		t.Skip("the unmount succeeded with a file held open; this kernel does not report EBUSY here")
+	default:
+	}
+	if !bytes.Contains([]byte(logs.String()), []byte("failed")) {
+		t.Errorf("no failed attempt was logged while the file was held:\n%s", logs)
+	}
+	held.Close()
+	select {
+	case <-served:
+	case <-time.After(10 * time.Second):
+		exec.Command("fusermount3", "-u", "-z", mnt).Run() //nolint:errcheck // test cleanup
+		t.Fatal("the mount stayed up after the file was closed: the busy unmount was never retried")
+	}
+	// Serve returns as soon as the kernel lets go, which can be a moment before the
+	// retry loop gets to say so.
+	for deadline := time.Now().Add(2 * time.Second); !strings.Contains(logs.String(), "unmounted") && time.Now().Before(deadline); {
+		time.Sleep(20 * time.Millisecond)
+	}
+	if !strings.Contains(logs.String(), "unmounted") {
+		t.Errorf("the eventual unmount was not reported:\n%s", logs)
+	}
 }

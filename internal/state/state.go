@@ -751,6 +751,32 @@ func (s *Store) OweRepair(path string, at time.Time) error {
 	})
 }
 
+// OweRepairs is OweRepair for many paths in ONE commit, for the shutdown
+// deadline: a stuck provider can leave a thousand events undispatched, and a
+// commit each is ~36 MB of writes at the moment the process is trying to exit.
+// Paths already owed keep their first stamp, as in OweRepair.
+func (s *Store) OweRepairs(paths []string, at time.Time) error {
+	if len(paths) == 0 {
+		return nil
+	}
+	stamp, err := at.UTC().MarshalText()
+	if err != nil {
+		return err
+	}
+	return s.update(func(tx *bolt.Tx) error {
+		b := tx.Bucket(bucketRepair)
+		for _, p := range paths {
+			if p == "" || b.Get([]byte(p)) != nil {
+				continue
+			}
+			if err := b.Put([]byte(p), stamp); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
 // RepairsOwed reports whether any abandoned push is waiting to be repaired.
 //
 // It is a read transaction over one bucket's first key, so the inbound loop can
