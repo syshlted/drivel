@@ -940,3 +940,42 @@ func TestKindOfNamesEveryType(t *testing.T) {
 		}
 	}
 }
+
+// MC-30: two remote objects listed under one path. Applying them in listing
+// order left the local file and its baseline describing whichever came last —
+// and since a provider resolves the path to its newest object, an older one
+// listed last recorded a baseline the remote does not hold. The sweep now lets
+// the most recently modified stand, and says once that the path is shared.
+func TestASweepAppliesOnlyTheNewestOfSameNameSiblings(t *testing.T) {
+	older := remote("a.txt", "old")
+	older.Modified = time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)
+	newer := remote("a.txt", "new")
+	newer.Modified = older.Modified.Add(time.Hour)
+
+	for name, page := range map[string][]provider.RemoteFile{
+		"newest first": {newer, older},
+		"newest last":  {older, newer},
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := newSweepFixture(t, ReconcileOptions{Fetch: true}, page)
+			captureLogs(f)
+			f.store.content["a.txt"] = []byte("new") // what the path resolves to
+			f.run(t)
+
+			b, err := os.ReadFile(filepath.Join(f.dir, "a.txt"))
+			if err != nil || string(b) != "new" {
+				t.Fatalf("local a.txt = %q, %v; want the newest sibling", b, err)
+			}
+			echo, ok, _ := f.st.GetEcho("a.txt")
+			if !ok || echo.Hash != md5hex("new") {
+				t.Errorf("baseline hash = %q; want the newest sibling's — an older one's describes bytes the path does not resolve to", echo.Hash)
+			}
+			if n := f.logs.count("more than one remote object is named a.txt"); n != 1 {
+				t.Errorf("sibling warnings = %d; want 1\n%s", n, strings.Join(f.logs.lines(), "\n"))
+			}
+			if n := f.logs.count("1 path(s) shared by more than one remote object"); n != 1 {
+				t.Errorf("the sweep summary does not count the shared path\n%s", strings.Join(f.logs.lines(), "\n"))
+			}
+		})
+	}
+}

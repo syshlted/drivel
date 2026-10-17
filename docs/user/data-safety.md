@@ -212,6 +212,23 @@ content**, everywhere. Every available mitigation loses something someone wrote 
 makes path resolution non-deterministic, so Drivel tells you rather than choosing
 for you. Resolve it in the Drive web UI by renaming or deleting the duplicates.
 
+You will see it in the log in one of two places. When Drivel looks a path up:
+
+```
+[drive] 2 remote files share the name "report.txt" in one folder (notes/report.txt); using the most recently modified (…). …
+```
+
+and when a sweep lists the folder, once per path per sweep, with a count in the
+sweep's summary:
+
+```
+[sweep] warning: more than one remote object is named notes/report.txt; only the most recently modified is synced here, …
+```
+
+Both make the same choice, so the file you have locally is the one Drivel
+updates when you save it. (Before 17 October 2026 a sweep applied the siblings in
+whatever order the listing gave, and could leave you holding a different one.)
+
 ## The databases are caches
 
 Drivel keeps two small [bbolt](https://github.com/etcd-io/bbolt) databases: sync

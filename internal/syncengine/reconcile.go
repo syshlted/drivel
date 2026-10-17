@@ -548,6 +548,14 @@ type sweepStats struct {
 	suppressed  int // listed objects that are this mount's own deletion, not yet propagated
 	tombExpired int // deletion records dropped because nothing can still report them
 	foreign     int // subtrees skipped: another drivel's backing store or mount (MC-47)
+	siblings    int // paths more than one remote object claims (MC-30)
+
+	// listed is when each path this process has listed in this sweep was last
+	// modified, by the object that currently stands for it; see applyPage. Not
+	// persisted: a resumed sweep forgets the pages it did not list itself, which
+	// costs only the tie-break below for a sibling pair split across a restart.
+	listed map[string]time.Time
+	shared map[string]bool // paths already reported as shared, this sweep
 }
 
 // report is the tally as the status API serves it.
@@ -599,6 +607,9 @@ func (s sweepStats) String() string {
 	if s.orphaned > 0 {
 		out += fmt.Sprintf(", %d stale record(s) dropped", s.orphaned)
 	}
+	if s.siblings > 0 {
+		out += fmt.Sprintf(", %d path(s) shared by more than one remote object", s.siblings)
+	}
 	if s.foreign > 0 {
 		out += fmt.Sprintf(", %d directory(ies) skipped as another drivel mount's", s.foreign)
 	}
@@ -648,6 +659,9 @@ func (d *Downloader) applyPage(ctx context.Context, sw state.Sweep, files []prov
 
 	for i := range files {
 		f := files[i]
+		if !d.standsForPath(f, st) {
+			continue
+		}
 		if err := d.reconcileRemote(ctx, f, st); err != nil {
 			if ctx.Err() != nil {
 				return ctx.Err()
@@ -660,6 +674,42 @@ func (d *Downloader) applyPage(ctx context.Context, sw state.Sweep, files []prov
 		}
 	}
 	return nil
+}
+
+// standsForPath decides which of several remote objects claiming one path is the
+// one this sweep applies (MC-30). A provider that allows same-name siblings —
+// Drive does — lists each of them under the same path, and applying them in
+// listing order left the local file holding whichever came last, which need not
+// be the one the provider resolves the path to when it pushes, renames or
+// deletes. So the sweep makes the provider's own choice: the most recently
+// modified stands, as gdrive's lookupChildLocked picks it, and the others are
+// reported, once per path per sweep. Nothing is mitigated beyond that, on
+// purpose (CLAUDE.md, "Path resolution"): which sibling should win is the
+// user's to decide, and the log line is how they are told there is a choice.
+//
+// Directories are always applied — applying one is a mkdir, and two folders of
+// one name merge locally whatever this does — but still reported.
+func (d *Downloader) standsForPath(f provider.RemoteFile, st *sweepStats) bool {
+	if st.listed == nil {
+		st.listed = map[string]time.Time{}
+		st.shared = map[string]bool{}
+	}
+	prev, dup := st.listed[f.Path]
+	if !dup {
+		st.listed[f.Path] = f.Modified
+		return true
+	}
+	if !st.shared[f.Path] {
+		st.shared[f.Path] = true
+		st.siblings++
+		d.logf("[sweep] warning: more than one remote object is named %s; only the most recently modified is synced here, "+
+			"and deleting it will bring the next one back (see the same-name siblings section of data-safety)", f.Path)
+	}
+	newer := f.Modified.After(prev)
+	if newer {
+		st.listed[f.Path] = f.Modified
+	}
+	return newer || f.IsDir
 }
 
 // reconcileRemote applies one remote object to the local tree.

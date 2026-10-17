@@ -1208,10 +1208,14 @@ concurrently produce them (MC-30, covered by `gdrive/siblings_test.go`).
 `lookupChildLocked` picks the most recently modified and logs that the others are
 now invisible, which is defensible in isolation; what the fleet sees is stranger.
 A `Remove` deletes only the visible sibling, so an ordinary `rm` is followed by
-the path reappearing with an older sibling's bytes — everywhere. And `Enumerate`
-reports the path once per sibling, which `reconcileRemote` applies in listing
-order, so after a sweep the local file can hold a different sibling than the one
-a push would update. No mitigation is implemented on purpose: each candidate
+the path reappearing with an older sibling's bytes — everywhere. `Enumerate`
+reports the path once per sibling, and until 2026-10-17 `reconcileRemote`
+applied them in listing order, so after a sweep the local file (and its
+*baseline*) could describe a different sibling than the one the path resolves
+to; `applyPage` now runs `standsForPath`, which applies only the most recently
+modified — `lookupChildLocked`'s own tie-break — and logs the shared path once
+per sweep with a summary count. That is detection plus agreeing with the
+resolver, not a mitigation. No mitigation is implemented on purpose: each candidate
 (create-if-absent, post-create dedup, surfacing siblings as distinct paths) loses
 something a user wrote or makes resolution non-deterministic, and the choice is
 the user's to be told about, not ours to make silently. See

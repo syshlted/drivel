@@ -13,6 +13,14 @@ from source with `make build`.
 
 ## Unreleased
 
+### Duplicate file names on Google Drive are reported by sweeps too — 2026-10-17
+
+Google Drive lets two files in one folder share a name. Drivel uses the most
+recently modified one; a sweep now does the same (it used to take whichever the
+listing gave last, so you could end up with a different one than Drivel would
+update) and says which paths are affected. See
+[same-name siblings](docs/user/data-safety.md#same-name-siblings).
+
 ### Two Drivels pointed at nesting folders no longer multiply files — 2026-10-17
 
 Drivel already refused mount layouts that overlap within one configuration.

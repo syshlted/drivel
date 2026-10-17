@@ -301,7 +301,7 @@ func (d *Drive) lookupLocked(ctx context.Context, p string) (string, bool) {
 	if !ok {
 		return "", false // no parent folder remotely => no child either
 	}
-	f, ok := d.lookupChildLocked(ctx, parentID, path.Base(p))
+	f, ok := d.lookupChildLocked(ctx, parentID, p)
 	if !ok {
 		return "", false
 	}
@@ -309,8 +309,11 @@ func (d *Drive) lookupLocked(ctx context.Context, p string) (string, bool) {
 	return f.Id, true
 }
 
-// lookupChildLocked finds the non-trashed child of parentID named name.
-func (d *Drive) lookupChildLocked(ctx context.Context, parentID, name string) (*drive.File, bool) {
+// lookupChildLocked finds the non-trashed child of parentID at mount path p
+// (named path.Base(p)); the full path is for the log line, where a bare name
+// cannot say which folder holds the siblings.
+func (d *Drive) lookupChildLocked(ctx context.Context, parentID, p string) (*drive.File, bool) {
+	name := path.Base(p)
 	q := fmt.Sprintf("name = '%s' and '%s' in parents and trashed = false",
 		escapeQuery(name), escapeQuery(parentID))
 	res, err := d.svc.Files.List().
@@ -342,8 +345,9 @@ func (d *Drive) lookupChildLocked(ctx context.Context, parentID, name string) (*
 			best = f
 		}
 	}
-	d.logf("[drive] %d remote files share the name %q in one folder; using the most recently modified (%s). The others are not visible at this path.",
-		len(res.Files), name, best.Id)
+	d.logf("[drive] %d remote files share the name %q in one folder (%s); using the most recently modified (%s). "+
+		"The others are not visible at this path, and deleting it will bring the next one back.",
+		len(res.Files), name, p, best.Id)
 	return best, true
 }
 
