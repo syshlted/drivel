@@ -52,8 +52,10 @@ copy, the second upload replaced the first and the first edit was gone, with no
 conflict copy anywhere. Drivel now checks, before uploading over a file it has
 synced before, whether someone else has changed it since; if so it saves their
 version as a conflict copy first. If your copy is unchanged since the last sync,
-it no longer uploads it over the newer one at all. Two uploads that start at
-practically the same instant can still pass each other. See
+it no longer uploads it over the newer one at all. A file of 4 MiB or more that
+Drivel has never synced is also kept as a conflict copy if one already exists
+remotely at that path. Two uploads that start at practically the same instant
+can still pass each other. See
 [data safety](docs/user/data-safety.md#when-both-machines-upload).
 
 ### fstab mounts and `systemctl stop` — 2026-10-17

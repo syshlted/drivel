@@ -200,3 +200,41 @@ func (m modifiedStore) Stat(ctx context.Context, p string) (provider.RemoteFile,
 	rf.Modified = m.at
 	return rf, ok, err
 }
+
+// No baseline at all — a state DB that was replaced, two clients creating one
+// path — and a remote object already standing at the path. For a file the M6
+// gates Stat anyway, it is kept before the Put replaces it. Remove the no-baseline
+// branch and the remote's bytes are gone.
+func TestAFirstPushOverAnUnknownRemoteKeepsIt(t *testing.T) {
+	dir := t.TempDir()
+	store := newPatchStore()
+	store.seed("a.bin", bigBody('t'))
+	if err := os.WriteFile(filepath.Join(dir, "a.bin"), bigBody('o'), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	logs := &capture{}
+	e := New(Config{Store: store, DataDir: dir, State: newState(t), Logger: log.New(logs, "", 0)})
+	if err := e.pushContent(context.Background(), "a.bin", nil); err != nil {
+		t.Fatal(err)
+	}
+	if got := store.remoteBytes("a.bin"); len(got) == 0 || got[0] != 'o' {
+		t.Error("the local file should still win the path")
+	}
+	var copies []string
+	ents, _ := os.ReadDir(dir)
+	for _, ent := range ents {
+		if strings.HasPrefix(ent.Name(), "a (conflict ") {
+			b, _ := os.ReadFile(filepath.Join(dir, ent.Name()))
+			if len(b) == 0 || b[0] != 't' {
+				t.Errorf("%s does not hold the remote's bytes", ent.Name())
+			}
+			copies = append(copies, ent.Name())
+		}
+	}
+	if len(copies) != 1 {
+		t.Fatalf("conflict copies = %v; want one holding the remote file this mount had no record of", copies)
+	}
+	if logs.count("no record of") != 1 {
+		t.Errorf("the conflict did not say why\n%s", strings.Join(logs.lines(), "\n"))
+	}
+}

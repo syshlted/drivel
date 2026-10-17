@@ -1363,7 +1363,11 @@ are both lossy and racy.
   edit, so it is dropped and the pull applies the remote. A copy that cannot be
   downloaded fails the push, never the copy. Costs one `Stat` per rewrite of a
   small file with a baseline (creates still cost none); narrows the race to the
-  `Stat`→`Put` gap, which only a conditional write could close.
+  `Stat`→`Put` gap, which only a conditional write could close. A path with
+  **no** baseline (a replaced state DB, two clients creating one path) is
+  guarded on the same terms only when the gates already paid for the `Stat` —
+  files of a block or more — since a small create would otherwise buy a round
+  trip it never paid, and on Drive a second name query per create.
 
 ---
 

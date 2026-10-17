@@ -56,9 +56,11 @@ it at all, and the newer remote version arrives as an ordinary change.
 Two limits. **The check and the upload are two steps**, so two uploads that start
 within the same instant can still pass each other, and then the first one's edit
 is lost; on Google Drive it survives in the file's revision history. And a file
-Drivel has never synced before has nothing to compare against, so a first upload
-over a file that already exists remotely replaces it as it always has. Before 17
-October 2026 neither machine checked, and the edit that uploaded first was lost
+Drivel has never synced before has no last-synced version to compare against.
+If one of 4 MiB or more already exists remotely at that path, Drivel keeps it as
+a conflict copy too (`the remote holds a file this mount has no record of`);
+a smaller one is replaced as it always has been, because checking would cost an
+extra request for every new file. Before 17 October 2026 neither machine checked, and the edit that uploaded first was lost
 every time.
 
 ## Deletion

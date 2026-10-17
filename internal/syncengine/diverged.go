@@ -34,9 +34,15 @@ import (
 //
 // It narrows the window rather than closing it: a remote write landing between
 // this Stat and the Put is still overwritten unseen, and closing that needs a
-// conditional write no shipped backend offers. And it says nothing about a path
-// with no baseline — a first push, a state DB that was replaced — where there is
-// no "since" to have diverged from, so those keep the old behaviour.
+// conditional write no shipped backend offers.
+//
+// A path with no baseline — a first push, a state DB that was replaced, two
+// clients creating one path — has no "since" to have diverged from, but a remote
+// object already standing there is still someone's content that this Put would
+// replace. It is kept on the same terms, but only when the M6 gates already paid
+// for the Stat (a file of at least one block): a first push of a small file would
+// otherwise cost a round trip it never paid before, and on Drive that is a
+// second name query per create, which is what bounds a bulk copy's rate.
 
 // remoteView is what one Stat of the remote said, carried from the M6 gates to
 // the divergence check so a push pays for at most one round trip between them.
@@ -63,9 +69,12 @@ func (e *Engine) preserveDivergedRemote(ctx context.Context, p string, f *os.Fil
 		return true, nil //nolint:nilerr // reported above; failing the push would strand a local edit on a DB read
 	}
 	if !ok {
-		return true, nil // no baseline: nothing to have diverged from
-	}
-	if !seen.statted {
+		// No baseline. Guarded only on a Stat already taken (see above); a
+		// directory at the path is not ours to copy, and the Put will say so.
+		if !seen.statted || !seen.exists || seen.rf.IsDir {
+			return true, nil
+		}
+	} else if !seen.statted {
 		remote, exists, err := e.store.Stat(ctx, p)
 		if err != nil {
 			// The Put this precedes needs the same remote and will meet the same
@@ -75,7 +84,7 @@ func (e *Engine) preserveDivergedRemote(ctx context.Context, p string, f *os.Fil
 		}
 		seen = remoteView{statted: true, exists: exists, rf: remote}
 	}
-	if !seen.exists || echo.Matches(seen.rf.Hash, seen.rf.Version) {
+	if ok && (!seen.exists || echo.Matches(seen.rf.Hash, seen.rf.Version)) {
 		// Gone remotely (a re-create, which the deletion side owns) or still ours.
 		return true, nil
 	}
@@ -115,7 +124,11 @@ func (e *Engine) preserveDivergedRemote(ctx context.Context, p string, f *os.Fil
 	if _, err := fetchTo(ctx, e.store, p, copyDst, modified, e.mon.observe); err != nil {
 		return false, fmt.Errorf("keeping the newer remote copy of %s before overwriting it: %w", p, err)
 	}
-	e.logf("[sync] conflict %s: the remote changed since the last sync; saved it as %s before uploading the local copy", p, copyRel)
+	why := "the remote changed since the last sync"
+	if !ok {
+		why = "the remote holds a file this mount has no record of"
+	}
+	e.logf("[sync] conflict %s: %s; saved it as %s before uploading the local copy", p, why, copyRel)
 	e.mon.count(cConflicts, 1)
 	e.mon.applied(copyRel, StatusLocalOnly)
 	return true, nil

@@ -1090,7 +1090,10 @@ pushed at all** over a newer remote — a touch used to push stale bytes over
 someone's edit — which needs the provider's digest, so hashless backends keep a
 copy instead. What remains: two pushes whose `Stat`s both precede either `Put`
 still lose one edit (no shipped backend has a conditional write), and a path
-with no baseline is unguarded. It costs one `Stat` per small-file rewrite, which
+with no baseline is guarded **only when the M6 gates already took the `Stat`**
+(one block, 4 MiB, or a range-write candidate) — a small first push would pay a
+round trip per create, which on Drive is a second name query and halves a bulk
+copy's rate, so that half is a cost decision left open, not an oversight. It costs one `Stat` per small-file rewrite, which
 `TestSmallFileChecksTheRemoteOnlyWhenItHasABaseline` pins; creates cost none.
 MC-31a (`TestFleetConcurrentEditsKeepTheOverwrittenEdit`) now asserts the copy,
 ordered with a pause because a race would decide nothing.

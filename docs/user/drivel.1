@@ -1296,7 +1296,8 @@ asks whether the remote still holds what it last synced; if another machine has
 changed it, that version is saved as a conflict copy first and the local file is
 then uploaded. A local file unchanged since the last sync is not uploaded over a
 newer remote at all. Two uploads that start at practically the same moment can
-still pass each other, and a file with no sync history is not checked.
+still pass each other. A file with no sync history is checked only when it is
+4 MiB or larger; a smaller one replaces whatever the remote holds at its path.
 .SH ABANDONED UPLOADS
 Every push is retried with a growing delay between attempts \(em five attempts
 over roughly seven seconds \(em and an error the backend reports as permanent is
