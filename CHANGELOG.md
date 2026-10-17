@@ -34,7 +34,9 @@ Two separate Drivel processes could not see each other, so placing one's backing
 folder inside the other's made files copy themselves one folder deeper on every
 sweep, indefinitely. Each mount now marks its backing folder while it runs; a
 second Drivel refuses to start inside a running one's, and a sweep leaves another
-mount's folder alone. The marker is never uploaded or downloaded. See
+mount's folder alone. The marker is never uploaded or downloaded, and neither is a
+file another program holds locked for writing in the backing folder, such as
+another Drivel's live state database. See
 [several Drivel processes](docs/user/configuration.md#several-drivel-processes).
 
 ### Unmounting no longer hangs when the backend stops answering — 2026-10-17

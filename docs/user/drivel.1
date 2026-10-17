@@ -1267,7 +1267,10 @@ not running is only noted. A sweep skips any subdirectory holding a marker, and 
 Linux any other
 .B drivel
 mountpoint, rather than syncing another mount's files a second time. The marker
-itself is never synced in either direction.
+itself is never synced in either direction, and a file another program holds
+locked for writing directly in the backing directory \(em another
+.BR drivel 's
+state database, for one \(em is not uploaded while the lock is held.
 .SH IN-PLACE MODE
 Omitting
 .I -data

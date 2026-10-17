@@ -27,3 +27,21 @@ func lockExclusive(f *os.File) error {
 		}
 	}
 }
+
+// heldExclusively reports whether another open file description holds an
+// exclusive flock on f — which a shared probe cannot take while it stands —
+// releasing the probe at once if it was granted.
+func heldExclusively(f *os.File) bool {
+	for {
+		err := unix.Flock(int(f.Fd()), unix.LOCK_SH|unix.LOCK_NB)
+		switch err {
+		case unix.EINTR:
+			continue
+		case nil:
+			_ = unix.Flock(int(f.Fd()), unix.LOCK_UN)
+			return false
+		default:
+			return err == unix.EWOULDBLOCK
+		}
+	}
+}

@@ -452,9 +452,18 @@ its sweep leaves the inner directory alone and says so:
 [sweep] skip    bdata/ (another drivel mount's backing store: its contents are that mount's to sync)
 ```
 
-On Linux the sweep also skips another Drivel's *mountpoint* inside its tree. The
-marker is never synced, in either direction: a file of that name is not uploaded,
-and a remote one is not downloaded over it. The marker file stays behind when a mount stops; it is harmless, and deleting it
+On Linux the sweep also skips another Drivel's *mountpoint* inside its tree. And
+Drivel refuses to upload a file another program holds locked for writing
+directly in the backing directory — which is what another Drivel's state database
+looks like while it runs:
+
+```
+[sync] skip theirs.db: another process holds it locked for writing (a live database?); not uploading it mid-write
+```
+
+The marker is never synced, in either direction: a file of that name is not
+uploaded, and a remote one is not downloaded over it. The marker file stays
+behind when a mount stops; it is harmless, and deleting it
 only removes the protection. Keep the layouts apart anyway: the outer mount
 still syncs the marker's directory if someone deletes the marker.
 

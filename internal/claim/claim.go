@@ -138,3 +138,16 @@ func readOwner(p string) string {
 	line, _, _ := bytes.Cut(b, []byte("\n"))
 	return strings.TrimPrefix(string(line), "drivel backing store for mount ")
 }
+
+// HeldByAnother reports whether some other open file description holds an
+// exclusive flock on f. bbolt holds one on every database it has open for
+// writing — drivel's state DB and index among them — so this is how a mount
+// recognises another process's live database inside its own backing tree,
+// which no up-walk from either side can see when that process started first:
+// the database is an ordinary file with a configurable name. Uploading one
+// would publish a file caught mid-transaction, again on every commit.
+//
+// A lock taken through a FUSE mount is kept by the kernel and never reaches
+// the backing file, so this sees only processes working on the backing tree
+// directly — exactly the ones that are not this mount's users.
+func HeldByAnother(f *os.File) bool { return heldExclusively(f) }

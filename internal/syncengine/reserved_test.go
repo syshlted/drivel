@@ -7,10 +7,12 @@ package syncengine
 
 import (
 	"context"
+	"path/filepath"
 	"testing"
 
 	"github.com/syshlted/drivel/internal/claim"
 	"github.com/syshlted/drivel/internal/fsevent"
+	"github.com/syshlted/drivel/internal/state"
 	"github.com/syshlted/drivel/provider"
 )
 
@@ -59,5 +61,32 @@ func TestARemoteObjectNamedLikeAClaimMarkerIsNotApplied(t *testing.T) {
 	}
 	if _, ok, _ := d.state.GetEcho(claim.Name); ok {
 		t.Error("an echo was recorded for a marker")
+	}
+}
+
+// Another drivel's state DB inside this backing tree, opened before this mount
+// started — the one shape of MC-47 no claim check sees, since the database is an
+// ordinary file of any name. bbolt holds an exclusive flock on it while it is
+// open, and an upload of it would publish a file caught mid-transaction, on
+// every commit. Closed, it is an ordinary file again and is pushed.
+func TestALiveDatabaseInTheBackingTreeIsNotPushed(t *testing.T) {
+	dataDir := t.TempDir()
+	other, err := state.Open(filepath.Join(dataDir, "theirs.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	fs := newFakeStore()
+	e := New(Config{Store: fs, DataDir: dataDir})
+	ctx := context.Background()
+
+	e.handle(ctx, fsevent.Event{Op: fsevent.OpWrite, Path: "theirs.db"})
+	assertCalls(t, fs.calls, nil)
+
+	if err := other.Close(); err != nil {
+		t.Fatal(err)
+	}
+	e.handle(ctx, fsevent.Event{Op: fsevent.OpWrite, Path: "theirs.db"})
+	if len(fs.calls) != 1 {
+		t.Fatalf("calls = %v; a database nobody holds open is an ordinary file and should be pushed", fs.calls)
 	}
 }

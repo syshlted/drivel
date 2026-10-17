@@ -36,6 +36,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/syshlted/drivel/internal/claim"
 	"github.com/syshlted/drivel/internal/fsevent"
 	"github.com/syshlted/drivel/internal/state"
 	"github.com/syshlted/drivel/provider"
@@ -1123,6 +1124,10 @@ func (e *Engine) pushContent(ctx context.Context, p string, dirty *ranges.Set) e
 		return err
 	}
 	defer f.Close()
+	if claim.HeldByAnother(f) {
+		e.logf("[sync] skip %s: another process holds it locked for writing (a live database?); not uploading it mid-write", p)
+		return nil
+	}
 
 	fi, err := f.Stat()
 	if err != nil {

@@ -17,3 +17,6 @@ var errWouldBlock = errors.New("would block")
 // lockExclusive always succeeds where there is no flock: every claim then reads
 // as stale, which degrades to warnings and the walk's pruning, never a refusal.
 func lockExclusive(*os.File) error { return nil }
+
+// heldExclusively cannot be answered without flock, so nothing is held.
+func heldExclusively(*os.File) bool { return false }

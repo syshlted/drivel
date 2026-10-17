@@ -2111,9 +2111,14 @@ composition — and about the ways several mounts can corrupt each other.
    up-walk can see) and, on Linux, any `fuse.drivel` mountpoint from mountinfo
    (shape (c), deliberately narrower than "do not cross filesystems", which is
    the user's call). **The lock is what "live" means**: a stale marker is a note,
-   never a refusal, or an old directory becomes a permanent veto. Not covered:
-   another process's *state DB* inside this tree when this mount starts second
-   (an ordinary file with a configurable name), a write *through* this mount into
+   never a refusal, or an old directory becomes a permanent veto. Another
+   process's *state DB* inside this tree when this mount starts second (an
+   ordinary file of any name, so no up-walk sees it) is caught at the push
+   instead: `pushContent` declines a file someone holds an exclusive **flock**
+   on (`claim.HeldByAnother`), which bbolt does for every database open for
+   writing. A lock taken *through* a FUSE mount stays in the kernel and never
+   reaches the backing file, so this sees only processes working on the backing
+   tree directly. Not covered: a write *through* this mount into
    the nested tree (bounded at one level, because the nested mount's copy lands
    under the marker the walk prunes). **The marker name is reserved in both
    directions** (`syncengine.reservedPath`, at any depth): pushed, a nested
