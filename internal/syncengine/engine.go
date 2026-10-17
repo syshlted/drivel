@@ -184,6 +184,10 @@ type Engine struct {
 	shed     atomic.Int64
 	shedOwed []string // repair paths of the shed events; run-loop goroutine only
 
+	// abandonGrace is how long the drain waits, after cancelling the in-flight
+	// uploads, for the workers to notice. Not a Config field; tests shorten it.
+	abandonGrace time.Duration
+
 	// satSample is the saturation sampler's period. Not a Config field and not a
 	// flag: M25's first rule is that drivel has no verbosity control of its own,
 	// and a knob for how often an internal state machine looks at itself would be
@@ -263,6 +267,7 @@ func New(cfg Config) *Engine {
 		pauseCap:     cfg.PauseCap,
 		stopped:      make(chan struct{}),
 		abort:        make(chan struct{}),
+		abandonGrace: defaultAbandonGrace,
 	}
 	if e.pauseCap <= 0 {
 		e.pauseCap = DefaultPauseCap
@@ -304,6 +309,11 @@ func (e *Engine) Workers() int { return e.workers }
 // aborted in-flight uploads — which are then lost pushes nothing recorded, so
 // the mount leaves its unclean-shutdown mark for the next start to sweep on.
 func (e *Engine) DrainedCleanly() bool { return e.drained.Load() && e.shed.Load() == 0 }
+
+// defaultAbandonGrace bounds the wait for upload workers after the drain
+// deadline has cancelled them. It is short because nothing is expected to be
+// left by then: a call that honours its context returns at once.
+const defaultAbandonGrace = 5 * time.Second
 
 // BeginShutdown arms the shutdown deadline: drainTimeout from now, any dispatch
 // still waiting for room in a worker queue gives up, and the event it held is
@@ -654,7 +664,19 @@ loop:
 	case <-time.After(e.drainTimeout):
 		e.logf("[sync] drain deadline (%s) exceeded; aborting in-flight uploads", e.drainTimeout)
 		opCancel()
-		<-done
+		select {
+		case <-done:
+		case <-time.After(e.abandonGrace):
+			// A provider call that ignores its cancelled context. The design
+			// declines a per-attempt deadline (§6), so this is the one place left
+			// to bound it: stop waiting and let the shutdown go on. What the
+			// stuck workers were sending is a lost push like any other — the
+			// drain did not finish, so the unclean-shutdown mark stays and the
+			// next start sweeps for it. They are left running, not killed; a
+			// plugin backend's call ends when the mount closes the backend.
+			e.logf("[sync] upload worker(s) still inside a provider call %s after it was cancelled; "+
+				"leaving them, and the next start sweeps for what they were sending", e.abandonGrace)
+		}
 	}
 	opCancel()
 	if n := e.shed.Load(); n > 0 {

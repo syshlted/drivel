@@ -446,3 +446,59 @@ func TestShutdownOvertakesABlockedDispatch(t *testing.T) {
 		t.Errorf("RepairsOwed = %v, %v; the shed events were not recorded for repair", owed, err)
 	}
 }
+
+// deafStore's Mkdir ignores its context: it returns only when the test lets it,
+// the shape of a provider call stuck below anything cancellation can reach.
+type deafStore struct {
+	*fakeStore
+	entered chan struct{}
+	unblock chan struct{}
+}
+
+func (d *deafStore) Mkdir(_ context.Context, p string) (provider.RemoteFile, error) {
+	d.entered <- struct{}{}
+	<-d.unblock
+	return provider.RemoteFile{Path: p, IsDir: true}, nil
+}
+
+// The drain deadline cancels in-flight uploads, and used to wait for them
+// without a bound afterwards — so one provider call that ignored its context
+// held the shutdown for ever. It now waits abandonGrace and goes on, reporting
+// the stop as unclean so the next start sweeps. Make the post-cancel wait
+// unbounded again and Run never returns.
+func TestADrainDoesNotWaitForeverOnACallThatIgnoresCancellation(t *testing.T) {
+	dir := t.TempDir()
+	store := &deafStore{fakeStore: newFakeStore(), entered: make(chan struct{}, 1), unblock: make(chan struct{})}
+	t.Cleanup(func() { close(store.unblock) })
+	logs := &capture{}
+	e := New(Config{
+		Store: store, DataDir: dir, Workers: 1,
+		DrainTimeout: 100 * time.Millisecond, Logger: log.New(logs, "", 0),
+	})
+	e.abandonGrace = 100 * time.Millisecond
+	if err := os.Mkdir(filepath.Join(dir, "d"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	ch := make(chan fsevent.Event, 1)
+	done := make(chan struct{})
+	go func() { defer close(done); e.Run(context.Background(), ch) }()
+	ch <- fsevent.Event{Op: fsevent.OpMkdir, Path: "d"}
+	select {
+	case <-store.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the Mkdir never reached the store")
+	}
+	close(ch)
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Run is still waiting on a provider call that ignored its cancellation")
+	}
+	if e.DrainedCleanly() {
+		t.Error("DrainedCleanly with a call abandoned mid-flight; the unclean-shutdown mark would be cleared")
+	}
+	if logs.count("still inside a provider call") != 1 {
+		t.Errorf("the abandonment was not reported\n%s", strings.Join(logs.lines(), "\n"))
+	}
+}

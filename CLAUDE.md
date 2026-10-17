@@ -1839,9 +1839,13 @@ retries every second while the mount is still being served.
 `TestAStopEndsWhileTheProviderIsNotAnswering` is the whole chain over a real
 mount (1435 events shed, unmounted on attempt 3, 4.5s);
 `TestShutdownOvertakesABlockedDispatch` and `TestABusyUnmountIsRetried` are the
-halves, each mutation-checked. What is still unbounded: an in-flight provider
-call that ignores its cancelled context — the per-attempt-deadline question §6
-declines, now the only one left.
+halves, each mutation-checked. **An in-flight provider call that ignores its
+cancelled context is bounded too**, without the per-attempt deadline §6
+declines: after the drain deadline cancels the workers, Run waits
+`abandonGrace` (5s) more and then returns with them still running, the stop
+unclean (the mark stays, so the next start sweeps), and a plugin backend's call
+ended when `Close` kills the backend.
+`TestADrainDoesNotWaitForeverOnACallThatIgnoresCancellation` is the assertion.
 
 ## Special files & mount safety (M15 items 1–3)
 
