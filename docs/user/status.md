@@ -84,8 +84,6 @@ plausibly meet.
   [data safety](data-safety.md#same-name-siblings).
 - **A case-insensitive backing filesystem** (the default on macOS) collapses two
   distinct remote names into one local path. Nothing handles this yet.
-- **Lazy mode is unsafe on a backing filesystem without extended attributes**,
-  and the mount warns rather than refusing. See [lazy mode](lazy-mode.md).
 - **SFTP polls**, because the protocol has no change feed, and its default poll
   interval is far too long for interactive use. See [SFTP](sftp.md).
 

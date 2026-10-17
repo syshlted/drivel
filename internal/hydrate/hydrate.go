@@ -197,19 +197,24 @@ func (h *Hydrator) FetchLimit() int { return cap(h.sem) }
 func (h *Hydrator) SupportsRanges() bool { return h.ranges != nil }
 
 // XattrsUsable reports whether the backing store can hold the authoritative
-// marker. When false, placeholder state rests on the state DB alone and losing
-// that DB downgrades placeholders to apparently-empty files — the caller should
-// warn, and should not enable lazy mode silently.
+// marker. When false there is no placeholder record at all — IsPlaceholder reads
+// the marker and nothing else, and the state DB does not stand in — so an
+// unfetched placeholder is an ordinary empty file to every guard in the tree.
+// app.Open refuses -lazy on such a store; see XattrsUsableIn.
+func (h *Hydrator) XattrsUsable() bool { return XattrsUsableIn(h.dataDir) }
+
+// XattrsUsableIn is XattrsUsable for a directory with no Hydrator yet, so a
+// caller can refuse lazy mode before it has opened a provider to hydrate from.
 //
 // A successful write is necessary and not sufficient: macOS emulates extended
 // attributes in an AppleDouble sidecar on volumes that have none of their own, so
 // the probe also asks xattrNative whether the value it just wrote is held by the
 // filesystem or by a file sitting in the backing tree. See xattr_darwin.go.
-func (h *Hydrator) XattrsUsable() bool {
+func XattrsUsableIn(dataDir string) bool {
 	if !xattrSupported {
 		return false
 	}
-	probe := filepath.Join(h.dataDir, ".drivel-xattr-probe")
+	probe := filepath.Join(dataDir, ".drivel-xattr-probe")
 	f, err := os.OpenFile(probe, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
 	if err != nil {
 		return false

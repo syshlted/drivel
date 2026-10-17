@@ -1510,8 +1510,9 @@ are both lossy and racy.
      failure this prevents is data loss, not slowness: a placeholder mistaken for
      a genuinely empty file gets uploaded as zero bytes over the remote content it
      was standing in for. The xattr survives losing `drivel-state.db`. Where the
-     backing filesystem has no user xattrs, the mount warns and falls back to the
-     state store alone.
+     backing filesystem has no user xattrs, the mount refuses to start in lazy mode
+     (it warned until 2026-10-17, and the "fallback to the state store" this line
+     once promised never existed — the store caches ranges, not placeholder-ness).
    - **Push-path suppression is load-bearing** (`syncengine.Placeholders`). The
      uploader consults the marker before every content push and skips placeholders
      outright. It fails *safe*: an unreadable marker reports "placeholder" and

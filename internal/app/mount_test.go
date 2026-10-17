@@ -351,6 +351,7 @@ func TestWorkerPoolsReachTheirComponents(t *testing.T) {
 	spec := baseSpec(t)
 	spec.Provider = "fake"
 	spec.Lazy = true
+	requireXattrs(t, spec)
 	spec.UploadWorkers = 11
 	spec.HydrateWorkers = 13
 
@@ -379,6 +380,7 @@ func TestHydrationCountsTowardsReachability(t *testing.T) {
 	spec := baseSpec(t)
 	spec.Provider = "fake"
 	spec.Lazy = true
+	requireXattrs(t, spec)
 	store := newFakeStore()
 	store.puts["a.txt"] = []byte("0123456789")
 
@@ -387,9 +389,6 @@ func TestHydrationCountsTowardsReachability(t *testing.T) {
 		t.Fatalf("Open: %v", err)
 	}
 	defer m.Close() //nolint:errcheck // the assertions below are what this test is for
-	if !m.hyd.XattrsUsable() {
-		testenv.Unavailable(t, testenv.Xattr, "backing filesystem does not store user.* attributes")
-	}
 
 	if got := m.Stats().Reachability; got != syncengine.ReachUnknown {
 		t.Fatalf("before any fetch: %s; want %s", got, syncengine.ReachUnknown)
@@ -413,6 +412,7 @@ func TestWorkerPoolsDefaultWhenUnset(t *testing.T) {
 	spec := baseSpec(t)
 	spec.Provider = "fake"
 	spec.Lazy = true
+	requireXattrs(t, spec)
 
 	m, err := Open(t.Context(), spec, registryWith(t, "fake", newFakeStore()))
 	if err != nil {
@@ -455,4 +455,60 @@ func TestOpenCreatesTheStateDirectory(t *testing.T) {
 	if perm := fi.Mode().Perm(); perm != 0o700 {
 		t.Errorf("state directory mode = %04o; want 0700", perm)
 	}
+}
+
+// requireXattrs reports the test unavailable when spec's backing store cannot
+// hold the placeholder marker, which since Open refuses -lazy there is the
+// difference between a skip and a failure for every lazy-mode test in this file.
+func requireXattrs(t *testing.T, spec MountSpec) {
+	t.Helper()
+	if err := os.MkdirAll(spec.DataDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if !hydrate.XattrsUsableIn(spec.DataDir) {
+		testenv.Unavailable(t, testenv.Xattr, "backing filesystem cannot hold "+hydrate.XattrName)
+	}
+}
+
+// A lazy mount on a store with no user xattrs has no placeholder record at all,
+// so the first write through an unfetched file pushes zeros over the remote. It
+// used to come up with a warning; it must not come up, and it must refuse before
+// the provider is opened — a backend launched for a mount that cannot run is a
+// plugin process and a credential load for nothing.
+func TestOpenRefusesLazyWithoutXattrs(t *testing.T) {
+	saved := xattrsUsable
+	xattrsUsable = func(string) bool { return false }
+	t.Cleanup(func() { xattrsUsable = saved })
+
+	spec := baseSpec(t)
+	spec.Provider = "fake"
+	spec.Lazy = true
+	opened := false
+	reg := provider.NewRegistry()
+	if err := reg.Register("fake", func(context.Context, provider.Params) (provider.Store, error) {
+		opened = true
+		return newFakeStore(), nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	m, err := Open(t.Context(), spec, reg)
+	if err == nil {
+		m.Close() //nolint:errcheck // the failure is already being reported
+		t.Fatal("Open succeeded for -lazy on a backing store without user xattrs")
+	}
+	if !strings.Contains(err.Error(), "-lazy needs a backing store that holds user extended attributes") {
+		t.Errorf("error = %q; want it to say why -lazy was refused", err)
+	}
+	if opened {
+		t.Error("the provider was opened before the refusal")
+	}
+
+	// The same store in eager mode is fine: the marker is lazy mode's alone.
+	spec.Lazy = false
+	m, err = Open(t.Context(), spec, reg)
+	if err != nil {
+		t.Fatalf("eager Open on the same store: %v", err)
+	}
+	m.Close() //nolint:errcheck // nothing to assert about a clean close here
 }

@@ -272,6 +272,22 @@ func Open(ctx context.Context, spec MountSpec, reg *provider.Registry) (*Mount, 
 		m.logf("backing store: %s", backing.Path)
 	}
 
+	// Lazy mode needs the placeholder marker, and the marker needs a filesystem
+	// that holds user xattrs. Without it there is no placeholder record at all:
+	// IsPlaceholder reads the marker and nothing else, so an unmarked placeholder
+	// is an ordinary empty file to every guard in the tree, and the first write
+	// through it pushes zeros over good remote content. The state DB does not
+	// stand in — its hydration entries cache present ranges, not placeholder-ness.
+	// This used to be a warning; it is a refusal because a mount that is unsafe
+	// "full stop" should not come up, and before the provider opens because there
+	// is no reason to launch a backend for a mount that cannot run.
+	if spec.Lazy && !xattrsUsable(backing.Path) {
+		return nil, fmt.Errorf("%s: -lazy needs a backing store that holds user extended attributes, and %s cannot hold %s: "+
+			"without it an unfetched placeholder is indistinguishable from an empty file and can be uploaded over the remote copy. "+
+			"Use eager mode, or move the backing store to a filesystem with user xattrs",
+			spec.label(), backing.Path, hydrate.XattrName)
+	}
+
 	// Wire the provider if one was named; otherwise run log-only (M1 behaviour),
 	// which needs no network or auth.
 	if spec.Provider != "" {
@@ -331,15 +347,6 @@ func Open(ctx context.Context, spec MountSpec, reg *provider.Registry) (*Mount, 
 	// zeros over the real remote file.
 	if spec.Lazy {
 		m.hyd = hydrate.New(backing.Path, m.store, m.state, spec.HydrateWorkers)
-		if !m.hyd.XattrsUsable() {
-			// Without the xattr there is no placeholder record at all: IsPlaceholder
-			// reads the marker and nothing else, so an unmarked placeholder is an
-			// ordinary empty file to every guard in the tree and the uploader will
-			// push its zeros over good remote content. The state DB does not stand in
-			// — its hydration entries cache present ranges, not placeholder-ness — so
-			// the honest advice is not "keep the DB" but "do not run -lazy here".
-			m.logf("WARNING: %s cannot hold user xattrs natively, so %s cannot be recorded and -lazy is UNSAFE on this backing store: an un-fetched placeholder is indistinguishable from an empty file and may be uploaded over the remote copy. Use eager mode, or move -data to a filesystem with user extended attributes.", backing.Path, hydrate.XattrName)
-		}
 		if spec.Xattr {
 			// Passthrough publishes the placeholder marker at the mountpoint, where
 			// stripping it from an unhydrated file makes the uploader push that file's
@@ -538,3 +545,7 @@ func (m *Mount) logger() *log.Logger {
 	}
 	return m.lg
 }
+
+// xattrsUsable is the lazy-mode probe, a variable so a test can stand in a
+// backing store with no user xattrs — a filesystem the test machine may not have.
+var xattrsUsable = hydrate.XattrsUsableIn

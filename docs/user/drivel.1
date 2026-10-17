@@ -636,7 +636,7 @@ on FreeBSD), which is what stops the sync engine from uploading a placeholder's 
 bytes over the real remote file. It is the only such record: if the backing
 filesystem cannot store user extended attributes,
 .B drivel
-warns at startup and lazy mode is unsafe there, because an unmarked placeholder is
+refuses to start a lazy mount there, because an unmarked placeholder is
 indistinguishable from an empty file. Use eager mode or a different
 .I -data
 directory; no database stands in for the attribute.

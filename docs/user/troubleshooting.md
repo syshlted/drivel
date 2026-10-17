@@ -46,6 +46,13 @@ Drive path index, and with nothing to do about it: that file is purely a cache o
 which remote object each path refers to, and every entry is re-checked before use.
 Expect a few extra lookups while it warms up.
 
+**`-lazy needs a backing store that holds user extended attributes`.** The
+backing directory is on a filesystem (exFAT, FAT, some network shares) that cannot
+record which files are placeholders, so a lazy mount there could upload an
+un-fetched file's zeros over your remote copy. Drivel refuses rather than risk it.
+Mount in eager mode, or move `-data` to a filesystem with extended attributes. See
+[lazy mode](lazy-mode.md#the-one-rule-the-backing-filesystem-must-support-extended-attributes).
+
 **`open state db …: timeout`.** Another process already has that database open —
 almost always a second Drivel still running against the same mount. Check with
 `pgrep -a drivel`. Drivel deliberately does *not* treat this as damage; replacing

@@ -36,8 +36,8 @@ Not degraded — unsafe.** If the marker cannot be written there is no record th
 file is a placeholder at all, and an un-fetched file is indistinguishable from an
 empty one. Drivel may then upload it over your real remote copy.
 
-Drivel checks at mount time and warns, naming the directory and the attribute. The
-fix is eager mode or a different `-data`. There is no database to preserve
+Drivel checks at mount time and **refuses to start** a lazy mount there, naming the
+directory and the attribute. The fix is eager mode or a different `-data`. There is no database to preserve
 instead — the attribute is the sole record, by design.
 
 Where this bites:

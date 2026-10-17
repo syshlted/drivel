@@ -1023,7 +1023,7 @@ Three invariants; breaking any of them loses user data.
    marker means no placeholder record at all**, immediately — not "after the DB is
    lost", which is what these notes wrongly said until M10. The practical
    consequence is invariant 2's: on a backing filesystem with no user xattrs
-   (exFAT/FAT, a tmpfs `/tmp` on FreeBSD) `-lazy` is unsafe and the mount warns;
+   (exFAT/FAT, a tmpfs `/tmp` on FreeBSD) `-lazy` is unsafe and `app.Open` refuses it (a warning until 2026-10-17);
    the mitigation is eager mode or a different `-data`, never "keep the state
    DB". **The test is the filesystem, not the platform** — see "Platform support"
    for why WSL2's drvfs was wrongly on this list.

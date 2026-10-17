@@ -13,6 +13,15 @@ from source with `make build`.
 
 ## Unreleased
 
+### Lazy mode refuses to start where it cannot be safe — 2026-10-17
+
+Lazy mode records which files are placeholders in an extended attribute on the
+backing file. On a filesystem that cannot store one (exFAT, FAT, some network
+shares) there is no such record, and a placeholder could be uploaded over your
+real remote copy. Drivel used to print a warning and mount anyway. It now refuses
+to start a lazy mount there and says why. Eager mode is unaffected. See
+[lazy mode](docs/user/lazy-mode.md).
+
 ### A download that fails is tried again — 2026-10-17
 
 If a remote change could not be applied on this machine (the connection dropped

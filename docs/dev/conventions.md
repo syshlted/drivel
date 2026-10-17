@@ -80,7 +80,7 @@ Breaking any of them loses user data.
    (`hydrate.XattrName` — per platform, never the literal) lives on the backing
    file. `IsPlaceholder` reads the marker and only the marker, so **no marker
    means no placeholder record at all**, immediately. The consequence: on a
-   backing filesystem without user xattrs, `-lazy` is unsafe and the mount warns.
+   backing filesystem without user xattrs, `-lazy` is unsafe and `app.Open` refuses it.
    The mitigation is eager mode or a different `-data`, never "keep the state DB".
 2. **Never push a placeholder.** `syncengine.Placeholders` gates every content
    upload. A placeholder holds zero bytes at full apparent size, so uploading it
