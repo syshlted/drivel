@@ -453,7 +453,8 @@ its sweep leaves the inner directory alone and says so:
 ```
 
 On Linux the sweep also skips another Drivel's *mountpoint* inside its tree. The
-marker file stays behind when a mount stops; it is harmless, and deleting it
+marker is never synced, in either direction: a file of that name is not uploaded,
+and a remote one is not downloaded over it. The marker file stays behind when a mount stops; it is harmless, and deleting it
 only removes the protection. Keep the layouts apart anyway: the outer mount
 still syncs the marker's directory if someone deletes the marker.
 

@@ -2108,8 +2108,11 @@ composition — and about the ways several mounts can corrupt each other.
    another process's *state DB* inside this tree when this mount starts second
    (an ordinary file with a configurable name), a write *through* this mount into
    the nested tree (bounded at one level, because the nested mount's copy lands
-   under the marker the walk prunes), and a remote object named `.drivel-backing`
-   at the root, which a materialise would write over the marker.
+   under the marker the walk prunes). **The marker name is reserved in both
+   directions** (`syncengine.reservedPath`, at any depth): pushed, a nested
+   drivel's marker written *through* this mount reaches every client and their
+   walks prune that subtree for good; pulled, a remote object of the name
+   overwrites the live marker, and a remote deletion of it removes it.
 3. **The registry is a value, not a package-global.** No `init()` registration, no
    import for side effect. It would be the only process-global mutable state in the
    tree, in the milestone whose premise is that there isn't any — and the explicit

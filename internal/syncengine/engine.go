@@ -997,6 +997,14 @@ func (e *Engine) Push(ctx context.Context, ev fsevent.Event) {
 // it made the transfer-volume half of docs/dev/multiclient-test-plan.md §2.7
 // unmeasurable.
 func (e *Engine) push(ctx context.Context, ev fsevent.Event) error {
+	if reservedPath(ev.Path) || (ev.Op == fsevent.OpRename && reservedPath(ev.NewPath)) {
+		name := ev.Path
+		if ev.Op == fsevent.OpRename {
+			name += " -> " + ev.NewPath
+		}
+		e.logf("[sync] skip     %s (a drivel claim marker; never synced)", name)
+		return nil
+	}
 	switch ev.Op {
 	case fsevent.OpMkdir:
 		rf, err := e.store.Mkdir(ctx, ev.Path)

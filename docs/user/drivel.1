@@ -1266,7 +1266,8 @@ or when another one already serves the same directory; a marker whose mount is
 not running is only noted. A sweep skips any subdirectory holding a marker, and on
 Linux any other
 .B drivel
-mountpoint, rather than syncing another mount's files a second time.
+mountpoint, rather than syncing another mount's files a second time. The marker
+itself is never synced in either direction.
 .SH IN-PLACE MODE
 Omitting
 .I -data

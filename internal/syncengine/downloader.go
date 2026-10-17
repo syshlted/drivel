@@ -478,6 +478,12 @@ func (d *Downloader) flushForget(forget map[string]struct{}) error {
 // path whose state records should be dropped in forget rather than deleting them
 // on the spot.
 func (d *Downloader) applyTo(ctx context.Context, ch provider.RemoteChange, forget map[string]struct{}) error {
+	if reservedPath(ch.Path) || reservedPath(ch.MovedFrom) {
+		// Neither applied nor recorded: a remote object of this name is not this
+		// mount's to materialise, and its removal is not this mount's to apply.
+		d.logf("[pull] skip    %s (the name of a drivel claim marker; never synced)", ch.Path)
+		return nil
+	}
 	dst := filepath.Join(d.dataDir, filepath.FromSlash(ch.Path))
 
 	// A move, if the provider said so and this mount can act on it, happens before

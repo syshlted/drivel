@@ -1269,6 +1269,17 @@ func fingerprintDiverged(fi os.FileInfo, e state.Echo) bool {
 // ever resolved.
 var conflictRe = regexp.MustCompile(` \(conflict \d{4}-\d{2}-\d{2} \d{2}-\d{2}-\d{2}\)(\.[^./]*)?$`)
 
+// reservedPath reports a path that names a mount's claim marker, at any depth.
+// The marker is a per-process lock on this machine (internal/claim), never
+// content: syncing it in either direction is wrong in a way that spreads. Pushed,
+// a nested drivel's marker written through this mount reaches every other
+// client, whose walk then prunes that subtree from every sweep for good;
+// pulled, a remote object of that name overwrites — or a remote deletion
+// removes — the live marker at this mount's own root.
+func reservedPath(p string) bool {
+	return path.Base(p) == claim.Name
+}
+
 // skipLocal reports names the local walk must not treat as user content: drivel's
 // own temporary files and probes, and §6 conflict copies.
 func skipLocal(base string) bool {
