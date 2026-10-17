@@ -14,3 +14,6 @@ import "errors"
 func checkPrivateDir(string) error {
 	return errors.New("the control socket is not supported on this platform")
 }
+
+func checkPrivateDirOf(string, int) error { return checkPrivateDir("") }
+func checkSharedDir(string, int) error    { return checkPrivateDir("") }

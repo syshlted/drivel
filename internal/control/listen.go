@@ -12,6 +12,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"syscall"
 	"time"
 )
@@ -26,14 +27,73 @@ const SocketName = "control.sock"
 // which anybody can pre-create — and the socket hands out every synced path and
 // can stop the process. The caller names a path with -control-socket instead.
 func DefaultSocketPath() (string, error) {
+	dir, err := RuntimeDir()
+	if err != nil {
+		return "", fmt.Errorf("%w; pass -control-socket PATH", err)
+	}
+	return filepath.Join(dir, SocketName), nil
+}
+
+// RuntimeDir is $XDG_RUNTIME_DIR/drivel, the per-user directory sockets go in.
+func RuntimeDir() (string, error) {
 	dir := os.Getenv("XDG_RUNTIME_DIR")
 	if dir == "" {
-		return "", errors.New("XDG_RUNTIME_DIR is not set, so there is no private directory to put the control socket in; pass -control-socket PATH")
+		return "", errors.New("XDG_RUNTIME_DIR is not set, so there is no private directory to put the control socket in")
 	}
 	if !filepath.IsAbs(dir) {
-		return "", fmt.Errorf("XDG_RUNTIME_DIR is %q, which is not an absolute path; pass -control-socket PATH", dir)
+		return "", fmt.Errorf("XDG_RUNTIME_DIR is %q, which is not an absolute path", dir)
 	}
-	return filepath.Join(dir, "drivel", SocketName), nil
+	return filepath.Join(dir, "drivel"), nil
+}
+
+// SystemDir holds the control sockets of mounts started by root — an fstab line
+// at boot, which has no session and so no XDG_RUNTIME_DIR. Each account gets
+// SystemDir/<uid>, created by root and handed to that account before root is
+// given up (see PrepareSystemDir).
+//
+// It is not under /tmp for DefaultSocketPath's reason: /run is writable by root
+// alone, so nobody else can have created the directory first.
+const SystemDir = "/run/drivel"
+
+// SystemDirFor is the directory PrepareSystemDir makes for uid.
+func SystemDirFor(uid int) string { return filepath.Join(SystemDir, strconv.Itoa(uid)) }
+
+// PrepareSystemDir creates SystemDirFor(uid), owned by uid:gid and 0700, so a
+// process about to drop from root to uid can bind its socket there afterwards.
+// It must run as root.
+//
+// An existing directory is checked, never repaired, as Listen's rule is: one
+// that is not uid's and 0700 is refused. Since only root can create anything
+// under /run, finding one wrong is root's own misconfiguration, and the safe
+// answer to that is to say so rather than to chown whatever is there.
+func PrepareSystemDir(uid, gid int) (string, error) {
+	return prepareRunDir(SystemDir, 0, uid, gid)
+}
+
+// prepareRunDir is PrepareSystemDir with the base and its required owner as
+// arguments, so the checks can be tested without root.
+func prepareRunDir(base string, baseOwner, uid, gid int) (string, error) {
+	if err := os.Mkdir(base, 0o755); err != nil && !errors.Is(err, os.ErrExist) {
+		return "", fmt.Errorf("control socket directory: %w", err)
+	}
+	if err := checkSharedDir(base, baseOwner); err != nil {
+		return "", err
+	}
+	dir := filepath.Join(base, strconv.Itoa(uid))
+	switch err := os.Mkdir(dir, 0o700); {
+	case err == nil:
+		// Lchown, so a directory swapped for a symlink in between could not hand
+		// someone else's file to uid — not that anyone but root could swap it.
+		if err := os.Lchown(dir, uid, gid); err != nil {
+			return "", fmt.Errorf("control socket directory: %w", err)
+		}
+	case !errors.Is(err, os.ErrExist):
+		return "", fmt.Errorf("control socket directory: %w", err)
+	}
+	if err := checkPrivateDirOf(dir, uid); err != nil {
+		return "", err
+	}
+	return dir, nil
 }
 
 // Listen binds the control socket at path.

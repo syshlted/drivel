@@ -125,6 +125,8 @@ Process and mount options work in **both** modes:
 | `logfile=PATH` | Where the daemon logs. Without it the log goes to `/dev/null` — see below. |
 | `mount-timeout=D` | Give up if the filesystem is not live within `D`. Off by default. |
 | `debug` | FUSE tracing. |
+| `control` | Serve the [status, pause and stop](control.md) socket for this mount. Off by default. See below. |
+| `control-socket=PATH` | With `control`, put the socket here instead. |
 | `fsname=NAME` | Override the source column. Defaults to the device field. |
 | `allow_other` | Let other users reach the mount. Unless the daemon is root — so, with `run-as=` — `fusermount3` refuses this without `user_allow_other` in `/etc/fuse.conf`. |
 | `allow_root`, `default_permissions`, `nosuid`, `nodev`, `noexec`, `noatime`, `sync`, `dirsync`, `auto_unmount` | Passed to the mount backend verbatim. |
@@ -164,6 +166,28 @@ opens it to *every* account on the machine; prefer `run-as=`.
 The lookup reads `/etc/passwd` (drivel is built without cgo), so an account that
 exists only in LDAP or SSSD will not be found. The mount fails rather than
 running as the wrong user.
+
+## The control socket
+
+`control` gives the line its own socket, so `drivel status` works for a boot
+mount. Every fstab line is a separate process, so each gets a socket of its own,
+named after the mount — the same name its state lives under:
+
+- started by root (at boot, or with `sudo mount`): `/run/drivel/UID/NAME.sock`,
+  where `UID` is the `run-as=` account's, or root's without it. The helper makes
+  that directory before it gives up root and hands it to the account, so only
+  that account can open it.
+- started as yourself: `$XDG_RUNTIME_DIR/drivel/NAME.sock`. With
+  `XDG_RUNTIME_DIR` unset, the mount refuses to start until you set
+  `control-socket=`.
+
+`drivel status -name NAME` looks in both places, so you rarely need the path.
+`drivel stop` and `drivel resume` without `-name` do not, so give them `-socket
+/run/drivel/UID/NAME.sock` — or simply `umount` the mount.
+
+Two lines with the same name cannot both have a socket: the second one finds the
+first answering and refuses to mount. They would already collide on their state
+database, so give each line its own `name=`.
 
 ## systemd
 

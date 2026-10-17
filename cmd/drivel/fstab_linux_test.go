@@ -313,3 +313,83 @@ func TestMountHelperReportsAStartupFailure(t *testing.T) {
 		}
 	})
 }
+
+// An fstab line with `control` gets a socket of its own, named for the mount,
+// that `drivel status -name` finds and `drivel stop` ends the daemon through.
+// Run without root, so this is the XDG_RUNTIME_DIR half; the /run/drivel half
+// needs root and is the run recorded in DESIGN.md §9/M14.
+func TestMountHelperServesAControlSocket(t *testing.T) {
+	if testing.Short() {
+		t.Skip("builds a binary and mounts a filesystem")
+	}
+	if _, err := os.Stat("/dev/fuse"); err != nil {
+		testenv.Unavailable(t, testenv.FUSE, "no /dev/fuse: "+err.Error())
+	}
+	if os.Geteuid() == 0 {
+		t.Skip("as root the socket goes under /run/drivel; this covers the unprivileged path")
+	}
+
+	dir := t.TempDir()
+	bin := filepath.Join(dir, "drivel")
+	if out, err := exec.Command("go", "build", "-o", bin, ".").CombinedOutput(); err != nil {
+		t.Fatalf("building the helper: %v\n%s", err, out)
+	}
+	// Short, because a socket path has to fit in sun_path and t.TempDir's are long.
+	xdg, err := os.MkdirTemp("", "dctl")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(xdg)
+	env := append(os.Environ(), "XDG_RUNTIME_DIR="+xdg)
+	run := func(args ...string) ([]byte, error) {
+		cmd := exec.Command(bin, args...)
+		cmd.Env = env
+		return cmd.CombinedOutput()
+	}
+
+	mnt, data := filepath.Join(dir, "mnt"), filepath.Join(dir, "data")
+	for _, d := range []string{mnt, data} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Cleanup(func() { _ = exec.Command("fusermount3", "-u", mnt).Run() })
+
+	if out, err := run("mount-helper", "work", mnt, "-o", "data="+data+",control"); err != nil {
+		t.Fatalf("mount-helper: %v\n%s", err, out)
+	}
+	sock := filepath.Join(xdg, "drivel", "work.sock")
+	if fi, err := os.Lstat(sock); err != nil || fi.Mode()&os.ModeSocket == 0 {
+		t.Fatalf("no socket at %s once the helper returned: %v", sock, err)
+	}
+
+	// Found by name, with no -socket.
+	out, err := run("status", "-name", "work")
+	if err != nil || !strings.Contains(string(out), "work") {
+		t.Fatalf("drivel status -name work: %v\n%s", err, out)
+	}
+
+	// A second line with the same name is refused through the handshake: the
+	// socket is the identity, and taking over a live one is never an option.
+	mnt2, data2 := filepath.Join(dir, "mnt2"), filepath.Join(dir, "data2")
+	t.Cleanup(func() { _ = exec.Command("fusermount3", "-u", mnt2).Run() })
+	out, err = run("mount-helper", "work", mnt2, "-o", "data="+data2+",control")
+	if err == nil || !strings.Contains(string(out), "already serving") {
+		t.Errorf("a second line named work: %v\n%s; want a refusal naming the live socket", err, out)
+	}
+
+	// And stop unmounts, as umount would.
+	if out, err := run("stop", "-socket", sock); err != nil {
+		t.Fatalf("drivel stop: %v\n%s", err, out)
+	}
+	mounts, err := os.ReadFile("/proc/self/mountinfo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(mounts), " "+mnt+" ") {
+		t.Error("still mounted after drivel stop returned")
+	}
+	if _, err := os.Lstat(sock); err == nil {
+		t.Error("the socket outlived the daemon")
+	}
+}

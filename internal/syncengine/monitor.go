@@ -425,6 +425,12 @@ func (m *Monitor) observe(err error) {
 	m.reach.lastErr = err.Error()
 }
 
+// Observe is observe for a provider call made outside this package: lazy
+// hydration's fetches, which run on the FUSE read path in internal/hydrate and
+// report through hydrate.Hydrator.ReportOutcomes. A lazy mount nobody writes to
+// reaches its backend nowhere else.
+func (m *Monitor) Observe(err error) { m.observe(err) }
+
 // Reachability values.
 const (
 	ReachOnline  = "online"

@@ -13,6 +13,17 @@ from source with `make build`.
 
 ## Unreleased
 
+### Status for fstab mounts, and for lazy mounts you only read from — 2026-10-17
+
+A mount from `/etc/fstab` can now have a control socket: add `control` to its
+options. Each line gets a socket of its own, named after the mount, and
+`drivel status -name NAME` finds it. See
+[the fstab page](docs/user/fstab.md#the-control-socket).
+
+A lazy mount's downloads of the files you open now count when `drivel status`
+reports whether the backend is reachable. Before, a lazy mount you only read
+from said `unknown` all day, and did not notice the backend going away.
+
 ### Ask a running mount what it is doing — 2026-10-17
 
 `drivel mount -control` opens a control socket, and four new commands use it:

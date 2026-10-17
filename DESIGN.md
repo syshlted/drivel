@@ -2904,14 +2904,45 @@ are both lossy and racy.
      outcome, the feed's `Changes` and `StartCursor`, the sweep's `Enumerate` and
      the downloader's `Get` are observed; a non-retryable error counts as contact
      (the backend answered), a cancellation counts as nothing, and an hour of
-     silence is `unknown`. Hydration's fetches are not yet observed.
+     silence is `unknown`. **Hydration's fetches are observed too** (added the
+     same day): `hydrate.Hydrator.ReportOutcomes` takes the monitor's exported
+     `Observe`, and reports the `Get` and a failure reading the body — never a
+     failure writing it locally, which `io.Copy` returns through the same error
+     and is why the body is wrapped. Without it a lazy mount that is only read
+     from, which reaches its backend nowhere else, said `unknown` all day and
+     missed the backend dying under its reads.
    - **The socket path has no fallback.** `$XDG_RUNTIME_DIR/drivel/control.sock`
      or `-control-socket`; with neither, `-control` is refused, because the
      obvious fallback is under `/tmp`, which anyone can pre-create. An existing
      directory that is not `0700` and ours is refused rather than chmod'ed. The
-     socket is **not offered to the M16 mount helper**: every fstab line is its
-     own process, so one default path is one collision per line, and an fstab
-     option needs a per-line path design first. That is the open follow-up.
+     socket was at first **not offered to the M16 mount helper**: every fstab
+     line is its own process, so one default path is one collision per line.
+     **Added the same day as `-o control[,control-socket=PATH]`, one socket per
+     line named after the mount** — the name is already a per-line identity
+     (the state DB's directory), so it adds no collision of its own, and a
+     second line with the same name is refused through the M16 handshake when
+     it finds the first one's socket live. Where it goes is decided by whether
+     the helper *started* as root. Root (the boot case) cannot use
+     `XDG_RUNTIME_DIR`: a mount unit has no session, so it is unset, and
+     `/run/user/<uid>` exists only while that account is logged in and is
+     removed at logout. So root makes `/run/drivel` (`0755`, root's, refused if
+     anyone else can write it) and `/run/drivel/<uid>` (`0700`, chowned to the
+     `run-as=` account — checked, never repaired, if it already exists) before
+     the privilege drop, the way `logfile=` is opened before it. A helper not
+     started as root has no privilege to drop, so its environment is its own
+     and `$XDG_RUNTIME_DIR/drivel/<name>.sock` is trustworthy. Only the parent
+     knows which case it was, so it resolves the path and hands it to the
+     forked child in `DRIVEL_MOUNT_HELPER_CONTROL`; the socket is bound before
+     `Run`, so a failure reaches `mount(8)` instead of a mount that reported
+     success with its `control` doing nothing. The client finds it with
+     `-name`, trying the mount's own socket before the shared one and only a
+     path where a socket exists. `stop` and `resume` without `-name` do not
+     look, deliberately: `stop -name` would read as "stop that mount" while
+     stopping a multi-mount process whole. Verified 2026-10-17 as root with
+     `run-as=coder` (socket in `/run/drivel/1000/`, `coder`-owned, found by
+     `status -name` with no `XDG_RUNTIME_DIR`, `stop` drained and unmounted)
+     and as root alone (`/run/drivel/0/`); the unprivileged half is
+     `TestMountHelperServesAControlSocket`.
 
    The profiling routes moved as the last paragraph of this entry proposed:
    `/debug/pprof/` is served over the socket with `profile`, `trace` and

@@ -603,3 +603,70 @@ func TestIsMountHelper(t *testing.T) {
 		}
 	}
 }
+
+// control and control-socket= are the flag path's -control and -control-socket,
+// with the same refusal of the second without the first.
+func TestHelperControlOptions(t *testing.T) {
+	_, c := resolveHelper(t, "work", "/m", "-o", "control")
+	if !c.control || c.controlSocket != "" {
+		t.Errorf("control: %+v", c)
+	}
+	_, c = resolveHelper(t, "work", "/m", "-o", "control,control-socket=/run/x/work.sock")
+	if !c.control || c.controlSocket != "/run/x/work.sock" {
+		t.Errorf("control-socket: %+v", c)
+	}
+	if got := helperErr(t, "work", "/m", "-o", "control-socket=/run/x/work.sock"); !strings.Contains(got, "no effect without control") {
+		t.Errorf("control-socket alone: %q; want a refusal", got)
+	}
+	if got := helperErr(t, "work", "/m", "-o", "control,control-socket=work.sock"); !strings.Contains(got, "must be an absolute path") {
+		t.Errorf("relative control-socket: %q; want a refusal", got)
+	}
+	// A process option, so it composes with config= rather than conflicting.
+	cfg := filepath.Join(t.TempDir(), "c.toml")
+	if _, c = resolveHelper(t, "work", "/m", "-o", "config="+cfg+",control"); !c.control {
+		t.Error("control was dropped beside config=")
+	}
+}
+
+// One socket per fstab line, named for the mount: the per-user default the flag
+// path uses would make every line after the first refuse to start.
+func TestHelperControlSocketIsPerLine(t *testing.T) {
+	t.Setenv("XDG_RUNTIME_DIR", "/run/user/1000")
+	on := &helperOptions{control: true}
+
+	cases := []struct {
+		name      string
+		c         *helperOptions
+		systemDir string
+		want      string
+	}{
+		{"off", &helperOptions{}, "", ""},
+		{"started by root", on, "/run/drivel/1000", "/run/drivel/1000/work.sock"},
+		{"not root", on, "", "/run/user/1000/drivel/work.sock"},
+		{"named", &helperOptions{control: true, controlSocket: "/srv/s.sock"}, "/run/drivel/1000", "/srv/s.sock"},
+	}
+	for _, tc := range cases {
+		got, err := helperControlSocket(tc.c, tc.systemDir, "work")
+		if err != nil || got != tc.want {
+			t.Errorf("%s: %q, %v; want %q", tc.name, got, err, tc.want)
+		}
+	}
+	if a, _ := helperControlSocket(on, "", "work"); a == mustSocket(t, on, "home") {
+		t.Error("two mounts share a socket path")
+	}
+
+	// Not root and no runtime directory: refused, never a /tmp fallback.
+	t.Setenv("XDG_RUNTIME_DIR", "")
+	if _, err := helperControlSocket(on, "", "work"); err == nil || !strings.Contains(err.Error(), "control-socket=") {
+		t.Errorf("err = %v; want a refusal naming control-socket=", err)
+	}
+}
+
+func mustSocket(t *testing.T, c *helperOptions, name string) string {
+	t.Helper()
+	p, err := helperControlSocket(c, "", name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return p
+}

@@ -14,10 +14,19 @@ value the way it treats `unknown`. Removing or redefining anything is v2.
 - **HTTP/1.1 + JSON over a unix socket.** No TCP, by design: this API can list
   every synced path and stop the process, so it has an owner rather than a port.
 - **Off by default.** `drivel mount -control` turns it on, for the whole process
-  (one socket serves every mount the process runs).
+  (one socket serves every mount the process runs). An `/etc/fstab` line turns
+  it on with the `control` option.
 - **Location:** `$XDG_RUNTIME_DIR/drivel/control.sock`, or whatever
   `-control-socket PATH` names. With `XDG_RUNTIME_DIR` unset and no
   `-control-socket`, the mount refuses to start rather than inventing a path.
+- **An fstab mount has a socket per line**, because each line is its own
+  process, named after the mount: `/run/drivel/<uid>/<name>.sock` when the
+  helper was started by root (the boot case; `<uid>` is the `run-as=` account's,
+  and the directory is created by root, `0700`, owned by that account), else
+  `$XDG_RUNTIME_DIR/drivel/<name>.sock`; `control-socket=PATH` overrides both.
+  Such a socket serves exactly one mount. A client looking for mount `<name>`
+  should try those two paths before the shared one, using only a path where a
+  socket exists — `drivel status -name` does exactly that.
 - **Authentication is the filesystem.** The directory must be `0700` and owned by
   the user drivel runs as (an existing directory that is not is refused, not
   fixed); the socket is `0600`. Where the platform reports the peer's credentials
@@ -168,6 +177,10 @@ call drivel makes for its own reasons is classified as it returns:
   → contact;
 - a retryable error (timeout, 5xx, throttling, a backend process that died) →
   failure.
+
+That includes a lazy mount's downloads of the placeholders it is asked to read —
+the fetch, and a download that fails part way — but not a failure to write the
+downloaded bytes locally, which says nothing about the backend.
 
 `state` is `offline` while the most recent outcome was a failure,
 `online` while it was contact, and `unknown` when nothing has been observed for

@@ -11,6 +11,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -129,5 +130,56 @@ func TestControlSocketNeedsControl(t *testing.T) {
 	}
 	if err := validateControlFlags(true, true); err != nil {
 		t.Error(err)
+	}
+}
+
+// With -name, the client finds an fstab mount's own socket before the shared
+// one, and only a socket that exists is ever chosen.
+func TestFindSocket(t *testing.T) {
+	xdg, err := os.MkdirTemp("", "dfs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(xdg)
+	t.Setenv("XDG_RUNTIME_DIR", xdg)
+	shared := filepath.Join(xdg, "drivel", control.SocketName)
+	own := filepath.Join(xdg, "drivel", "work.sock")
+
+	check := func(name, want string) {
+		t.Helper()
+		got, err := findSocket(name)
+		if err != nil || got != want {
+			t.Errorf("findSocket(%q) = %q, %v; want %q", name, got, err, want)
+		}
+	}
+
+	// Nothing exists yet: the shared path, which is where the error will name.
+	check("", shared)
+	check("work", shared)
+
+	ln, err := control.Listen(own)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close() //nolint:errcheck // test cleanup
+	check("work", own)
+	check("other", shared) // another mount's socket is not this one's
+	check("", shared)      // and without -name nothing changes
+
+	// A regular file with the name is not a socket and is passed over.
+	if err := os.WriteFile(filepath.Join(xdg, "drivel", "file.sock"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	check("file", shared)
+
+	// No XDG_RUNTIME_DIR: a -name can still find a root-started mount's socket
+	// under /run/drivel, and the error says where it looked.
+	t.Setenv("XDG_RUNTIME_DIR", "")
+	if _, err := findSocket(""); err == nil {
+		t.Error("no XDG_RUNTIME_DIR and no -name: want an error")
+	}
+	_, err = findSocket("work")
+	if err == nil || !strings.Contains(err.Error(), filepath.Join(systemSocketDir, strconv.Itoa(os.Getuid()), "work.sock")) {
+		t.Errorf("err = %v; want it to name the /run/drivel path it tried", err)
 	}
 }

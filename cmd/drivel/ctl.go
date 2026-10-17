@@ -17,6 +17,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"text/tabwriter"
 	"time"
@@ -39,7 +40,7 @@ type ctlFlags struct {
 }
 
 func (c *ctlFlags) bind(fset *flag.FlagSet, withName bool) {
-	fset.StringVar(&c.socket, "socket", "", "the control socket of the drivel to talk to; default $XDG_RUNTIME_DIR/drivel/control.sock, as `drivel mount -control` creates it")
+	fset.StringVar(&c.socket, "socket", "", "the control socket of the drivel to talk to; default $XDG_RUNTIME_DIR/drivel/control.sock, as `drivel mount -control` creates it, or with -name that mount's own socket if an fstab line made one")
 	if withName {
 		fset.StringVar(&c.name, "name", "", "act on this mount only, instead of every mount the process serves")
 	}
@@ -92,13 +93,62 @@ type ctlClient struct {
 	socket string
 }
 
-func dialControl(socket string) (*ctlClient, error) {
-	if socket == "" {
-		dir := os.Getenv("XDG_RUNTIME_DIR")
-		if dir == "" {
-			return nil, errors.New("XDG_RUNTIME_DIR is not set; pass -socket PATH")
+// systemSocketDir is where a mount started as root — an fstab line — puts its
+// socket: /run/drivel/<uid>/NAME.sock. Restated rather than imported, because
+// this client reads the documented schema and nothing else.
+const systemSocketDir = "/run/drivel"
+
+// findSocket is the socket to talk to when -socket was not given.
+//
+// Without -name it is the one `drivel mount -control` makes. With -name, the
+// mount's OWN socket comes first, wherever an fstab line would have put it —
+// $XDG_RUNTIME_DIR/drivel/NAME.sock for a helper run without root,
+// /run/drivel/<uid>/NAME.sock for one started by root — and the shared one
+// after it. Most specific first is the whole rule: an fstab process serves only
+// the mount it is named for, so finding its socket answers the question, while
+// the shared socket may belong to a process serving other mounts entirely.
+// Only a socket that exists is chosen, so nothing here is a precedence between
+// two live answers.
+func findSocket(name string) (string, error) {
+	xdg := os.Getenv("XDG_RUNTIME_DIR")
+	if !filepath.IsAbs(xdg) {
+		xdg = ""
+	}
+	var shared string
+	if xdg != "" {
+		shared = filepath.Join(xdg, "drivel", "control.sock")
+	}
+	if name == "" || strings.ContainsAny(name, `/\`) {
+		if shared == "" {
+			return "", errors.New("XDG_RUNTIME_DIR is not set; pass -socket PATH")
 		}
-		socket = filepath.Join(dir, "drivel", "control.sock")
+		return shared, nil
+	}
+	var own []string
+	if xdg != "" {
+		own = append(own, filepath.Join(xdg, "drivel", name+".sock"))
+	}
+	own = append(own, filepath.Join(systemSocketDir, strconv.Itoa(os.Getuid()), name+".sock"))
+	for _, p := range own {
+		// gosec G703: name is the caller's own -name, refused above if it has a
+		// separator, and this only asks whether their own socket exists.
+		if fi, err := os.Lstat(p); err == nil && fi.Mode()&os.ModeSocket != 0 { //nolint:gosec // G703: see above
+			return p, nil
+		}
+	}
+	if shared == "" {
+		return "", fmt.Errorf("no control socket for mount %q at %s, and XDG_RUNTIME_DIR is not set; pass -socket PATH",
+			name, strings.Join(own, " or "))
+	}
+	return shared, nil
+}
+
+func dialControl(socket, name string) (*ctlClient, error) {
+	if socket == "" {
+		var err error
+		if socket, err = findSocket(name); err != nil {
+			return nil, err
+		}
 	}
 	tr := &http.Transport{
 		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
@@ -225,7 +275,7 @@ func runStatus(args []string) error {
 	if c.limit < 1 {
 		return fmt.Errorf("-limit %d is not a count (1 or more)", c.limit)
 	}
-	cl, err := dialControl(c.socket)
+	cl, err := dialControl(c.socket, c.name)
 	if err != nil {
 		return err
 	}
@@ -415,7 +465,7 @@ func printPath(w io.Writer, label string, p ctlPath) {
 func runPause(args []string) error {
 	var c pauseCLI
 	_ = pauseFlagSet(&c).Parse(args)
-	cl, err := dialControl(c.socket)
+	cl, err := dialControl(c.socket, c.name)
 	if err != nil {
 		return err
 	}
@@ -438,7 +488,7 @@ func runPause(args []string) error {
 func runResume(args []string) error {
 	var c ctlFlags
 	_ = resumeFlagSet(&c).Parse(args)
-	cl, err := dialControl(c.socket)
+	cl, err := dialControl(c.socket, c.name)
 	if err != nil {
 		return err
 	}
@@ -462,7 +512,7 @@ func runResume(args []string) error {
 func runStop(args []string) error {
 	var c ctlFlags
 	_ = stopFlagSet(&c).Parse(args)
-	cl, err := dialControl(c.socket)
+	cl, err := dialControl(c.socket, c.name)
 	if err != nil {
 		return err
 	}

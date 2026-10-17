@@ -289,8 +289,9 @@ and whether its backend is
 .B offline
 or
 .BR unknown .
-Reachability is observed from drivel's own requests and never probed; with no
-traffic for an hour it is
+Reachability is observed from drivel's own requests, including a lazy mount's
+downloads of files it is asked to read, and never probed; with no traffic for an
+hour it is
 .BR unknown .
 .IP
 With a
@@ -349,7 +350,21 @@ All four take
 for a mount started with
 .BR -control-socket ,
 and need the mount to have been started with
-.BR -control .
+.B -control
+(or an fstab line with
+.BR control ).
+With
+.BI -name " name"
+and no
+.BR -socket ,
+.BR status ,
+.B pause
+and
+.B resume
+first look for that mount's own socket, where an fstab line puts it:
+.I $XDG_RUNTIME_DIR/drivel/name.sock
+or
+.IR /run/drivel/uid/name.sock .
 The protocol is HTTP and JSON over the socket, documented for other tools in
 .I docs/dev/control-api.md
 in the source tree.
@@ -1038,6 +1053,26 @@ either way.
 .TP
 .B foreground
 Do not fork. For debugging; an fstab line must not use it.
+.TP
+.B control
+Serve the control socket for this line's mount, as
+.B -control
+does. Each fstab line is its own process, so the socket is named after the
+mount:
+.I /run/drivel/uid/name.sock
+when the helper starts as root, where
+.I uid
+is the
+.B run-as=
+account's and the directory is made by root and handed to that account before
+root is given up;
+.I $XDG_RUNTIME_DIR/drivel/name.sock
+otherwise. A second line with the same name refuses to mount.
+.TP
+.BI control-socket= path
+With
+.BR control ,
+the socket's path instead.
 .TP
 .BI mount-timeout= d
 Give up if the filesystem is not live within

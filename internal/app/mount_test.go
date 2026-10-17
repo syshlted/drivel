@@ -371,6 +371,40 @@ func TestWorkerPoolsReachTheirComponents(t *testing.T) {
 	}
 }
 
+// A lazy mount's fetches count towards its backend's reachability (M14). The
+// classification is tested in syncengine and the reporting in hydrate; this is
+// the one line of wiring between them, and without it a lazy mount that is only
+// read from reports "unknown" for as long as it is up.
+func TestHydrationCountsTowardsReachability(t *testing.T) {
+	spec := baseSpec(t)
+	spec.Provider = "fake"
+	spec.Lazy = true
+	store := newFakeStore()
+	store.puts["a.txt"] = []byte("0123456789")
+
+	m, err := Open(t.Context(), spec, registryWith(t, "fake", store))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer m.Close() //nolint:errcheck // the assertions below are what this test is for
+	if !m.hyd.XattrsUsable() {
+		testenv.Unavailable(t, testenv.Xattr, "backing filesystem does not store user.* attributes")
+	}
+
+	if got := m.Stats().Reachability; got != syncengine.ReachUnknown {
+		t.Fatalf("before any fetch: %s; want %s", got, syncengine.ReachUnknown)
+	}
+	if err := m.hyd.CreatePlaceholder("a.txt", provider.RemoteFile{Path: "a.txt", Size: 10, Version: "1"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.hyd.Hydrate(t.Context(), "a.txt"); err != nil {
+		t.Fatalf("Hydrate: %v", err)
+	}
+	if got := m.Stats().Reachability; got != syncengine.ReachOnline {
+		t.Errorf("after a fetch the backend answered: %s; want %s", got, syncengine.ReachOnline)
+	}
+}
+
 // An unset spec — a caller that builds one by hand, which is every test and the
 // M9 plugin path later — gets the package defaults rather than a pool of zero.
 // The hydrator's matters most: a zero-sized channel would block the first fetch

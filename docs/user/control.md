@@ -21,7 +21,9 @@ drivel stop                        # unmount and finish uploads, as Ctrl-C would
 ```
 
 Each command takes `-name NAME` to act on one mount of several, and `-socket
-PATH` if the mount was started with `-control-socket`. `drivel status -json`
+PATH` if the mount was started with `-control-socket`. With `-name`, the
+commands also look for a socket of that mount's own, which is how an
+[fstab mount](fstab.md#the-control-socket) is reached. `drivel status -json`
 prints the raw answer.
 
 ## Why it is off by default
@@ -38,7 +40,8 @@ One socket serves every mount in the process. Two separate `drivel mount`
 processes need two different `-control-socket` paths; the second one refuses to
 take over a socket the first is still answering on.
 
-The socket is not offered for [fstab mounts](fstab.md) yet.
+A mount from `/etc/fstab` is its own process, so it gets a socket of its own,
+named after the mount — see [the fstab page](fstab.md#the-control-socket).
 
 ## Reading `drivel status`
 
@@ -81,8 +84,10 @@ are backed up — which is usually when you want to ask.
 `paused`, `saturated` when writes are waiting on uploads, `sweeping`) and its
 **backend** reachability: `online`, `offline`, or `unknown`. Drivel never pings
 your backend to find out; it reports how its own recent requests went, and says
-`unknown` when it has not made any for an hour. An idle SFTP mount is usually
-`unknown`, and that is accurate.
+`unknown` when it has not made any for an hour. A [lazy](lazy-mode.md) mount's
+downloads of files you open count, so a lazy mount that you only read from still
+reports its backend. An idle SFTP mount is usually `unknown`, and that is
+accurate.
 
 ## Pausing
 

@@ -390,3 +390,86 @@ func TestRestampPlaceholder(t *testing.T) {
 		t.Errorf("re-stamping fetched content %d time(s); want 0", fs.gets.Load())
 	}
 }
+
+// failingBody returns some bytes and then a transport error, as a download that
+// dies mid-stream does.
+type failingBody struct {
+	sent bool
+	err  error
+}
+
+func (b *failingBody) Read(p []byte) (int, error) {
+	if !b.sent {
+		b.sent = true
+		return copy(p, "012"), nil
+	}
+	return 0, b.err
+}
+func (b *failingBody) Close() error { return nil }
+
+// bodyStore is a fakeStore whose Get succeeds and whose body then fails.
+type bodyStore struct {
+	fakeStore
+	bodyErr error
+}
+
+func (s *bodyStore) Get(context.Context, string) (io.ReadCloser, error) {
+	return &failingBody{err: s.bodyErr}, nil
+}
+
+// A lazy mount nobody writes to reaches its backend only through hydration, so
+// every fetch outcome has to reach the reachability tracker (M14): the store
+// answering, the store refusing, and a download dying after the store answered.
+// The last is why the body is watched separately — io.Copy returns one error for
+// a failed read and a failed write, and only the first is about the backend.
+func TestHydrationReportsEveryFetchOutcome(t *testing.T) {
+	cases := []struct {
+		name  string
+		store func() provider.Store
+		want  []string // the reported outcomes, "ok" for nil
+	}{
+		{"answered", func() provider.Store {
+			return &fakeStore{content: map[string]string{"a.txt": "0123456789"}}
+		}, []string{"ok"}},
+		{"refused", func() provider.Store {
+			return &fakeStore{content: map[string]string{}, err: errors.New("network is down")}
+		}, []string{"network is down"}},
+		{"died mid-body", func() provider.Store {
+			return &bodyStore{bodyErr: errors.New("connection reset")}
+		}, []string{"ok", "connection reset"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			h := New(t.TempDir(), tc.store(), nil, 0)
+			if !h.XattrsUsable() {
+				testenv.Unavailable(t, testenv.Xattr, "backing filesystem does not store user.* attributes")
+			}
+			var got []string
+			h.ReportOutcomes(func(err error) {
+				if err == nil {
+					got = append(got, "ok")
+					return
+				}
+				got = append(got, err.Error())
+			})
+			if err := h.CreatePlaceholder("a.txt", remote("a.txt", "0123456789")); err != nil {
+				t.Fatal(err)
+			}
+			_ = h.Hydrate(context.Background(), "a.txt")
+			if strings.Join(got, "|") != strings.Join(tc.want, "|") {
+				t.Errorf("reported %q; want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// Reporting is optional: a hydrator nobody asked for outcomes from still works.
+func TestHydrationWithoutAReceiver(t *testing.T) {
+	h, _, _ := newHydrator(t, map[string]string{"a.txt": "0123456789"})
+	if err := h.CreatePlaceholder("a.txt", remote("a.txt", "0123456789")); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.Hydrate(context.Background(), "a.txt"); err != nil {
+		t.Fatal(err)
+	}
+}

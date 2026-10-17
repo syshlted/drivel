@@ -102,6 +102,44 @@ type Hydrator struct {
 
 	// Counted for the status API (M14), and only there: nothing here reads them.
 	hydrated, hydratedBytes, failed atomic.Int64
+
+	// report, if set, is told the outcome of every call this hydrator makes to
+	// the store, so a lazy mount's reads count towards backend reachability
+	// (M14). Set once, before the hydrator is in use; see ReportOutcomes.
+	report func(error)
+}
+
+// ReportOutcomes makes f the receiver of every provider outcome this hydrator
+// observes: nil when the store answered a fetch, the error when the fetch or the
+// download of its body failed. A local write failure is not reported — it says
+// nothing about the backend.
+//
+// It exists because a lazy mount that nobody writes to talks to its backend only
+// here, so without it the status API reported `unknown` for a mount serving
+// reads all day, and missed the backend going away under them. It must be called
+// before the hydrator is in use; it is not synchronised with Hydrate.
+func (h *Hydrator) ReportOutcomes(f func(error)) { h.report = f }
+
+func (h *Hydrator) observe(err error) {
+	if h.report != nil {
+		h.report(err)
+	}
+}
+
+// bodyReader remembers the error the remote body returned, so fetchWhole can
+// tell a failed download (the backend's) from a failed write (the disk's) when
+// io.Copy hands back one error for either.
+type bodyReader struct {
+	r   io.Reader
+	err error
+}
+
+func (b *bodyReader) Read(p []byte) (int, error) {
+	n, err := b.r.Read(p)
+	if err != nil && err != io.EOF {
+		b.err = err
+	}
+	return n, err
 }
 
 // HydrationStats reports how many placeholders this hydrator has filled, how
@@ -366,6 +404,7 @@ func (h *Hydrator) fetchLimited(ctx context.Context, rel string, m Marker) error
 // still-marked placeholder that is simply re-fetched.
 func (h *Hydrator) fetchWhole(ctx context.Context, rel string, m Marker) error {
 	rc, err := h.store.Get(ctx, rel)
+	h.observe(err)
 	if err != nil {
 		return fmt.Errorf("hydrate %s: %w", rel, err)
 	}
@@ -376,8 +415,12 @@ func (h *Hydrator) fetchWhole(ctx context.Context, rel string, m Marker) error {
 	if err != nil {
 		return err
 	}
-	n, copyErr := io.Copy(fh, rc)
+	body := &bodyReader{r: rc}
+	n, copyErr := io.Copy(fh, body)
 	if copyErr != nil {
+		if body.err != nil {
+			h.observe(body.err)
+		}
 		fh.Close()
 		return fmt.Errorf("hydrate %s: %w", rel, copyErr)
 	}

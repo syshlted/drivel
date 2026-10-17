@@ -35,6 +35,7 @@ import (
 
 	"github.com/syshlted/drivel/internal/app"
 	"github.com/syshlted/drivel/internal/config"
+	"github.com/syshlted/drivel/internal/control"
 	"github.com/syshlted/drivel/internal/hydrate"
 	"github.com/syshlted/drivel/internal/provider/gdrive/gdconf"
 	"github.com/syshlted/drivel/internal/syncengine"
@@ -219,6 +220,11 @@ type helperOptions struct {
 	fsname       string
 	mountTimeout time.Duration
 
+	// The control & status API (M14): control turns it on, controlSocket names
+	// the socket instead of the per-line default (see helperControlSocket).
+	control       bool
+	controlSocket string
+
 	allowOther     bool
 	backendOptions []string
 
@@ -370,6 +376,10 @@ func (h *helperArgs) resolve() (*helperOptions, error) {
 			c.fsname, err = stringValue(o)
 		case "mount-timeout":
 			c.mountTimeout, err = durationValue(o)
+		case "control":
+			c.control, err = boolValue(o)
+		case "control-socket":
+			c.controlSocket, err = pathValue(o)
 
 		// --- backend ----------------------------------------------------------
 		case "allow_other":
@@ -401,6 +411,10 @@ func (h *helperArgs) resolve() (*helperOptions, error) {
 	if c.configPath != "" && len(c.shaping) > 0 {
 		return nil, fmt.Errorf("%s cannot be combined with config=%s; describe the mount in the config file",
 			strings.Join(dedupe(c.shaping), ", "), c.configPath)
+	}
+	if c.controlSocket != "" && !c.control {
+		// The flag path's rule (validateControlFlags), for the option spelling.
+		return nil, errors.New("control-socket= has no effect without control")
 	}
 	if c.lazy && c.credentials == "" && c.account == "" {
 		// The same check the flag path makes, worded for the option that was typed.
@@ -708,6 +722,43 @@ func helperOptionSpec(h *helperArgs, c *helperOptions) (app.MountSpec, error) {
 		IndexPath:   index,
 	})
 	return spec, nil
+}
+
+// helperControlSocket is where this line's control socket goes, or "" when the
+// line did not ask for one.
+//
+// The flag path's default — one control.sock per user — cannot serve here,
+// because every fstab line is its own process: the second line to come up would
+// find the first one's socket live and refuse to start. So the default is one
+// socket per LINE, named after the mount. The name is already a per-line
+// identity — it is the directory the state DB lives in, so two lines sharing one
+// collide on the DB's lock regardless — which makes it the one name that cannot
+// add a collision of its own.
+//
+// systemDir is non-empty when the helper was started as root, and is then the
+// directory root prepared for the account the mount runs as (control.SystemDirFor).
+// That is the boot case, and it cannot use XDG_RUNTIME_DIR: a mount unit has no
+// session, so the variable is unset, and /run/user/<uid> — where it would point —
+// exists only while that account is logged in and is removed when they log out.
+// A helper not started as root has no privilege to drop, so its environment is
+// the account's own and XDG_RUNTIME_DIR is trustworthy where it is set.
+func helperControlSocket(c *helperOptions, systemDir, name string) (string, error) {
+	if !c.control {
+		return "", nil
+	}
+	if c.controlSocket != "" {
+		return expandHelperPath(c.controlSocket)
+	}
+	file := name + ".sock"
+	if systemDir != "" {
+		return filepath.Join(systemDir, file), nil
+	}
+	dir, err := control.RuntimeDir()
+	if err != nil {
+		return "", fmt.Errorf("option control: %w, and the helper was not started as root, which would have used %s; pass control-socket=PATH",
+			err, control.SystemDir)
+	}
+	return filepath.Join(dir, file), nil
 }
 
 // helperMountName picks the name this mount is known by — in logs, and as the

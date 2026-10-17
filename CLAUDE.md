@@ -468,8 +468,8 @@ opens a unix socket (`internal/control`, HTTP/JSON, `/v1/…`), and `drivel
 status|pause|resume|stop` is the first client. See "Control & status API" below
 for the invariants. The schema is `docs/dev/control-api.md` — **that file is the
 contract, not the Go types**. Off by default; no tree roll-up (per-path status
-plus a bounded, name-paged listing of a directory's children); not offered to
-the fstab helper yet.
+plus a bounded, name-paged listing of a directory's children). The fstab helper
+has it as `-o control`, one socket per line — see rule 6.
 
 **M15** special files, POSIX metadata & mount safety — **items 1–3 shipped
 (2026-09-08); 4 and 5 remain.** See "Special files" below for what landed and the
@@ -990,14 +990,21 @@ it; DESIGN.md §9/M14 has the reasoning and the shipped note.
    not ours and `0700` is refused (never chmod'ed), socket `0600`, peer uid
    checked where the platform reports it (root allowed). A stale socket is
    *connected to first* and unlinked only on `ECONNREFUSED`. `Authorization` is
-   accepted and ignored so a token scheme can grow later.
+   accepted and ignored so a token scheme can grow later. **An fstab line gets a
+   socket per line, named after the mount**, because each line is its own
+   process: `/run/drivel/<uid>/<name>.sock` when the helper *started* as root
+   (root makes the directory and chowns it to the `run-as=` account before the
+   drop — boot has no `XDG_RUNTIME_DIR`, and `/run/user/<uid>` vanishes at
+   logout), else `$XDG_RUNTIME_DIR/drivel/<name>.sock`. Only the parent knows
+   which, so it passes the path to the child in `DRIVEL_MOUNT_HELPER_CONTROL`.
 7. **The client imports nothing internal.** `cmd/drivel/ctl.go` decodes into its
    own types from the documented schema — it is the acceptance test that a
    stranger's tool can do everything the in-tree one does. If it needs something
    the API does not offer, change the API, not the client.
 
 Reachability is **observed at call sites** (engine attempts, `Changes`,
-`StartCursor`, `Enumerate`, the downloader's `Get`; hydration not yet) and never
+`StartCursor`, `Enumerate`, the downloader's `Get`, and hydration's `Get` and
+body read through `Hydrator.ReportOutcomes` — never its local write) and never
 probed; a non-retryable error counts as contact, an hour of silence is
 `unknown`. Do not wrap the store to observe it — a wrapper must re-declare every
 capability, which is M9 rule 1's trap. **Not merged with the plugin protocol**,

@@ -350,6 +350,7 @@ func Open(ctx context.Context, spec MountSpec, reg *provider.Registry) (*Mount, 
 		}
 		m.logf("lazy hydration enabled (ranged reads: %t)", m.hyd.SupportsRanges())
 		m.mon.WatchHydration(m.hyd)
+		m.hyd.ReportOutcomes(m.mon.Observe)
 	}
 
 	m.engine = syncengine.New(syncengine.Config{

@@ -28,6 +28,7 @@ import (
 	"time"
 
 	"github.com/syshlted/drivel/internal/app"
+	"github.com/syshlted/drivel/internal/control"
 )
 
 const (
@@ -36,6 +37,11 @@ const (
 	// future change to the handshake can be detected rather than guessed at.
 	helperChildEnv = "DRIVEL_MOUNT_HELPER_CHILD"
 	helperChildTag = "1"
+
+	// helperControlEnv carries the control socket path the parent resolved to the
+	// child. The parent has to resolve it, because only the parent knows whether
+	// the helper started as root: by the time the child runs, root is gone.
+	helperControlEnv = "DRIVEL_MOUNT_HELPER_CONTROL"
 
 	// helperReadyFD is the pipe the child reports through. Fd 3 because
 	// exec.Cmd.ExtraFiles starts there, after the three standard descriptors.
@@ -84,13 +90,32 @@ func runMountHelper(args []string) error {
 		// still runs, which is the point of checking a line this way: a run-as
 		// typo, a path that does not resolve, and a mount app.Validate refuses all
 		// fail here rather than at the next boot.
-		_, specErr := checkedSpec(h, c)
-		return specErr
+		spec, specErr := checkedSpec(h, c)
+		if specErr != nil {
+			return specErr
+		}
+		// Resolved but not created: where the socket would go is checkable, and
+		// making the directory is exactly the side effect a dry run must not have.
+		_, err := helperControlSocket(c, helperSystemDir(c, target), spec.Name)
+		return err
 	}
 
 	logFile, err := openHelperLog(c.logfile, target)
 	if err != nil {
 		return err
+	}
+
+	// The control socket's directory, while root can still make it: under /run,
+	// which nobody else can write, handed to the account the mount will run as.
+	systemDir := helperSystemDir(c, target)
+	if systemDir != "" {
+		uid, gid := 0, 0
+		if target != nil {
+			uid, gid = target.uid, target.gid
+		}
+		if _, err := control.PrepareSystemDir(uid, gid); err != nil {
+			return fmt.Errorf("option control: %w", err)
+		}
 	}
 
 	if target != nil {
@@ -105,6 +130,10 @@ func runMountHelper(args []string) error {
 	if err != nil {
 		return err
 	}
+	socket, err := helperControlSocket(c, systemDir, spec.Name)
+	if err != nil {
+		return err
+	}
 	if h.verbose {
 		//nolint:gosec // G706: the fstab line is root's to write; nothing less privileged reaches here.
 		log.Printf("mounting %s at %s (backing %s)", spec.FsName, spec.Mountpoint, backingLabel(spec))
@@ -115,9 +144,23 @@ func runMountHelper(args []string) error {
 			log.SetOutput(logFile)
 			defer logFile.Close() //nolint:errcheck // the process is exiting
 		}
-		return serveHelperMount(h, c, nil)
+		return serveHelperMount(h, c, socket, nil)
 	}
-	return daemonize(c, logFile)
+	return daemonize(c, socket, logFile)
+}
+
+// helperSystemDir is the control socket directory a root-started helper uses,
+// or "" when the line asked for no socket, named its own, or the helper is not
+// root (see helperControlSocket for why that is the rule).
+func helperSystemDir(c *helperOptions, target *runAsUser) string {
+	if !c.control || c.controlSocket != "" || os.Geteuid() != 0 {
+		return ""
+	}
+	uid := 0
+	if target != nil {
+		uid = target.uid
+	}
+	return control.SystemDirFor(uid)
 }
 
 // checkedSpec builds this line's mount and runs the cross-mount validation over
@@ -138,8 +181,9 @@ func backingLabel(spec app.MountSpec) string {
 	return spec.DataDir
 }
 
-// serveHelperMount runs the one mount this fstab line describes.
-func serveHelperMount(h *helperArgs, c *helperOptions, ready func()) error {
+// serveHelperMount runs the one mount this fstab line describes, with its
+// control socket at socket when that is not "".
+func serveHelperMount(h *helperArgs, c *helperOptions, socket string, ready func()) error {
 	spec, err := helperSpec(h, c)
 	if err != nil {
 		return err
@@ -151,21 +195,44 @@ func serveHelperMount(h *helperArgs, c *helperOptions, ready func()) error {
 		return err
 	}
 
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	sigCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	// As on the flag path: the control API's shutdown is the signal's context one
+	// level down, so `drivel stop` unmounts and drains exactly as umount does.
+	ctx, shutdown := context.WithCancelCause(sigCtx)
+	defer shutdown(nil)
 
 	a, err := app.New(ctx, []app.MountSpec{spec}, reg)
 	if err != nil {
 		return err
 	}
 	defer a.Close() //nolint:errcheck // the process is exiting; Run's error is the one that matters
+	// Before Run, and so before the mount reports ready: a socket that cannot be
+	// served fails the mount through the handshake, rather than leaving mount(8)
+	// to report success for a line whose control option silently did nothing.
+	if socket != "" {
+		stopControl, err := startControl(socket, a, shutdown)
+		if err != nil {
+			return err
+		}
+		defer stopControl()
+	}
 	return a.Run(ctx)
 }
 
 // runHelperChild is the forked half: mount, then tell the parent.
 func runHelperChild(h *helperArgs, c *helperOptions) error {
 	ready := &readyPipe{f: os.NewFile(helperReadyFD, "drivel-ready")}
-	err := serveHelperMount(h, c, ready.ok)
+	socket := os.Getenv(helperControlEnv)
+	_ = os.Unsetenv(helperControlEnv)
+	if c.control && socket == "" {
+		// The parent always sends one when the line asks for a socket, so this is
+		// a parent and child from two different builds.
+		err := errors.New("option control: the mount process was not told where its control socket goes")
+		ready.fail(err)
+		return err
+	}
+	err := serveHelperMount(h, c, socket, ready.ok)
 	if err != nil {
 		// A no-op once the mount has been reported live: by then the parent has
 		// exited and nothing is reading. An unmount error belongs in the log.
@@ -209,7 +276,7 @@ func (p *readyPipe) send(msg string) {
 // mount is live would be worse: mount(8) would report success for a filesystem
 // that may never appear. So the parent exits only once the child has mounted, and
 // carries the child's failure back as its own.
-func daemonize(c *helperOptions, logFile *os.File) error {
+func daemonize(c *helperOptions, socket string, logFile *os.File) error {
 	r, w, err := os.Pipe()
 	if err != nil {
 		return fmt.Errorf("ready pipe: %w", err)
@@ -243,7 +310,7 @@ func daemonize(c *helperOptions, logFile *os.File) error {
 		// the same way this process did, whether that was through a /sbin/mount.*
 		// symlink or `drivel mount-helper`.
 		Args:        os.Args,
-		Env:         append(os.Environ(), helperChildEnv+"="+helperChildTag),
+		Env:         append(os.Environ(), helperChildEnv+"="+helperChildTag, helperControlEnv+"="+socket),
 		Stdin:       devNull,
 		Stdout:      out,
 		Stderr:      out,

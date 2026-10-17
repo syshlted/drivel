@@ -42,7 +42,9 @@ func startControl(path string, a *app.App, shutdown func(error)) (func(), error)
 			log.Printf("control socket: %v", err)
 		}
 	}()
-	log.Printf("control socket at %s", path)
+	// gosec G706: on the fstab path this comes from the line's options or the
+	// mount's name, both root's to write; on the flag path, the caller's own flag.
+	log.Printf("control socket at %s", path) //nolint:gosec // G706: see above
 	return func() { _ = srv.Close() }, nil
 }
 
