@@ -907,11 +907,12 @@ truncated to two `Enumerate` calls and then ran its delete pass on the prefix
 outlives both: **MC-01 is the only live cold sweep this plan records, and it ran
 two days before M7c existed** — so a feature whose only live evidence predates it
 has no live evidence, and any Group I–III result recorded before 2026-09-07 should
-be read with that date in mind. The third finding is MC-27's, and it is a shape
-rather than a bug: **renaming a directory of more than ~100 files doubles that
-subtree on every other client and does not heal**, because a folder move is left
-to the sweep and the sweep's repair then exceeds `-max-deletes` and refuses the
-whole pass. **Three findings from those groups outrank the rest and are below in their
+be read with that date in mind. The third finding is MC-27's: **renaming a
+directory of more than ~100 files doubled that subtree on every other client and
+did not heal**, because a folder move was left to the sweep and the sweep's repair
+then exceeded `-max-deletes` and refused the whole pass — the only case on record
+where two correct guards compose into a stuck state. **Fixed 2026-10-16** by the
+seam change in "Directory moves" below; the live re-run is owed. **Three findings from those groups outrank the rest and are below in their
 own sections**: §6's conflict copy protects *unsynced local work* and not content
 (MC-31, MC-60), inbound sync stalls while a client drains an outbound backlog
 (MC-36, MC-50), and §12's ~36 KB per commit is now confirmed in the field. One
@@ -1105,14 +1106,14 @@ by `linkLocked`/`unlinkLocked`, because a `kids` set that drifts from `idByPath`
 makes a delete miss a descendant and leave the stale mapping that row 1 above
 exists to prevent.
 
-Also: **a rename must be reported inbound as remove-old + add-new**, because
-`provider.RemoteChange` carries no identity and Drive's feed never mentions a path
-an object has left. `vacatedPathLocked` derives the old path from the in-memory
-reverse map — not the persistent index (acting on a hint here means deleting a
-local file) and not for directories (a removal above the seam is a recursive
-delete, and Drive reports no changes for a moved folder's children, so they would
-not come back until a sweep). Without it every rename duplicates the file on every
-other client until the next sweep. See DESIGN.md §2.5.
+Also: **a rename must be reported inbound, and the shape depends on what moved.**
+Drive's feed never mentions a path an object has left, so `vacatedPathLocked`
+derives it from the in-memory reverse map — **not** the persistent index, since
+acting on a hint here means moving or deleting a local file. A **file** is
+reported as remove-old + add-new; a **directory** sets
+`provider.RemoteChange.MovedFrom`, which is the fourth field and the one M9's
+protocol gained for it. Without either, every rename duplicates on every other
+client until a sweep. See DESIGN.md §2.5 and "Directory moves" below.
 
 Also: a file's `parents` carry the **concrete** root ID, never the `root` alias
 that `-drive-root` defaults to. Comparing against the alias is what made the parent
@@ -1348,6 +1349,72 @@ over a LAN all beat 749 commits/s. **The cheaper thing first** is batching the
 (`flushForget`/`SetCursor` are there and already ordered) — full durability, no
 panic handling, but it needs its own reasoning about a path appearing twice in one
 page.
+
+## Directory moves (MovedFrom)
+
+**A folder move was the one mutation the seam could not express, and leaving it to
+the sweep was measured and found to be the worse failure, not the lesser one**
+(MC-27 live 2026-10-14, fixed 2026-10-16; DESIGN.md §2.5). A file move had been
+reported as remove-old + add-new since M7. A directory could not be: a removal
+above the seam is a *recursive* local delete and Drive reports nothing for the
+children of a moved folder, so the subtree would be deleted with nothing in the
+feed to bring it back. So the feed said nothing — and at 1100 files every peer
+downloaded the subtree a second time, kept the old one as orphans, and then had
+its repair pass propose 1101 deletions against a `-max-deletes` of 100, refusing
+the whole thing while logging `reconcile complete`, with nothing scheduled to
+retry. 2200 files, permanently. Six things carry the fix.
+
+1. **`provider.RemoteChange.MovedFrom` is additive in both skew directions, and
+   that is why the protocol version does not move.** It is only ever set where the
+   change already describes the object at its *new* path, so a host that ignores
+   it does exactly what every host did before it existed. That is also why a
+   **file** move keeps its pair instead of being converted: both forms converge
+   for a file, and the pair is the one an older host needs in order to converge at
+   all. Setting both on one change would tell a host to rename a path it had just
+   been told to delete.
+2. **It is advice and the host validates it.** `moveLocally` declines an unclean
+   or escaping path, either path inside the other, an absent source, and an
+   **occupied destination** — `os.Rename` replaces a file silently and what it
+   would replace may be local work nobody pushed, which is §6's question to answer
+   with a conflict copy and not a move's to answer by overwriting. Every decline
+   falls through to the pre-existing behaviour, which is what makes the whole
+   thing safe. The path validation is above the seam on purpose: a plugin is
+   trusted code (M9 rule 8) but this is the first provider-supplied value that
+   drives a destructive operation on a *subtree*.
+3. **A provider may set it only for a move of the same object with unchanged
+   content**, because the host carries the §4 baseline across it. A backend whose
+   `Move` is copy-and-delete must leave it empty — identity is exactly what such a
+   move does not preserve. SFTP sets it nowhere: it has no feed at all, so the
+   sweep is its inbound path and a rename there is already just two listings.
+4. **`state.RenameSubtree` is the load-bearing half, and it is one commit however
+   large the subtree.** It carries `echo`, `hydration` and `repair`; `tombstone`
+   and `seen` deliberately stay put (a tombstone describes the object that *left*
+   a path, and seen marks belong to a generation whose listing predates this).
+   A baseline is not a cache — it is §4's loop breaker, M6's gate, M7b's delete
+   evidence and M27's divergence test — so a dropped one is what turned the old
+   subtree into orphans. `commitsPerRename` is 2 and was 2 before, because the
+   re-key subsumes the `Forget` it replaces.
+5. **The sending side was broken the same way and has nothing to do with the
+   protocol.** An outbound rename dropped the record for the renamed path only, so
+   *the renaming client's own* next sweep found every descendant's baseline keyed
+   under a path that no longer existed and proposed the identical 1101 deletions.
+   `Engine.renameRecords` re-keys instead. Anyone reading MC-27 as a
+   receiving-client bug will fix half of it.
+6. **The delete-before-write ordering in `RenameSubtree` guards nothing
+   reachable, and the comment says so.** With the nesting guard above it the old
+   and new key ranges cannot collide; it is kept because it is the half that
+   survives someone relaxing that guard, and because `pathindex.Rename` does the
+   same. It was mutation-tested, survived, and the claim was corrected rather than
+   the code deleted — a sibling rename (`a` -> `ab`) is a *scan* question, which
+   the `wideload.txt` sibling in `TestRenameSubtreeMovesTheWholeSubtree` is the
+   assertion for.
+
+14 mutation checks, one per condition, in `internal/state/rename_test.go`,
+`internal/syncengine/move_test.go`, `internal/provider/gdrive/changes_test.go`
+and the fake plugin's feed (which is a real out-of-process executable, so the
+field is proven across the socket and not only in the converter). **The live
+re-run is owed** — MC-26b at 10 files and MC-27 at 1100 — and `[pull] move` is
+the line that distinguishes a fix from a coincidence. `logcount.sh` counts it.
 
 ## Deletions and §4 (the tombstone)
 

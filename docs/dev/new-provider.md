@@ -144,6 +144,28 @@ reproduces those guards or, far more likely, quietly does not.
 
 A store with neither interface really is outbound-only, and gets no downloader.
 
+**If your feed is keyed by object identity rather than by path, you own the
+reporting of moves** — the API will not tell the host, and nothing above the seam
+can work it out. Two shapes, and which one you use depends on what moved. A
+**file** is a removal of the path it left followed by an addition of the path it
+now occupies; emit both, in that order, in one page. A **directory** sets
+`RemoteChange.MovedFrom` on the change describing it at its new path, and emits no
+removal — above the seam a removal is a *recursive* delete, and a feed like this
+reports nothing for the children of a moved folder, so the subtree would be
+deleted locally with nothing to bring it back.
+
+Leaving both unsaid is a supported answer and the sweep repairs it, but know what
+it costs before choosing it: at 1100 files, MC-27 measured every other client
+downloading the subtree a second time and then proposing 1101 deletions, which
+`-max-deletes` refuses — so the subtree stays doubled permanently. Three
+requirements if you do set `MovedFrom`: only for a move of the **same object**
+with its content unchanged (the host carries the §4 baseline across it, so a
+copy-and-delete `Move` must leave it empty); derive it from something
+authoritative about your own process's view and never from a persistent cache
+(the host acts on it by renaming local files); and expect it to be **declined** —
+it is advice, the host validates it and falls back to the ordinary apply, so
+nothing about your correctness may depend on it being taken.
+
 If you implement `ChangeSource` and expect anyone to run your provider with
 `-lazy`, note that lazy hydration turns each inbound change into a *placeholder*
 rather than a download, and the file's content is fetched later by path via `Get`.
@@ -335,6 +357,11 @@ coverage.
       `Enumerator` implemented if the tree can be listed, which is what gives a
       feedless provider any inbound sync at all.
 - [ ] `RangeGetter` implemented **iff** the provider serves real byte ranges.
+- [ ] A move is reported, if the feed is keyed by identity: a **file** as
+      removal-then-addition, a **directory** as `MovedFrom`. Saying nothing is
+      supported and costs the receiving client a duplicated subtree it cannot
+      delete past `-max-deletes` (MC-27). Never set `MovedFrom` for a move that
+      does not preserve the object.
 - [ ] Store is safe for concurrent use **and holds no lock across a transfer.**
       Nothing above the seam can observe this, and getting it wrong does not look
       like a bug: a mount that serialises its own index behind each `Put` stops

@@ -420,6 +420,13 @@ func (d *Downloader) flushForget(forget map[string]struct{}) error {
 func (d *Downloader) applyTo(ctx context.Context, ch provider.RemoteChange, forget map[string]struct{}) error {
 	dst := filepath.Join(d.dataDir, filepath.FromSlash(ch.Path))
 
+	// A move, if the provider said so and this mount can act on it, happens before
+	// anything below reads a record or touches the tree: it is what makes the rest
+	// of this function find the content already present and the baseline already
+	// correct. Declining it is always safe — what follows is then exactly what it
+	// was before providers could report a move at all.
+	d.moveLocally(ch)
+
 	if ch.Removed || ch.File == nil {
 		// Idempotent: if we (or a prior run) already removed it, RemoveAll is a
 		// no-op. Covers our own delete echo without a dedicated record.
@@ -524,6 +531,95 @@ func (d *Downloader) applyTo(ctx context.Context, ch provider.RemoteChange, forg
 	}
 	return d.rememberApplied(ch.Path, dst, f)
 }
+
+// moveLocally applies a change's MovedFrom to the backing tree: one rename of the
+// subtree, and one re-key of the records that describe it. It reports whether the
+// move was performed.
+//
+// This is the whole receiving half of a provider-reported move, and what it
+// replaces is expensive rather than wrong: without it the subtree is downloaded
+// a second time under its new name while the old copy becomes N orphans that
+// only the delete pass can retire, and past -max-deletes that pass refuses
+// itself and the client stays doubled (MC-27). One rename and one commit do
+// instead.
+//
+// Every condition below declines rather than failing, and the fallback is not a
+// degraded path but the behaviour that shipped before this existed. Two of them
+// are the ones that matter:
+//
+//   - The paths are validated here, above the seam, because MovedFrom is the
+//     first thing a provider says that drives a destructive operation on a
+//     *subtree*. A plugin is code drivel launched and trusted (M9 rule 8) and
+//     this is not a sandbox — but the blast radius of a bad answer is the whole
+//     backing tree rather than one path, so it is checked anyway, in the same
+//     spirit as sftp's structural containment.
+//   - An occupied destination declines. os.Rename replaces a file silently and
+//     fails on a non-empty directory, and what it would replace may be local
+//     work that has never been pushed — which is §6's question to answer, with a
+//     conflict copy, and not something a move may decide by overwriting.
+func (d *Downloader) moveLocally(ch provider.RemoteChange) bool {
+	if ch.MovedFrom == "" || ch.Removed || ch.File == nil {
+		return false
+	}
+	if !relPathOK(ch.MovedFrom) || !relPathOK(ch.Path) {
+		d.logf("[pull] ignoring a reported move %q -> %q: not a path inside the mount", ch.MovedFrom, ch.Path)
+		return false
+	}
+	// Either path inside the other is not a move a filesystem can perform
+	// (os.Rename answers EINVAL) and is the one shape where the two key ranges
+	// nest. Refuse it here so it is a decision rather than an error in a log.
+	if inside(ch.Path, ch.MovedFrom) || inside(ch.MovedFrom, ch.Path) {
+		return false
+	}
+	src := filepath.Join(d.dataDir, filepath.FromSlash(ch.MovedFrom))
+	dst := filepath.Join(d.dataDir, filepath.FromSlash(ch.Path))
+	if _, err := os.Lstat(src); err != nil {
+		// Nothing of ours at the old path: a client that never held the subtree,
+		// or a re-report of a move already applied. The ordinary apply fetches
+		// what it needs, which for the first case is the right thing to do.
+		return false
+	}
+	if _, err := os.Lstat(dst); err == nil {
+		d.logf("[pull] not moving %s -> %s: the destination already exists locally", ch.MovedFrom, ch.Path)
+		return false
+	}
+	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+		d.logf("[pull] move %s -> %s: %v", ch.MovedFrom, ch.Path, err)
+		return false
+	}
+	if err := os.Rename(src, dst); err != nil {
+		d.logf("[pull] move %s -> %s: %v", ch.MovedFrom, ch.Path, err)
+		return false
+	}
+	// The bytes have moved. A failure to re-key the records leaves them naming the
+	// old path, which is the state of affairs this whole mechanism improves on
+	// rather than a new hazard — the sweep repairs it at the cost it always had —
+	// so it is reported and the page carries on instead of being replayed.
+	n, err := d.state.RenameSubtree(ch.MovedFrom, ch.Path)
+	if err != nil {
+		d.logf("[pull] move %s -> %s: re-keying records: %v", ch.MovedFrom, ch.Path, err)
+	}
+	d.logf("[pull] move    %s -> %s (%d record(s) re-keyed)", ch.MovedFrom, ch.Path, n)
+	return true
+}
+
+// relPathOK reports whether p is usable as a root-relative path inside the
+// backing tree: non-empty, already clean, not absolute and not climbing out.
+//
+// path.Clean leaves a leading ".." exactly where it is, so the prefix test is
+// what catches an escape; requiring the path to equal its own Clean also refuses
+// the sloppier forms ("a//b", "a/./b") rather than quietly accepting them,
+// because a provider that sends those is a provider whose other answers are
+// worth distrusting too.
+func relPathOK(p string) bool {
+	if p == "" || p == "." || path.IsAbs(p) || p != path.Clean(p) {
+		return false
+	}
+	return p != ".." && !strings.HasPrefix(p, "../")
+}
+
+// inside reports whether p is q itself or a path beneath it.
+func inside(p, q string) bool { return p == q || strings.HasPrefix(p, q+"/") }
 
 // materialize brings rel's remote content into the backing store: a real download
 // in eager mode, a zero-byte placeholder in lazy mode.

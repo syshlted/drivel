@@ -355,23 +355,73 @@ quota until the trash is emptied, which is why the permanent mode exists rather
 than being an option nobody would pick.
 
 **Reporting a move *inbound* is the seam's hardest case, and it is the provider's
-job.** `RemoteChange` is `{Path, File, Removed}` — no identity — so the only way a
-change feed can say an object moved is a removal of the path it left plus an
-addition of the path it now occupies. A provider whose native feed is keyed by
-object identity (Drive's `changes.list` is: one entry per fileID, carrying that
-object's metadata *now*) is never told the old path by the API, and never says it
-either unless it works it out from its own path↔ID mapping. Left unsaid, a rename
-on one client duplicates the file on every other, because the new path is
-downloaded and nothing ever removes the old one — until an enumeration sweep
-infers the delete, up to `-sweep-interval` later. `gdrive.vacatedPathLocked` is
-where that is worked out, with two deliberate limits: **directories are excluded**
-(a removal above the seam is a recursive local delete, and Drive reports no
-changes for the children of a moved folder, so the subtree would be deleted and
-not come back until a sweep — leaving the stale copy is the lesser failure), and
-**only the in-memory mapping is consulted, never the persistent index** (acting on
-it here means deleting a local file, and M7's first rule is that a persisted entry
-is a hint to be verified before it is believed). Both fall back to the sweep,
-which is slower and never wrong.
+job.** A provider whose native feed is keyed by object identity (Drive's
+`changes.list` is: one entry per fileID, carrying that object's metadata *now*) is
+never told the old path by the API, and never says it either unless it works it
+out from its own path↔ID mapping. Left unsaid, a rename on one client duplicates
+the file on every other, because the new path is downloaded and nothing ever
+removes the old one — until an enumeration sweep infers the delete, up to
+`-sweep-interval` later. `gdrive.vacatedPathLocked` is where that is worked out,
+and **only the in-memory mapping is consulted, never the persistent index**:
+acting on it here means moving or deleting local files, and M7's first rule is
+that a persisted entry is a hint to be verified before it is believed. A move the
+in-memory map cannot account for falls back to the sweep, which is slower and
+never wrong.
+
+**What the seam says about it is two shapes, and which one a provider uses depends
+on what moved.** A *file* is reported as a removal of the old path followed by an
+addition of the new one; `RemoteChange`'s original `{Path, File, Removed}` can
+express that and nothing else, and for a file both forms converge. A *directory*
+cannot be: a removal above the seam is a recursive local delete, and this feed
+reports nothing at all for the children of a moved folder — their own metadata did
+not change — so the subtree would be deleted locally with nothing to bring it
+back. Until MC-27 the answer was therefore to say nothing about a moved folder and
+leave it to the sweep, as the lesser failure.
+
+**MC-27 measured that choice at 1100 files and it is not the lesser failure.** The
+renaming client pays one request. Every other client is told only that an empty
+directory appeared under the new name, keeps the entire old subtree as orphans
+present nowhere remotely, and then has its repair sweep download all 1100 files a
+second time *and* offer 1101 deletions — which `-max-deletes` refuses, abandoning
+the whole pass, with `reconcile complete` in the log and (per MC-25) nothing
+scheduled to retry. **Renaming a directory of more than ~100 files doubled that
+subtree on every other client permanently.** It is the only case on record where
+two individually correct guards compose into a stuck state.
+
+So `RemoteChange` carries a fourth field, **`MovedFrom`**, and a directory move is
+reported as a move. Five things about it.
+
+- **It is strictly additive, in both skew directions.** It is only ever set where
+  the change already describes the object at its new path, so a host that ignores
+  the field is left doing precisely what every host did before it existed — place
+  the object and leave the old path to the sweep. That is why the protocol version
+  does not move (§9, M9: adding a protobuf field is the mechanism for anything
+  additive) and why a *file* move keeps the pair rather than being converted: the
+  pair is what an older host needs in order to converge at all.
+- **A provider may set it only for a move of the same object**, content unchanged,
+  because a host carries the §4 baseline across it. A provider whose `Move` is a
+  copy-and-delete must leave it empty — identity is exactly what such a move does
+  not preserve.
+- **It is advice, never an instruction.** The host validates the paths, declines
+  for any reason it likes, and falls back to the ordinary apply. `moveLocally`
+  declines an unclean or escaping path, either path inside the other, a source
+  that is absent locally, and — the one that protects data — **an occupied
+  destination**, because `os.Rename` replaces a file silently and what it would
+  replace may be local work nobody has pushed. That is §6's question to answer
+  with a conflict copy, not a move's to answer by overwriting.
+- **The records move with the object, in one commit, on both sides.**
+  `state.RenameSubtree` re-keys the echo, hydration and repair buckets for the
+  whole subtree; tombstones and seen marks deliberately stay put. A baseline is
+  not a cache — it is §4's loop breaker, M6's gate, M7b's delete evidence and
+  M27's divergence test — so dropping one costs a re-download on the receiving
+  side and a delete candidate on the sending side, which is the refusal threshold
+  above 100 files.
+- **The sending side needed the same fix and had nothing to do with the
+  protocol.** An outbound rename dropped the record for the renamed path only, so
+  the renaming client's own next sweep found every descendant's baseline keyed
+  under a path that no longer existed and proposed exactly the same 1101
+  deletions. `Engine.renameRecords` re-keys instead of dropping, at the same
+  commit count.
 
 ### 2.6 Transport — HTTP/3 (QUIC) with HTTP/2 fallback
 All Drive API traffic goes over **HTTP/3**. Rationale: QUIC's connection reuse and

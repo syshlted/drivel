@@ -201,12 +201,25 @@ an older build and have an empty folder you deleted, remove it again — and if 
 sweep has since pushed it back to Drive, remove it there too. See [what Drivel
 does about the race](data-safety.md#deletion).
 
+**A folder I renamed appears twice on my other machines.** Fixed on 16 October
+2026. Before that, a rename of a folder reached your other machines as an empty
+new folder beside the full old one; a sweep repaired it for small folders, and for
+anything over about a hundred files the repair hit `-max-deletes` and refused
+itself, leaving the folder duplicated for good. On a current build you should see
+one `[pull] move` line per rename and no downloads.
+
+If you are on an older build and have a doubled folder, delete the stale copy
+through the mount — it is the one whose files are no longer on the remote — then
+re-run with `-resync` and a `-max-deletes` above the number of files involved
+(or `0`), which is the same recipe as the refusal below.
+
 **`[sweep] REFUSING to delete: … over the -max-deletes limit`.** Drivel inferred more
 deletions than the cap allows and abandoned the entire pass rather than performing
 part of it. Check first that the mount is pointed where you think it is — a wrong
-`-drive-root`, or an empty `-data`, produces exactly this. If the deletions are
-genuine, re-run with **both** `-resync` and a higher `-max-deletes`; the cap alone
-changes nothing until the next scheduled sweep.
+`-drive-root`, or an empty `-data`, produces exactly this. A folder renamed by an
+older build is the other common cause, and the entry above has the recipe. If the
+deletions are genuine, re-run with **both** `-resync` and a higher
+`-max-deletes`; the cap alone changes nothing until the next scheduled sweep.
 
 **`[sync] push write … failed after 5 attempt(s)`.** Drivel tried, backed off
 between attempts, and gave up — a few seconds of retries in total. A

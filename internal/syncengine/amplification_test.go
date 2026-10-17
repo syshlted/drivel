@@ -8,6 +8,8 @@ package syncengine
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/syshlted/drivel/internal/fsevent"
@@ -45,6 +47,13 @@ const (
 	// doing the same and storing the tombstone in its place. Both are one commit
 	// by construction, which is what made the tombstone affordable.
 	commitsPerUnlink = 1
+	// Two per rename, whatever the size of the subtree being renamed: one
+	// RenameSubtree carrying every record under the old path to the new one, and
+	// one SetEcho recording the fresh baseline the Move returned. It is the same
+	// budget the drop-and-record it replaced had — the re-key subsumes the Forget
+	// rather than adding to it — which is what let a directory rename stop being
+	// a per-file cost without crossing this ratchet.
+	commitsPerRename = 2
 )
 
 func TestPushCommitsPerFile(t *testing.T) {
@@ -141,5 +150,39 @@ func TestRepushStillRecordsABaseline(t *testing.T) {
 	}
 	if !second.At.After(first.At) && !second.At.Equal(first.At) {
 		t.Errorf("baseline went backwards: %v then %v", first.At, second.At)
+	}
+}
+
+// A rename commits a constant number of times whatever it moves, and that is the
+// property that makes the MC-27 fix affordable. The alternative — one commit per
+// descendant — is ~36 KB each, so the 1100-file subtree that motivated it would
+// cost ~39 MB of disk writes to rename.
+func TestRenameCommitsAreIndependentOfSubtreeSize(t *testing.T) {
+	for _, files := range []int{1, 10, 100} {
+		t.Run(fmt.Sprintf("%d files", files), func(t *testing.T) {
+			dataDir := t.TempDir()
+			st := newState(t)
+			e := New(Config{Store: newFakeStore(), DataDir: dataDir, State: st})
+			ctx := context.Background()
+
+			e.handle(ctx, fsevent.Event{Op: fsevent.OpMkdir, Path: "d"})
+			for i := range files {
+				rel := fmt.Sprintf("d/f%d.txt", i)
+				writeFile(t, dataDir, rel, "x")
+				e.handle(ctx, fsevent.Event{Op: fsevent.OpCreate, Path: rel})
+			}
+			if err := os.Rename(filepath.Join(dataDir, "d"), filepath.Join(dataDir, "e")); err != nil {
+				t.Fatal(err)
+			}
+
+			base := st.Commits()
+			e.handle(ctx, fsevent.Event{Op: fsevent.OpRename, Path: "d", NewPath: "e"})
+
+			got := st.Commits() - base
+			if want := uint64(commitsPerRename); got != want {
+				t.Errorf("renaming a directory of %d file(s) committed %d times, want %d",
+					files, got, want)
+			}
+		})
 	}
 }

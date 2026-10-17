@@ -77,6 +77,42 @@ type RemoteChange struct {
 	Path    string      // root-relative slash path of the changed object
 	File    *RemoteFile // nil when Removed is true
 	Removed bool
+
+	// MovedFrom is the path the object at Path has just left, for a feed keyed by
+	// object identity rather than by path. It is OPTIONAL in both directions: a
+	// provider that cannot answer it leaves it empty, and a host that acts on it
+	// must behave correctly without it, because every host did before it existed.
+	//
+	// What it buys is the difference between a move and a delete-plus-create. A
+	// feed keyed by identity reports a rename as the object under its new name and
+	// says nothing at all about the name it left — so a path-addressed engine sees
+	// content appear somewhere new and has no reason to connect it to the content
+	// it already holds. For a *file* that costs a re-download per client; for a
+	// *directory* it costs the whole subtree, in both directions at once, because
+	// the children of a moved folder are not themselves reported (see MC-26b and
+	// MC-27 in docs/dev/multiclient-test-plan.md: at 1100 files the receiving
+	// client downloads the subtree a second time and then proposes 1101 deletions,
+	// which -max-deletes refuses, leaving it doubled permanently).
+	//
+	// Three requirements on a provider that sets it, and the first is the one that
+	// makes the other two safe:
+	//
+	//   - Set it only for a MOVE OF THE SAME OBJECT — the thing at Path is the
+	//     thing that was at MovedFrom, with its content unchanged. A host may
+	//     carry the §4 baseline across it, so "probably the same file" is not
+	//     enough. A provider whose move is a copy-and-delete (no server-side
+	//     rename) must leave it empty; identity is exactly what such a move does
+	//     not preserve.
+	//   - Derive it from something authoritative about THIS process's own view, not
+	//     from a persistent cache. A host acts on it by renaming local files, so a
+	//     stale answer moves the wrong tree. gdrive derives it from the in-memory
+	//     reverse map, which linkLocked maintains as an exact inverse, and
+	//     deliberately not from the M7 path index — see M7 invariant 1.
+	//   - It is advice, never an instruction. The host validates it, declines it
+	//     for any reason it likes, and falls back to treating the change as an
+	//     ordinary appearance at Path. Nothing about correctness may depend on the
+	//     host taking it.
+	MovedFrom string
 }
 
 // Store is the required cloud-backend surface: mutations plus reads, all

@@ -375,10 +375,25 @@ func (x *File) GetExportOnly() bool {
 
 // Change is provider.RemoteChange.
 type Change struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Path          string                 `protobuf:"bytes,1,opt,name=path,proto3" json:"path,omitempty"`
-	File          *File                  `protobuf:"bytes,2,opt,name=file,proto3" json:"file,omitempty"` // unset when removed is true
-	Removed       bool                   `protobuf:"varint,3,opt,name=removed,proto3" json:"removed,omitempty"`
+	state   protoimpl.MessageState `protogen:"open.v1"`
+	Path    string                 `protobuf:"bytes,1,opt,name=path,proto3" json:"path,omitempty"`
+	File    *File                  `protobuf:"bytes,2,opt,name=file,proto3" json:"file,omitempty"` // unset when removed is true
+	Removed bool                   `protobuf:"varint,3,opt,name=removed,proto3" json:"removed,omitempty"`
+	// moved_from is the path this object has just left, for a backend whose feed
+	// is keyed by object identity and can therefore say so.
+	//
+	// It is additive in the strict sense the two rules above require: it is only
+	// ever set where the change already describes the object at its *new* path,
+	// and a host that ignores the field is left doing exactly what every host did
+	// before it existed — place the object at the new path and leave the old one
+	// to the enumeration sweep. That is why a *file* move does not use it and
+	// still arrives as a removal followed by a creation: for a file both forms
+	// converge, and the pair is what an older host needs in order to converge at
+	// all. A directory has no such pair available — a removal above the seam is a
+	// recursive delete and this feed reports nothing for the children of a moved
+	// folder — so a directory move is the case where "say nothing" was the only
+	// other option.
+	MovedFrom     string `protobuf:"bytes,4,opt,name=moved_from,json=movedFrom,proto3" json:"moved_from,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -432,6 +447,13 @@ func (x *Change) GetRemoved() bool {
 		return x.Removed
 	}
 	return false
+}
+
+func (x *Change) GetMovedFrom() string {
+	if x != nil {
+		return x.MovedFrom
+	}
+	return ""
 }
 
 // Chunk is a run of bytes in a stream.
@@ -1635,11 +1657,13 @@ const file_drivel_plugin_v1_provider_proto_rawDesc = "" +
 	"\aversion\x18\x05 \x01(\tR\aversion\x126\n" +
 	"\bmodified\x18\x06 \x01(\v2\x1a.google.protobuf.TimestampR\bmodified\x12\x1f\n" +
 	"\vexport_only\x18\a \x01(\bR\n" +
-	"exportOnly\"b\n" +
+	"exportOnly\"\x81\x01\n" +
 	"\x06Change\x12\x12\n" +
 	"\x04path\x18\x01 \x01(\tR\x04path\x12*\n" +
 	"\x04file\x18\x02 \x01(\v2\x16.drivel.plugin.v1.FileR\x04file\x12\x18\n" +
-	"\aremoved\x18\x03 \x01(\bR\aremoved\"\x1b\n" +
+	"\aremoved\x18\x03 \x01(\bR\aremoved\x12\x1d\n" +
+	"\n" +
+	"moved_from\x18\x04 \x01(\tR\tmovedFrom\"\x1b\n" +
 	"\x05Chunk\x12\x12\n" +
 	"\x04data\x18\x01 \x01(\fR\x04data\"?\n" +
 	"\n" +

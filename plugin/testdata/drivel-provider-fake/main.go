@@ -279,6 +279,14 @@ func (f *fake) Changes(_ context.Context, cursor string) ([]provider.RemoteChang
 		out = append(out, provider.RemoteChange{Path: p, File: &rf})
 	}
 	out = append(out, provider.RemoteChange{Path: "gone.txt", Removed: true})
+	// A move, so MovedFrom is exercised over the wire and not only in the
+	// converter. The paths are ones this fake does not hold: what is under test is
+	// an optional field surviving a process boundary, not what a host does with it.
+	out = append(out, provider.RemoteChange{
+		Path:      "moved/new.txt",
+		File:      &provider.RemoteFile{Path: "moved/new.txt", Size: 3, Hash: "h", Version: "1"},
+		MovedFrom: "moved/old.txt",
+	})
 	return out, cursor + "+", nil
 }
 

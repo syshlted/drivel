@@ -293,6 +293,22 @@ func TestPluginServesOptionalCapabilities(t *testing.T) {
 	if !sawRemoval {
 		t.Error("no removal in the change feed")
 	}
+	// MovedFrom is optional in both directions, so the thing that can break it is
+	// silence: a field dropped by the converter looks exactly like a backend that
+	// does not report moves, and the receiving side then re-downloads a renamed
+	// subtree instead of renaming it (MC-27).
+	var moves int
+	for _, c := range changes {
+		if c.MovedFrom != "" {
+			moves++
+			if c.MovedFrom != "moved/old.txt" || c.Path != "moved/new.txt" {
+				t.Errorf("move arrived as %q -> %q", c.MovedFrom, c.Path)
+			}
+		}
+	}
+	if moves != 1 {
+		t.Errorf("%d change(s) carried MovedFrom across the seam, want 1", moves)
+	}
 
 	e, _ := provider.AsEnumerator(store)
 	files, next, err := e.Enumerate(ctx, "")

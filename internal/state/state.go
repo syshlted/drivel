@@ -18,10 +18,12 @@
 package state
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -803,4 +805,157 @@ func (s *Store) PruneTombstones(before time.Time) (int, error) {
 		return 0, err
 	}
 	return len(stale), nil
+}
+
+// --- subtree re-keying (a move, from either direction) ----------------------
+//
+// A move is the one mutation that changes an object's path without changing the
+// object, and every record in this store is keyed by path. Dropping the records
+// instead is what a rename did before this existed — for the renamed path itself,
+// and never for the descendants of a renamed directory — and a baseline is not a
+// cache that can be rebuilt for free. The same record is §4's loop breaker, M6's
+// unchanged-content gate, M7b's evidence that a deletion is real, and M27's test
+// for a push lost to a crash.
+//
+// Losing one for a directory of N files costs N re-downloads on the receiving
+// side and N delete candidates on the sending side — which is -max-deletes'
+// refusal threshold at anything over 100, so past that size the sweep that was
+// supposed to repair the move refuses its whole pass and the subtree stays
+// doubled. That is MC-27, and it is why this is a re-key rather than a drop.
+
+// RenameSubtree re-keys every record at oldPath and beneath it to newPath, in
+// one transaction, and reports how many records moved.
+//
+// Three buckets move and three deliberately do not.
+//
+//   - echo, hydration and repair all answer "what do we know about the object at
+//     this path", so they follow the object. hydration is M5's present-ranges
+//     cache, and re-keying it is the coherent half of a rename rather than a
+//     nicety: the authoritative placeholder marker is an xattr on the file and
+//     therefore moves with the file whatever this store does. repair is M27's
+//     "this path is owed a push", and the content that is owed is at the new
+//     path now; a dropped debt would be repaired only by the divergence row,
+//     which is a weaker test on a slower schedule.
+//   - tombstone does NOT move. It records the deletion of the object that *used*
+//     to be at a path, and the object arriving there is a different one — so
+//     carrying it across would arm a five-minute suppression against content
+//     nobody deleted. Left where it is, it expires on the next sweep.
+//   - seen does NOT move. Its marks are per sweep generation, a generation's
+//     listing is a snapshot taken before the pass that reads it, and the change
+//     feed is not applied while a sweep runs (M7b rule 1, snapshot-then-tail),
+//     so no live generation can be describing the tree this call is changing.
+//   - cursor and sweep are not path-keyed at all.
+//
+// It is ONE commit however large the subtree, which is what makes it affordable
+// at the scale that motivates it: 1101 paths cost the same ~36 KB as one
+// (DESIGN.md §12). A subtree with no records costs no commit at all — the scan
+// that finds that out is a read transaction, which is free.
+//
+// Callers get (0, nil) for a request this store will not perform: an empty path
+// on either side (the mount root does not move, and an empty prefix would scan
+// every key in the bucket), the same path twice, or either path inside the
+// other. The last is not merely unrepresentable on a filesystem — os.Rename
+// refuses it with EINVAL — it is the one shape where the source and destination
+// key ranges nest, so refusing it here keeps the overlap reasoning below to the
+// case that actually arises.
+func (s *Store) RenameSubtree(oldPath, newPath string) (int, error) {
+	if oldPath == "" || newPath == "" || oldPath == newPath {
+		return 0, nil
+	}
+	if within(newPath, oldPath) || within(oldPath, newPath) {
+		return 0, nil
+	}
+	buckets := [][]byte{bucketEcho, bucketHydration, bucketRepair}
+
+	// Ask before writing, in a read transaction: bbolt advances the meta page on
+	// every commit whether or not a data page changed, so an Update that moves
+	// nothing still costs the full ~36 KB (DESIGN.md §12, rule 3). A peer that
+	// never held the source subtree is the common case on the inbound side.
+	n := 0
+	if err := s.db.View(func(tx *bolt.Tx) error {
+		for _, name := range buckets {
+			n += len(collectSubtree(tx.Bucket(name), oldPath))
+		}
+		return nil
+	}); err != nil {
+		return 0, err
+	}
+	if n == 0 {
+		return 0, nil
+	}
+
+	moved := 0
+	if err := s.update(func(tx *bolt.Tx) error {
+		moved = 0
+		for _, name := range buckets {
+			b := tx.Bucket(name)
+			// Collect, then delete, then write. Collecting first is required:
+			// bbolt does not promise a cursor survives a mutation of the bucket it
+			// is walking.
+			//
+			// Deleting every old key before writing any new one is the SECOND
+			// defence against one hazard, and it is worth knowing which. The old
+			// keys are oldPath and the keys beneath it; the new keys are the same
+			// relative paths under newPath. For a new key to land on an old one,
+			// newPath has to sit inside oldPath — and the guard above refuses
+			// exactly that, so with it in place the two ranges cannot collide and
+			// this ordering is doing nothing. A deliberate nothing: it is the half
+			// that still holds if someone relaxes the guard, which deleting
+			// afterwards would not, and it is the ordering pathindex.Rename uses
+			// for the same reason. A sibling rename (a -> ab) is NOT this case —
+			// "ab" is not inside "a" — and what it needs is the scan below keying
+			// on "a/" rather than on "a", which TestRenameSubtreeMovesTheWholeSubtree
+			// is the test for. TestRenameSubtreeRefusesWhatItCannotDo holds the
+			// guard.
+			rows := collectSubtree(b, oldPath)
+			for _, r := range rows {
+				if err := b.Delete(r.key); err != nil {
+					return err
+				}
+			}
+			for _, r := range rows {
+				rel := strings.TrimPrefix(string(r.key), oldPath)
+				if err := b.Put([]byte(newPath+rel), r.val); err != nil {
+					return err
+				}
+				moved++
+			}
+		}
+		return nil
+	}); err != nil {
+		return 0, err
+	}
+	return moved, nil
+}
+
+// row is one key/value pair copied out of a bucket, so the walk is finished
+// before the mutation starts.
+type row struct{ key, val []byte }
+
+// collectSubtree returns the record at path plus every record beneath it.
+//
+// Keys here are plain paths, so a directory's descendants are the keys with the
+// "path/" prefix — a contiguous run, because '/' (0x2f) sorts below every byte a
+// path component can begin with. The scan is a seek plus a walk rather than a
+// pass over the whole bucket, which is what keeps a rename inside a large tree
+// proportional to the subtree rather than to the state DB.
+func collectSubtree(b *bolt.Bucket, path string) []row {
+	var out []row
+	if v := b.Get([]byte(path)); v != nil {
+		out = append(out, row{key: []byte(path), val: append([]byte(nil), v...)})
+	}
+	prefix := []byte(path + "/")
+	c := b.Cursor()
+	for k, v := c.Seek(prefix); k != nil && bytes.HasPrefix(k, prefix); k, v = c.Next() {
+		out = append(out, row{
+			key: append([]byte(nil), k...),
+			val: append([]byte(nil), v...),
+		})
+	}
+	return out
+}
+
+// within reports whether p is q itself or a path beneath it.
+func within(p, q string) bool {
+	return p == q || strings.HasPrefix(p, q+"/")
 }

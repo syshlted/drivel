@@ -174,15 +174,17 @@ func TestChangesReportsNoRemovalForAnUnknownFile(t *testing.T) {
 	}
 }
 
-// A folder move must NOT report the old path as removed, even though the same
-// reasoning would seem to apply.
+// A folder move is reported AS a move, and still never as a removal.
 //
-// A removal above the seam is a recursive local delete, and Drive reports no
-// changes for the children of a moved folder — their own metadata did not change,
-// so nothing brings them back. Emitting it would turn "the subtree is duplicated
-// until the next sweep" into "the subtree is gone until the next sweep", which is
-// the strictly worse of the two. Directory moves are reconciled by the sweep.
-func TestChangesLeavesAMovedFolderToTheSweep(t *testing.T) {
+// Both halves are load-bearing and they are two different facts. The removal is
+// wrong for the reason it always was: above the seam it is a recursive local
+// delete, and Drive reports no changes for the children of a moved folder, so
+// nothing would bring them back. Saying nothing about the old path was the only
+// other option until the seam could carry a move, and MC-27 measured what it
+// cost at 1100 files — the receiving client downloads the subtree a second time
+// and then cannot delete the first copy, because the deletions exceed
+// -max-deletes and the pass refuses itself.
+func TestChangesReportsAFolderMoveAsAMove(t *testing.T) {
 	d, fake := newFakeDrive(t,
 		folder("dir-a", "a", fakeRootID),
 		file("f1", "doc.txt", "dir-a"),
@@ -206,5 +208,84 @@ func TestChangesLeavesAMovedFolderToTheSweep(t *testing.T) {
 	if contains(removed, "a") {
 		t.Error("a folder move reported its old path as removed; applying that deletes the whole local subtree, " +
 			"and Drive reports no changes for the children that would restore it")
+	}
+	moved := ""
+	for _, ch := range chs {
+		if ch.Path == "renamed" {
+			moved = ch.MovedFrom
+		}
+	}
+	if moved != "a" {
+		t.Errorf("the change at renamed carries MovedFrom %q, want %q — without it the host has nothing "+
+			"connecting the new name to the subtree it already holds", moved, "a")
+	}
+}
+
+// A file move keeps the pair it has always had, and must not ALSO claim to be a
+// move. Both forms converge for a file, the pair is the one an older host
+// understands, and a host that acted on both would be told to rename a path it
+// had just been told to delete.
+func TestChangesReportsAFileMoveAsAPairAndNotAsAMove(t *testing.T) {
+	d, fake := newFakeDrive(t,
+		folder("dir-a", "a", fakeRootID),
+		folder("dir-b", "b", fakeRootID),
+		file("f1", "doc.txt", "dir-a"),
+	)
+	if _, ok, err := d.Stat(ctx, "a/doc.txt"); err != nil || !ok {
+		t.Fatalf("Stat(a/doc.txt) = ok %v, err %v", ok, err)
+	}
+	cursor, err := d.StartCursor(ctx)
+	if err != nil {
+		t.Fatalf("StartCursor: %v", err)
+	}
+	fake.rename("f1", "doc.txt", "dir-b")
+
+	chs, _, err := d.Changes(ctx, cursor)
+	if err != nil {
+		t.Fatalf("Changes: %v", err)
+	}
+	_, removed := changed(t, chs)
+	if !contains(removed, "a/doc.txt") {
+		t.Errorf("the pair is gone: removed %v, want a/doc.txt", removed)
+	}
+	for _, ch := range chs {
+		if ch.MovedFrom != "" {
+			t.Errorf("the change at %s carries MovedFrom %q; a file move is the pair, not a move",
+				ch.Path, ch.MovedFrom)
+		}
+	}
+}
+
+// The index follows the subtree, not just the folder. Drive reports nothing for
+// the children of a moved folder, so a descendant left keyed under the path it
+// has left resolves to a live ID whose parent no longer matches — which
+// verifyLocked correctly rejects, at the cost of a name query per file.
+func TestAFolderMoveReindexesTheSubtree(t *testing.T) {
+	d, fake := newFakeDrive(t,
+		folder("dir-a", "a", fakeRootID),
+		file("f1", "doc.txt", "dir-a"),
+	)
+	if _, ok, err := d.Stat(ctx, "a/doc.txt"); err != nil || !ok {
+		t.Fatalf("Stat(a/doc.txt) = ok %v, err %v", ok, err)
+	}
+	cursor, err := d.StartCursor(ctx)
+	if err != nil {
+		t.Fatalf("StartCursor: %v", err)
+	}
+	fake.rename("dir-a", "renamed", "")
+	if _, _, err := d.Changes(ctx, cursor); err != nil {
+		t.Fatalf("Changes: %v", err)
+	}
+
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if got := d.idByPath["renamed/doc.txt"]; got != "f1" {
+		t.Errorf("renamed/doc.txt resolves to %q, want f1", got)
+	}
+	if got, ok := d.idByPath["a/doc.txt"]; ok {
+		t.Errorf("a/doc.txt still resolves to %q after the folder moved", got)
+	}
+	if got := d.pathByID["f1"]; got != "renamed/doc.txt" {
+		t.Errorf("f1 reverse-maps to %q, want renamed/doc.txt", got)
 	}
 }

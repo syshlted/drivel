@@ -131,6 +131,21 @@ message Change {
   string path = 1;
   File file = 2; // unset when removed is true
   bool removed = 3;
+  // moved_from is the path this object has just left, for a backend whose feed
+  // is keyed by object identity and can therefore say so.
+  //
+  // It is additive in the strict sense the two rules above require: it is only
+  // ever set where the change already describes the object at its *new* path,
+  // and a host that ignores the field is left doing exactly what every host did
+  // before it existed — place the object at the new path and leave the old one
+  // to the enumeration sweep. That is why a *file* move does not use it and
+  // still arrives as a removal followed by a creation: for a file both forms
+  // converge, and the pair is what an older host needs in order to converge at
+  // all. A directory has no such pair available — a removal above the seam is a
+  // recursive delete and this feed reports nothing for the children of a moved
+  // folder — so a directory move is the case where "say nothing" was the only
+  // other option.
+  string moved_from = 4;
 }
 
 // Chunk is a run of bytes in a stream.

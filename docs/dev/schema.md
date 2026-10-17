@@ -149,6 +149,27 @@ back. The sweep prunes expired records, which is the only thing that bounds the
 bucket; a mount that never completes a sweep keeps one record per deleted path,
 of a size with the baseline that path already had.
 
+**A move re-keys three of these buckets and deliberately not the other two.**
+`state.RenameSubtree` carries `echo`, `hydration` and `repair` from the old path
+and everything beneath it to the new one, in a single transaction whatever the
+subtree's size — they all answer "what do we know about the object at this path",
+so they follow the object. `tombstone` stays where it is: it records the deletion
+of whatever *used* to be at a path, and the object arriving there is a different
+one, so carrying it across would arm a five-minute suppression against content
+nobody deleted. `seen` stays too — its marks are per sweep generation, and the
+feed is not applied while a sweep is running (snapshot-then-tail), so no live
+generation can be describing the tree a move is changing.
+
+Both directions call it, and the reason is the same on each: nothing else tells
+that side where the subtree went. Inbound it is a provider reporting
+`RemoteChange.MovedFrom`; outbound it is the engine's own `Move`. Dropping the
+records instead — which is what a rename did before, for the renamed path only
+and never for its descendants — makes every descendant's baseline name a path
+that no longer exists, which is indistinguishable from a remote that has lost
+them: MC-27 measured it as 1100 re-downloads and 1101 proposed deletions, over a
+`-max-deletes` of 100, so the pass that was meant to repair the rename refuses
+itself and the subtree stays doubled.
+
 The `echo` bucket is the one that grows: a baseline is dropped when the path is
 gone on **both** sides, and only a sweep can establish that. Deletes seen while
 running are pruned on the path that caused them — through the mount by

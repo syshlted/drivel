@@ -60,7 +60,7 @@ func fileFromPB(f *pb.File) provider.RemoteFile {
 
 // changeToPB renders one entry of a change feed.
 func changeToPB(c provider.RemoteChange) *pb.Change {
-	out := &pb.Change{Path: c.Path, Removed: c.Removed}
+	out := &pb.Change{Path: c.Path, Removed: c.Removed, MovedFrom: c.MovedFrom}
 	if c.File != nil {
 		out.File = fileToPB(*c.File)
 	}
@@ -71,7 +71,7 @@ func changeToPB(c provider.RemoteChange) *pb.Change {
 // message carries none, because the engine reads nil-ness as "removed" in more
 // places than it reads the Removed flag.
 func changeFromPB(c *pb.Change) provider.RemoteChange {
-	out := provider.RemoteChange{Path: c.GetPath(), Removed: c.GetRemoved()}
+	out := provider.RemoteChange{Path: c.GetPath(), Removed: c.GetRemoved(), MovedFrom: c.GetMovedFrom()}
 	if f := c.GetFile(); f != nil {
 		rf := fileFromPB(f)
 		out.File = &rf

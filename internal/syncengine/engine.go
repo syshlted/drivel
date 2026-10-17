@@ -753,7 +753,15 @@ func (e *Engine) push(ctx context.Context, ev fsevent.Event) error {
 		if err != nil {
 			return err
 		}
-		e.forgetPath(ev.Path)
+		// The records follow the object rather than being dropped with its old
+		// name, and for a directory that is the whole correctness of a rename on
+		// this side: forgetting only ev.Path left every descendant's baseline keyed
+		// under a path that no longer exists, so the next sweep found them all
+		// unseen and proposed one deletion per file — 1101 of them for MC-27's
+		// 1100-file subtree, which -max-deletes refuses, abandoning the whole pass
+		// including the deletions that were real. It costs no more commits than the
+		// drop it replaces.
+		e.renameRecords(ev.Path, ev.NewPath)
 		// The bytes did not move; the name did. Fingerprint the file at its new
 		// local path so the baseline still describes something that exists.
 		fi, _ := os.Stat(filepath.Join(e.dataDir, filepath.FromSlash(ev.NewPath)))
@@ -1051,6 +1059,27 @@ func (e *Engine) forgetPath(p string) {
 	}
 	if err := e.state.Forget(p); err != nil {
 		e.logf("[sync] forget state %s: %v", p, err)
+	}
+}
+
+// renameRecords re-keys every state record under oldPath to newPath.
+//
+// It is the write half of what makes a rename cheap in both directions, and the
+// one this side needs is the *sending* client's own view: nothing above this call
+// re-states where the subtree went, so a baseline left under the old name is
+// indistinguishable from a file the remote has lost. See state.RenameSubtree for
+// which records travel and which deliberately do not.
+//
+// A failure is logged and swallowed for the same reason forgetPath's is: the
+// remote move has already happened, the local records are stale either way, and
+// the sweep is what repairs a stale record. Failing the push here would re-drive
+// a Move whose source no longer exists.
+func (e *Engine) renameRecords(oldPath, newPath string) {
+	if e.state == nil {
+		return
+	}
+	if _, err := e.state.RenameSubtree(oldPath, newPath); err != nil {
+		e.logf("[sync] re-keying records %s -> %s: %v", oldPath, newPath, err)
 	}
 }
 

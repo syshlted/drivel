@@ -37,6 +37,11 @@ for log in "$@"; do
   # the negative one is a "[pull] download" of a path whose "[sync] delete" is
   # a few seconds above it, which no counter can see.
   printf '  %-34s %s\n' "own-delete reports ignored" "$(count '[pull] ignore')"
+  # Not a volume row either: a non-zero count is a directory rename arriving as a
+  # rename instead of as a doubled subtree (MC-27). The negative signal is its
+  # ABSENCE beside a "[pull] mkdir" whose old path is still on disk, which no
+  # counter can see — compare the two directories' file counts for that.
+  printf '  %-34s %s\n' "directory moves applied"     "$(count '[pull] move')"
   printf '  %-34s %s\n' "M6 unchanged-content skips" "$(count 'remote already holds')"
   printf '  %-34s %s\n' "M5 placeholder skips"     "$(count 'unhydrated placeholder')"
   printf '  %-34s %s\n' "conflict resolutions"     "$(count '[pull] conflict')"

@@ -13,6 +13,30 @@ from source with `make build`.
 
 ## Unreleased
 
+### Renaming a folder no longer duplicates it on your other computers — 2026-10-16
+
+Rename a folder on one machine and, on every other machine syncing the same
+account, you got the new folder *empty* beside the old one still full. That much
+was cosmetic and a sweep tidied it up — but only up to about a hundred files.
+Above that, the tidy-up proposed more deletions than `-max-deletes` allows, so it
+refused the whole thing, logged that it had finished, and never tried again. A
+folder of 1000 files ended up on your other machines as 2000 files, permanently,
+and every one of them had been downloaded a second time to get there.
+
+Drivel now recognises a renamed folder as a rename. Your other machines rename
+their own copy — no downloads, nothing deleted, nothing to tidy up afterwards —
+and the record of what has already been synced moves with it, which is what
+stopped the deletions being proposed in the first place. The machine that *did*
+the rename had a matching problem with its own records and no longer has it
+either.
+
+Three things worth knowing. Renaming a **file** was already handled and is
+unchanged. If your other machine already has something at the new name, Drivel
+leaves both alone rather than overwriting it — that is a conflict and is treated
+as one. And this needed a change to how backends talk to Drivel: a backend that
+does not report folder renames (SFTP has no way to know about them) behaves
+exactly as before, so nothing here changes for SFTP mounts.
+
 ### Downloads no longer wait for uploads — 2026-10-16
 
 While a mount was uploading, it did almost nothing else. In testing, a client

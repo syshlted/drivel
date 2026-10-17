@@ -631,16 +631,35 @@ func (d *Drive) toRemoteChanges(ctx context.Context, ch *drive.Change) []provide
 
 	// Ask before remembering: rememberLocked is what evicts the old mapping.
 	vacated, moved := d.vacatedPathLocked(ch.File, p)
+	isDir := ch.File.MimeType == folderMIME
+
+	if moved && isDir {
+		// Re-key our own index for the subtree before recording the folder itself.
+		// Drive reports nothing for the children of a moved folder, so without this
+		// every descendant keeps a mapping under a path it has left — each one then
+		// resolving to a live ID whose parent no longer matches, which verifyLocked
+		// correctly rejects at the cost of a name query per file. rememberLocked
+		// below only evicts the folder's own entry; this is the subtree.
+		d.reindexLocked(ctx, vacated, p)
+	}
 
 	rf := d.rememberLocked(ctx, p, ch.File)
-	if !moved {
+	switch {
+	case !moved:
 		return []provider.RemoteChange{{Path: p, File: &rf}}
-	}
-	// Removal first: the object has left that path, and the caller applies a page
-	// in order.
-	return []provider.RemoteChange{
-		{Path: vacated, Removed: true},
-		{Path: p, File: &rf},
+	case isDir:
+		// Reported AS a move, because the alternative pair cannot be built for a
+		// directory: a removal above the seam is a recursive local delete and the
+		// children that would come back are not in this feed. A host that ignores
+		// MovedFrom is left with the one change it would have received anyway.
+		return []provider.RemoteChange{{Path: p, File: &rf, MovedFrom: vacated}}
+	default:
+		// Removal first: the object has left that path, and the caller applies a
+		// page in order.
+		return []provider.RemoteChange{
+			{Path: vacated, Removed: true},
+			{Path: p, File: &rf},
+		}
 	}
 }
 
@@ -654,25 +673,31 @@ func (d *Drive) toRemoteChanges(ctx context.Context, ch *drive.Change) []provide
 // on one client duplicates the file on every other until an enumeration sweep
 // infers the delete, up to -sweep-interval later (24h by default).
 //
-// This is where the fact is known, so this is where it is said. Two limits, both
-// of which cost a sweep rather than risking data:
+// This is where the fact is known, so this is where it is said. What the caller
+// does with it depends on what moved, and the asymmetry is the protocol's rather
+// than this function's:
 //
-//   - Directories are excluded. A removal above the seam is a recursive local
-//     delete, and Drive reports no changes for the children of a moved folder —
-//     their own metadata did not change — so the subtree would be deleted locally
-//     and not come back until a sweep. Leaving the stale copy is the lesser
-//     failure. A folder move is still reconciled, just not by the feed.
-//   - Only the in-memory mapping is consulted, never the persistent index. Acting
-//     on it here means deleting a local file, and M7's first rule is that a
-//     persisted entry is a hint to be verified before it is believed. The
-//     in-memory pair is maintained by linkLocked as an exact inverse, so a path it
-//     reports for an ID is one this process itself recorded. A rename whose old
-//     path was only ever known to an earlier process therefore falls back to the
-//     sweep, as it did before.
+//   - A FILE is reported as a removal of the old path followed by a creation of
+//     the new one. Both forms converge for a file, and the pair is the one an
+//     older host understands, so it stays.
+//   - A DIRECTORY is reported as a move (provider.RemoteChange.MovedFrom),
+//     because the pair is not available to it: a removal above the seam is a
+//     recursive local delete, and Drive reports no changes for the children of a
+//     moved folder — their own metadata did not change — so the subtree would be
+//     deleted locally with nothing in the feed to bring it back. Until MovedFrom
+//     existed this function simply declined to answer for a folder, which left
+//     the old subtree standing and the move to the next enumeration sweep; that
+//     is still what a host ignoring the field gets, and it is what MC-27 measured
+//     as unrepairable past -max-deletes.
+//
+// One limit applies to both, and it costs a sweep rather than risking data:
+// only the in-memory mapping is consulted, never the persistent index. Acting on
+// it here means moving or deleting local files, and M7's first rule is that a
+// persisted entry is a hint to be verified before it is believed. The in-memory
+// pair is maintained by linkLocked as an exact inverse, so a path it reports for
+// an ID is one this process itself recorded. A rename whose old path was only
+// ever known to an earlier process therefore falls back to the sweep, as before.
 func (d *Drive) vacatedPathLocked(f *drive.File, newPath string) (string, bool) {
-	if f.MimeType == folderMIME {
-		return "", false
-	}
 	id := f.Id
 	if id == "" {
 		return "", false
