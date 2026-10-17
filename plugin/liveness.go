@@ -8,7 +8,9 @@ package plugin
 import (
 	"io"
 	"os"
+	"os/signal"
 	"strconv"
+	"syscall"
 )
 
 // A backend process must not outlive the host that launched it.
@@ -88,6 +90,7 @@ func watchHost() {
 	if f == nil {
 		return
 	}
+	ignoreTermination()
 	go func() {
 		// Only a clean end counts. io.Copy returns a nil error at EOF, which
 		// happens when every writer has closed; any other error means the
@@ -101,5 +104,35 @@ func watchHost() {
 		// close to perform against a caller that is gone. What is lost by not
 		// unwinding is a provider connection the remote end will reap anyway.
 		os.Exit(hostGoneExit)
+	}()
+}
+
+// ignoreTermination stops SIGTERM from ending a backend whose host is watched.
+//
+// `systemctl stop` on an fstab mount (M16) unmounts and then signals every
+// process in the unit's cgroup at once — and the backend is in that cgroup,
+// because it is the daemon's child. go-plugin traps SIGINT and nothing else, so
+// the backend died on the same signal the host was draining through: every push
+// the drain still had to send went to a dead process, waited out a relaunch
+// backoff, and was abandoned or cut off by the drain deadline. The host shrugs
+// SIGTERM off by design (it only cancels the context the unmount already ended),
+// so the backend was the one process in the unit that a stop could take down
+// before its work was done.
+//
+// Ignoring it is safe only because of the pipe: a watched backend is ended by the
+// host's Kill, or by EOF here when the host is gone however it died, and a stop
+// that never finishes is still ended by systemd's SIGKILL at TimeoutStopSec. That
+// is why this runs only once the pipe is confirmed — a plugin run by hand, or by
+// an older host, keeps the default and stops on SIGTERM as anything else does.
+//
+// signal.Notify with a drained channel rather than signal.Ignore, because an
+// ignored disposition is inherited across exec by anything the backend starts,
+// and a handler is not.
+func ignoreTermination() {
+	ch := make(chan os.Signal, 1)
+	signal.Notify(ch, syscall.SIGTERM)
+	go func() {
+		for range ch {
+		}
 	}()
 }

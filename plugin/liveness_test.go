@@ -128,3 +128,51 @@ func running(pid int) bool {
 	}
 	return p.Signal(syscall.Signal(0)) == nil
 }
+
+// systemd stops an fstab mount by signalling its whole cgroup, the backend
+// included, while the host is still draining through it. A watched backend must
+// shrug SIGTERM off and go on serving: its lifetime is the host's to end, by Kill
+// or by the pipe. Remove ignoreTermination and the backend dies here.
+func TestAWatchedBackendSurvivesSIGTERM(t *testing.T) {
+	dir := pluginDir(t)
+	lg := log.New(&logBuf{}, "", 0)
+
+	f, err := NewLoader([]string{dir}, lg).Factory("fake")
+	if err != nil {
+		t.Fatalf("Factory: %v", err)
+	}
+	store, err := f(context.Background(), provider.Params{
+		Config: provider.MustEncodeConfig(map[string]any{}),
+		Log:    lg,
+	})
+	if err != nil {
+		t.Fatalf("opening the fake plugin: %v", err)
+	}
+	defer store.(*pluginStore).Close() //nolint:errcheck // the assertions are what this test is for
+	ps := store.(*pluginStore)
+
+	ps.proc.mu.Lock()
+	pid := ps.proc.client.ReattachConfig().Pid
+	ps.proc.mu.Unlock()
+	backend, err := os.FindProcess(pid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := backend.Signal(syscall.SIGTERM); err != nil {
+		t.Fatalf("signalling the backend: %v", err)
+	}
+	time.Sleep(300 * time.Millisecond)
+	if !running(pid) {
+		t.Fatalf("the backend (pid %d) died of SIGTERM while its host still held the pipe", pid)
+	}
+	// Still serving, through the same process: not merely alive, and not a relaunch.
+	if _, _, err := store.Stat(context.Background(), "nothing-here"); err != nil {
+		t.Errorf("Stat after SIGTERM: %v", err)
+	}
+	ps.proc.mu.Lock()
+	after := ps.proc.client.ReattachConfig().Pid
+	ps.proc.mu.Unlock()
+	if after != pid {
+		t.Errorf("backend pid %d -> %d: the call went to a relaunched process", pid, after)
+	}
+}

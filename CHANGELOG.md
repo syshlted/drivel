@@ -13,6 +13,14 @@ from source with `make build`.
 
 ## Unreleased
 
+### Stopping an fstab mount no longer cuts its uploads short — 2026-10-17
+
+When systemd stops a mount it signals every process belonging to it. Drivel's
+backend process took that signal as an order to exit, even though the main
+process was still sending the last of your changes through it, so those uploads
+failed and waited for a later repair. The backend now ignores that signal and
+stops when Drivel itself is finished with it.
+
 ### A crash is followed by a sweep — 2026-10-17
 
 Drivel can find an upload that a crash, a `kill -9` or a timed-out shutdown cut

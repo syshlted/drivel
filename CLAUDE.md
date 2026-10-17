@@ -2202,6 +2202,17 @@ Ten things carry the correctness.
     line is `/proc/self/exe plugin-serve <kind>` and its `comm` is `exe`**, so
     `pgrep -af plugin-serve` finds it and `pkill -x drivel` does not.
 
+    **The mirror image is a backend that dies *before* its host, and SIGTERM did
+    exactly that** (found reading the M16 stop path, 2026-10-17). `systemctl stop`
+    signals the unit's whole cgroup, the backend included; the host shrugs SIGTERM
+    off (it only cancels the context the unmount already ended), but go-plugin
+    traps SIGINT and nothing else, so the backend died while the host was still
+    draining through it. `watchHost` therefore also ignores SIGTERM — **only once
+    the pipe is confirmed**, because the pipe is what still ends it; a plugin run
+    by hand keeps the default. A drained `signal.Notify` rather than
+    `signal.Ignore`, since `SIG_IGN` is inherited across exec.
+    `TestAWatchedBackendSurvivesSIGTERM` fails with it removed.
+
 **Versioning is one number.** `plugin.ProtocolVersion` is in the handshake and a
 mismatch refuses the launch naming both. Adding a protobuf field does **not** bump
 it — protobuf is already compatible both ways and that is the mechanism for anything
