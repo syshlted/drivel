@@ -45,7 +45,10 @@ func TestInsecureIgnoreHostKeyIsAbsentFromTheTree(t *testing.T) {
 			return err
 		}
 		if d.IsDir() {
-			if d.Name() == ".git" || d.Name() == "bin" {
+			// vendor/ is other people's code — x/crypto/ssh defines the function —
+			// and exists only in a tree someone ran `go mod vendor` in, which is
+			// how distribution packages build.
+			if d.Name() == ".git" || d.Name() == "bin" || d.Name() == "vendor" {
 				return filepath.SkipDir
 			}
 			return nil

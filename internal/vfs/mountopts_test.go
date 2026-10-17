@@ -99,9 +99,21 @@ func TestCallerOptionsCannotClearTheCompulsoryOnes(t *testing.T) {
 // go-fuse's direct-mount path there is no fusermount in the story at all. The
 // slice test is what actually pins the guarantee; this one pins the outcome a
 // user gets, and the two failing separately is the point.
+//
+// The caller asks for the negation of each compulsory option on THIS platform,
+// not for a fixed "dev, suid": FreeBSD has no nodev (compulsoryOptions says why)
+// and its mount_fusefs refuses "dev" outright, so a fixed list failed the mount
+// there before testing anything — unnoticed, because this test was written two
+// days after the suite last ran on FreeBSD.
 func TestCallerOptionsCannotClearThemThroughARealMount(t *testing.T) {
+	var opposite []string
+	for _, opt := range compulsoryOptions() {
+		if neg := strings.TrimPrefix(opt, "no"); neg != opt {
+			opposite = append(opposite, neg)
+		}
+	}
 	mnt, _ := mountTest(t, t.TempDir(), nil, func(o *mount.Options) {
-		o.BackendOptions = []string{"dev", "suid"}
+		o.BackendOptions = opposite
 	})
 
 	nosuid, nodev, nodevKnown := mountFlags(t, mnt)
