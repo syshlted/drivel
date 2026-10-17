@@ -13,6 +13,30 @@ from source with `make build`.
 
 ## Unreleased
 
+### Ask a running mount what it is doing — 2026-10-17
+
+`drivel mount -control` opens a control socket, and four new commands use it:
+
+- `drivel status` shows each mount's state and whether its backend is reachable;
+  `drivel status FILE` says whether a file is synced, waiting, uploading,
+  retrying, or given up on; `drivel status FOLDER` lists a folder that way.
+- `drivel pause -for 2h` holds all syncing — uploads, checking for remote
+  changes, the periodic sweep — while you keep working in the mount. Nothing you
+  write is lost or blocked; it goes out when the pause ends. A pause always ends
+  on its own and is never remembered across a restart.
+- `drivel resume` ends it early.
+- `drivel stop` unmounts and finishes queued uploads, exactly as Ctrl-C does, and
+  the log records that the stop came from the socket.
+
+Status never asks your backend anything, so it costs no quota and answers even
+while uploads are backed up. When Drivel has no record that would let it vouch
+for a file, it says **`unknown`** — not "synced" — and says why.
+
+The socket is off by default (it can list every file you sync and stop the
+process), reachable only by you, and speaks plain HTTP and JSON, so other tools —
+a file-manager extension, a status-bar widget, a Prometheus scraper — can use it
+too. See [Status, pause and stop](docs/user/control.md).
+
 ### Renaming a folder no longer duplicates it on your other computers — 2026-10-16
 
 Rename a folder on one machine and, on every other machine syncing the same

@@ -4,7 +4,8 @@ Drivel is configured two ways, and they do not mix. **Flags** describe one mount
 and need no file. **A config file** describes any number of mounts, which one
 `drivel` process serves together. `-config` cannot be combined with any flag that
 says *what* to mount — there would have to be a precedence rule, and nobody would
-remember it. `-debug` and `-pprof` are process-wide and compose with either.
+remember it. `-debug`, `-pprof` and `-control` are process-wide and compose with
+either.
 
 With no flags at all, `drivel mount` reads
 `$XDG_CONFIG_HOME/drivel/config.toml` (`~/.config/drivel/config.toml`).
@@ -111,6 +112,8 @@ Every key mirrors a flag. Both are listed together below; `drivel mount -h` and
 | `-debug` | `debug` | off | FUSE-level tracing. Very verbose. |
 | `-pprof ADDR` | — | off | Serve Go profiling endpoints on a loopback address. A bare port means `127.0.0.1`. Process-wide. See [Profiling](#profiling). |
 | `-pprof-allow-remote` | — | off | Let `-pprof` bind something other than loopback. See [Profiling](#profiling). |
+| `-control` | — | off | Serve the control socket, so `drivel status`, `pause`, `resume` and `stop` can reach this process. Process-wide. See [Status, pause and stop](control.md). |
+| `-control-socket PATH` | — | `$XDG_RUNTIME_DIR/drivel/control.sock` | Where `-control` puts the socket. Its directory must be yours and mode `0700`. Refused without `-control`. |
 | `-config FILE` | — | — | The config file to read. |
 
 `max-deletes` and `sweep-interval` are stored as optional values so that writing
@@ -474,8 +477,8 @@ would be no use at the moment you want it.
 `-list` composes with the selectors, so `drivel mount -list -account nas` shows
 exactly what `drivel mount -account nas` would serve. It needs a config file for
 the same reason they do, and it refuses the flags that describe a mount — along
-with `-debug` and `-pprof`, which have nothing to act on in a command that exits
-without mounting anything.
+with `-debug`, `-pprof` and `-control`, which have nothing to act on in a command
+that exits without mounting anything.
 
 ## Profiling
 

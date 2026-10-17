@@ -283,6 +283,44 @@ func (s *Store) GetEcho(path string) (e Echo, ok bool, err error) {
 	return e, ok, err
 }
 
+// Record is what this store knows about one path, for a reader that is asking
+// rather than deciding: the M14 status API.
+type Record struct {
+	Echo     Echo
+	HasEcho  bool
+	OwesPush bool      // an abandoned push is recorded for repair
+	OwedAt   time.Time // when it was first abandoned
+}
+
+// Lookup reads the records for every path in one read transaction. It never
+// commits — a status query that cost ~20 KB of disk writes per call would turn a
+// file manager repainting a folder into a disk-wear workload (DESIGN.md §12) —
+// and a path with nothing recorded is simply absent from the result.
+func (s *Store) Lookup(paths []string) (map[string]Record, error) {
+	out := make(map[string]Record, len(paths))
+	err := s.db.View(func(tx *bolt.Tx) error {
+		echo, repair := tx.Bucket(bucketEcho), tx.Bucket(bucketRepair)
+		for _, p := range paths {
+			var r Record
+			if v := echo.Get([]byte(p)); v != nil {
+				if err := json.Unmarshal(v, &r.Echo); err != nil {
+					return err
+				}
+				r.HasEcho = true
+			}
+			if v := repair.Get([]byte(p)); v != nil {
+				r.OwesPush = true
+				_ = r.OwedAt.UnmarshalText(v)
+			}
+			if r.HasEcho || r.OwesPush {
+				out[p] = r
+			}
+		}
+		return nil
+	})
+	return out, err
+}
+
 // SetEcho records the content we last synced at path (from an upload or an
 // applied download) so a later change-feed report of that same content is
 // recognised as an echo and dropped.

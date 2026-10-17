@@ -36,6 +36,7 @@ mounting it, so editing the manual changes the site without anyone touching
 | [Conventions](conventions.md) | The rules that carry correctness — read before touching sync, hydration or uploads. |
 | [Building](building.md) | Make targets, toolchain, lint, hooks, CI, running and debugging. |
 | [Testing](testing.md) | The suite, the kernel facilities it needs, platform runs, and the property tests. |
+| [Control API](control-api.md) | The v1 schema of the control socket — the one surface third-party tools bind to. |
 | [Writing a provider](new-provider.md) | `provider.Store` and its optional interfaces, with a checklist. |
 | [Glossary](glossary.md) | Echo, baseline, sweep, placeholder, seam, generation. |
 | [Multi-client test plan](multiclient-test-plan.md) | The fleet-convergence campaign and its rig. |

@@ -2839,6 +2839,85 @@ are both lossy and racy.
    multi-mount from the first line, since every question here is asked *of a named
    mount* — so it is schedulable independently of M9–M13.
 
+   **Shipped 2026-10-17, whole.** `internal/control` (the server, over a socket
+   `drivel mount -control` opens), `syncengine.Monitor` and `StatusReader` (the
+   observation surface and the status rules), pause and resume in the run loop,
+   `state.Store.Lookup` (one read transaction per batch, no commit), and `drivel
+   status|pause|resume|stop` as the first client. The schema is
+   `docs/dev/control-api.md`; the user page is `docs/user/control.md`. The three
+   policy questions at the end of this entry were answered by the user before the
+   schema was written — **(a) off by default**, opt-in with `-control`, a process
+   flag beside `-pprof`; **(c) no tree roll-up**: per-path status plus one bounded,
+   name-paged listing of a directory's direct children, and a directory's own
+   status says nothing about its contents; **(b)** is unchanged (peer uid, and an
+   `Authorization` header accepted and ignored). Seven things the implementation
+   decided, each of which the entry below left open or got slightly wrong:
+
+   - **"An immutable snapshot published on each transition" is realised as a
+     mutex no writer holds across anything that can block.** Copying a map of
+     every pending path per transition is O(paths) per event; instead each writer
+     takes the monitor's lock for a few map operations, never across a send, a
+     provider call or I/O, and a reader takes it once per batch. The property the
+     entry wanted — status answered while `dispatch` is blocked — holds and is
+     `TestStatusIsServedWhileTheRunLoopIsBlocked`. Counters are atomics in an
+     array indexed by name, which is what lets every hook be safe on a nil
+     monitor (taking a field's address on a nil pointer is not).
+   - **Per-path state is three counts, not one value**: debouncing, queued, and
+     running. A second write that lands while the first upload runs would
+     otherwise read `synced` the moment the first finishes. The entry is deleted
+     when all three are zero and no failure is recorded, so the map is the paths
+     *in motion*, not every path ever seen.
+   - **Two values were added to the status list, both derivable.** `local-only`
+     (a conflict copy, a special file, a drivel temporary — exists, deliberately
+     not synced; reporting `unknown` there would be wrong in the other
+     direction) and, in the stream only, `deleted`. **`synced` means the M18
+     fingerprint still matches**, never a hash: a status read does not read file
+     contents, so a baseline with no fingerprint is `unknown`, and so is a
+     diverged file with nothing queued (changed outside the mount, or a crash —
+     M27 part 4's row will push it at the next sweep). An abandonment recorded by
+     an earlier process (the `repair` bucket) is `error`.
+   - **Pause holds at dispatch with a held list, and the run loop owns the
+     gate.** Content changes stay in the coalescer (no timers are armed while
+     paused); structural ops, which dispatch immediately, go to an ordered held
+     list; workers wait at a gate before each operation. The gate is shut by the
+     run loop *after* it has stopped sending, never by the caller, which is the
+     whole of why waiting there cannot back up into FUSE. A pause asked for while
+     `dispatch` is blocked on a full queue is answered from inside the blocked
+     send. Resume sends the held list in order, then flushes the map — per-path
+     order, because a structural op flushed its path's earlier content ahead of
+     itself. The pull loop waits at the same gate between polls, the sweep between
+     pages, and `Engine.Push` (the reconciler's seam) before each push.
+     **Hydration is not paused**: a read of a placeholder is a user on the FUSE
+     path, and refusing it is an EIO for a file that exists. **An upload already
+     in flight finishes.** The mutation that let dispatch send while paused was
+     caught only once the storm test included structural ops — content alone
+     never reaches dispatch during a pause, so the first version of the test could
+     not fail.
+   - **The overflow rule is a cap of 10000 held paths and operations**
+     (`DefaultPauseCap`, a constant), past which the pause resumes on its own and
+     says so loudly. **Expiry**: `for` defaults to 1h, at most 24h, and an
+     out-of-range value is refused, not clamped. **Shutdown while paused resumes
+     first**, so the drain sends what was held.
+   - **Reachability is classified at the call sites**, not by wrapping the store:
+     a wrapper would have to re-declare every optional capability and is exactly
+     the type-assertion trap M9 rule 1 exists for. The engine's per-attempt
+     outcome, the feed's `Changes` and `StartCursor`, the sweep's `Enumerate` and
+     the downloader's `Get` are observed; a non-retryable error counts as contact
+     (the backend answered), a cancellation counts as nothing, and an hour of
+     silence is `unknown`. Hydration's fetches are not yet observed.
+   - **The socket path has no fallback.** `$XDG_RUNTIME_DIR/drivel/control.sock`
+     or `-control-socket`; with neither, `-control` is refused, because the
+     obvious fallback is under `/tmp`, which anyone can pre-create. An existing
+     directory that is not `0700` and ours is refused rather than chmod'ed. The
+     socket is **not offered to the M16 mount helper**: every fstab line is its
+     own process, so one default path is one collision per line, and an fstab
+     option needs a per-line path design first. That is the open follow-up.
+
+   The profiling routes moved as the last paragraph of this entry proposed:
+   `/debug/pprof/` is served over the socket with `profile`, `trace` and
+   `cmdline` refused, so the snapshot profiles need no port. `-pprof` is
+   unchanged.
+
    It is a milestone rather than a flag because it is the first **compatibility
    surface with code we do not control**. Every other seam in the tree can be
    redesigned in an afternoon; a field a file-manager extension binds to cannot.
@@ -2963,7 +3042,8 @@ are both lossy and racy.
    events for one write), and an explicit `resync` marker so a client that was
    dropped re-reads the directory instead of assuming it missed nothing.
 
-   **Three things are not settled, and all three are policy, not implementation.**
+   **Three things were not settled, and all three were policy, not implementation**
+   (answered 2026-10-17 — see the shipped note at the top of this entry).
    *(a) On by default, or off?* `-pprof`'s precedent is off, and this endpoint hands
    out path names and can stop the process; but an integration that requires the
    user to add a flag is an integration nobody writes. The tempting middle — a

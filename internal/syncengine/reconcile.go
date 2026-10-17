@@ -390,6 +390,10 @@ func (d *Downloader) runSweep(ctx context.Context, sw state.Sweep) (string, erro
 	started := time.Now()
 	var st sweepStats
 	stalled := false
+	d.mon.sweepStarted()
+	// A sweep that returns an error has nothing to report beyond "not running".
+	var report *SweepReport
+	defer func() { d.mon.sweepEnded(report) }()
 	// Paths the local walk's lost-push row must leave alone, for either of two
 	// reasons that amount to the same thing: this sweep has already acted on the
 	// path (an owed repair re-sent it), or this sweep could not establish what the
@@ -397,7 +401,13 @@ func (d *Downloader) runSweep(ctx context.Context, sw state.Sweep) (string, erro
 	// guess. See repushDiverged.
 	noRepush := map[string]struct{}{}
 	for {
+		// Between pages, never inside one: a page is applied whole, and what is
+		// paused is the next request to the provider.
+		if !d.waitUnpaused(ctx) {
+			return "", ctx.Err()
+		}
 		files, next, err := d.enum.Enumerate(ctx, sw.Cursor)
+		d.mon.observe(err)
 		if err != nil {
 			return "", fmt.Errorf("enumerate: %w", err)
 		}
@@ -459,6 +469,7 @@ func (d *Downloader) runSweep(ctx context.Context, sw state.Sweep) (string, erro
 		// next mount reads no stamp, treats a sweep as overdue and starts a fresh
 		// one. -resync forces it sooner.
 		d.logf("[sweep] reconcile INCOMPLETE in %s: %s", time.Since(started).Round(time.Millisecond), st)
+		report = st.report(started, false)
 		return sw.Token, nil
 	}
 	d.pushLocalOnly(ctx, sw, &st, noRepush)
@@ -500,6 +511,7 @@ func (d *Downloader) runSweep(ctx context.Context, sw state.Sweep) (string, erro
 	}
 	d.nextSweep = d.sweepDeadline()
 	d.logf("[sweep] reconcile complete in %s: %s", time.Since(started).Round(time.Millisecond), st)
+	report = st.report(started, true)
 	return sw.Token, nil
 }
 
@@ -521,6 +533,18 @@ type sweepStats struct {
 	unverified  int // baselines with no local fingerprint, so divergence could not be judged
 	suppressed  int // listed objects that are this mount's own deletion, not yet propagated
 	tombExpired int // deletion records dropped because nothing can still report them
+}
+
+// report is the tally as the status API serves it.
+func (s sweepStats) report(started time.Time, complete bool) *SweepReport {
+	return &SweepReport{
+		Started: started, Finished: time.Now(), Complete: complete,
+		Listed: s.objects, Reconciled: s.materialize, Pushed: s.pushed, NotFetched: s.deferred,
+		ExportOnly: s.exportOnly, DeletedLocally: s.localDel, DeletedRemotely: s.remoteDel,
+		Kept: s.kept, Orphaned: s.orphaned, Special: s.special, Repaired: s.repaired,
+		Repushed: s.repushed, Unverified: s.unverified, Suppressed: s.suppressed,
+		TombstonesExpired: s.tombExpired,
+	}
 }
 
 // kindOf names a file type for the one job of telling a user which of their files

@@ -119,6 +119,7 @@ flowchart TD
     main["cmd/drivel<br/>flags · signals"]
     app["internal/app<br/>Mount lifecycle · N mounts · guards"]
     config["internal/config<br/>TOML: accounts + mounts"]
+    control["internal/control<br/>status API · unix socket (M14)"]
 
     subgraph seams["Seams (interfaces)"]
         mount["internal/mount<br/>Backend · ResolveBacking"]
@@ -150,6 +151,9 @@ flowchart TD
     main --> syncengine
     main --> gauth
     main --> completion
+    main --> control
+
+    control --> syncengine
 
     pluginpkg --> provider
     pluginpkg --> rangespkg
@@ -231,6 +235,11 @@ What the graph enforces:
   because an out-of-tree backend has to import all three: the interfaces it
   implements, the extent type `RangePutter` names, and the `Serve` its `main`
   calls.
+- **`internal/control` (M14) reads and never decides.** It serves the status
+  API from the per-mount `syncengine.Monitor` and the state store's read
+  transactions, and imports neither `app` nor any provider: `cmd/drivel` hands
+  it the open mounts behind an interface of its own. The schema it implements is
+  [the control API reference](control-api.md), not its Go types.
 - **`vfs` implements `mount.Backend`** and speaks `fsevent`, but knows nothing
   about providers or sync — a mutation just becomes an event.
 - **`internal/app` is the composition root**, and `cmd/drivel` is only the flag

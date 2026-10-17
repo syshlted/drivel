@@ -41,8 +41,11 @@ import (
 	"github.com/syshlted/drivel/ranges"
 )
 
-// Defaults for the outbound uploader. All are overridable via Config.
-const defaultDrainTimeout = 30 * time.Second
+// DefaultDrainTimeout bounds the shutdown drain: how long queued and in-flight
+// uploads are given to finish once the mount has gone away. Overridable via
+// Config; exported because the control API reports it to whoever asked for the
+// shutdown.
+const DefaultDrainTimeout = 30 * time.Second
 
 // DefaultPushDelay is how long a path must go without a further content change
 // before its upload is dispatched — Config.Debounce's default, and what
@@ -173,6 +176,18 @@ type Engine struct {
 	// and a knob for how often an internal state machine looks at itself would be
 	// one in all but name. Tests shorten it.
 	satSample time.Duration
+
+	// M14. mon is written to and never read from here (see Monitor). ctl carries
+	// pause and resume to the run loop, which is the only goroutine allowed to
+	// change whether dispatch happens; gate is what the workers, the pull loop and
+	// the sweep wait at. stopped is closed when Run returns, so a request sent to
+	// an engine that is no longer running fails instead of waiting forever.
+	mon      *Monitor
+	ctl      chan ctlReq
+	gate     gate
+	pauseCap int
+	stopped  chan struct{}
+	stopOnce sync.Once
 }
 
 // logf writes one line for this engine.
@@ -207,6 +222,13 @@ type Config struct {
 	// pin both ends of the window independently. A value below Debounce would
 	// defeat the coalescing entirely and is raised to it.
 	MaxWait time.Duration
+
+	// Monitor receives this engine's status transitions and counters (M14). Nil
+	// records nothing.
+	Monitor *Monitor
+	// PauseCap is how many paths and operations a pause may hold before it ends
+	// on its own; zero selects DefaultPauseCap.
+	PauseCap int
 }
 
 // New constructs an Engine, applying defaults for any unset tuning fields.
@@ -223,6 +245,13 @@ func New(cfg Config) *Engine {
 		drainTimeout: cfg.DrainTimeout,
 		retry:        defaultRetry,
 		satSample:    defaultSatSample,
+		mon:          cfg.Monitor,
+		ctl:          make(chan ctlReq),
+		pauseCap:     cfg.PauseCap,
+		stopped:      make(chan struct{}),
+	}
+	if e.pauseCap <= 0 {
+		e.pauseCap = DefaultPauseCap
 	}
 	if e.debounce <= 0 {
 		e.debounce = DefaultPushDelay
@@ -240,7 +269,12 @@ func New(cfg Config) *Engine {
 		e.workers = DefaultWorkers
 	}
 	if e.drainTimeout <= 0 {
-		e.drainTimeout = defaultDrainTimeout
+		e.drainTimeout = DefaultDrainTimeout
+	}
+	if e.mon != nil {
+		// The stream coalesces on the uploader's own window, so an overlay sees
+		// one transition per settled change rather than one per close(2).
+		e.mon.debounce = e.debounce
 	}
 	return e
 }
@@ -255,6 +289,7 @@ func (e *Engine) Workers() int { return e.workers }
 // drains pending (debounced) and in-flight uploads under drainTimeout before
 // returning, so a clean unmount does not lose buffered writes (DESIGN.md §7).
 func (e *Engine) Run(ctx context.Context, events <-chan fsevent.Event) {
+	defer e.stopOnce.Do(func() { close(e.stopped) })
 	if e.store == nil {
 		e.runLogOnly(ctx, events)
 		return
@@ -272,6 +307,11 @@ func (e *Engine) Run(ctx context.Context, events <-chan fsevent.Event) {
 		go func(ch <-chan fsevent.Event) {
 			defer wg.Done()
 			for ev := range ch {
+				// The gate is shut only by this engine's run loop, after it has
+				// stopped sending; waiting here therefore cannot back up into
+				// dispatch and from there into FUSE.
+				e.gate.wait(opCtx)
+				e.mon.began(ev)
 				e.executeWithRetry(opCtx, ev)
 			}
 		}(in[i])
@@ -300,6 +340,7 @@ func (e *Engine) Run(ctx context.Context, events <-chan fsevent.Event) {
 		stopTimer(p)
 		delete(since, p)
 	}
+	pz := &pauser{e: e}
 
 	// Back-pressure reporting (M27). bp is touched only by this goroutine — from
 	// dispatch, which this goroutine calls, and from the sampler case below — so
@@ -336,7 +377,22 @@ func (e *Engine) Run(ctx context.Context, events <-chan fsevent.Event) {
 	// vfs.node.emit inside a FUSE handler. A depth sampled anywhere upstream
 	// cannot tell a full worker queue from a slow provider, and those two want
 	// different advice.
+	//
+	// While paused it sends nothing, and holds the event in order instead. A pause
+	// asked for while it is blocked takes effect right there — the request is the
+	// one thing besides room that may end the wait — so a user pausing a mount
+	// that is saturated is answered promptly rather than after the next upload.
+	draining := false // once set, no control request is read again
+	var send func(ev fsevent.Event)
 	dispatch := func(ev fsevent.Event) {
+		e.mon.enqueued(ev)
+		send(ev)
+	}
+	send = func(ev fsevent.Event) {
+		if pz.on {
+			pz.held = append(pz.held, ev)
+			return
+		}
 		ch := in[workerFor(ev.Path, len(in))]
 		select {
 		case ch <- ev:
@@ -346,8 +402,81 @@ func (e *Engine) Run(ctx context.Context, events <-chan fsevent.Event) {
 		if bp.blocked() && satTick == nil {
 			satTick = time.NewTicker(e.satSample)
 			satC = satTick.C
+			e.mon.saturated(true)
 		}
-		ch <- ev
+		ctlC := e.ctl
+		if draining {
+			ctlC = nil
+		}
+		for {
+			select {
+			case ch <- ev:
+				return
+			case req := <-ctlC:
+				if req.op != ctlPause {
+					req.reply <- ctlReply{} // not paused, so a resume has nothing to do
+					continue
+				}
+				req.reply <- ctlReply{until: pz.begin(req.d)}
+				pz.held = append(pz.held, ev)
+				return
+			}
+		}
+	}
+
+	// resume ends a pause and sends what it held: first the held operations in
+	// the order they were dispatched, then everything still in the debounce map.
+	// That order is per-path order — a structural op flushed its path's earlier
+	// content into the held list ahead of itself, and content that arrived later
+	// is still in the map.
+	resume := func(reason string) {
+		held := pz.end(reason)
+		for i, ev := range held {
+			// Already counted as pending when it was first dispatched.
+			send(ev)
+			if pz.on {
+				// Paused again while blocked on that send: what remains stays held,
+				// behind the event dispatch has just put there.
+				pz.held = append(pz.held, held[i+1:]...)
+				return
+			}
+		}
+		for p := range since {
+			settle(p)
+		}
+		for _, t := range c.flushAll() {
+			e.mon.coalescing(t.Path, false)
+			dispatch(t)
+		}
+	}
+	defer func() {
+		if pz.timer != nil {
+			pz.timer.Stop()
+		}
+	}()
+	// handle answers one control request at the top of the loop.
+	handle := func(req ctlReq) {
+		switch req.op {
+		case ctlPause:
+			req.reply <- ctlReply{until: pz.begin(req.d)}
+		case ctlResume:
+			if pz.on {
+				resume("")
+			}
+			req.reply <- ctlReply{}
+		}
+	}
+	// overflowed ends a pause that is holding more than it may.
+	overflowed := func() {
+		if !pz.on {
+			return
+		}
+		e.mon.heldCount(len(pz.held))
+		if n := len(c.pending) + len(pz.held); n > e.pauseCap {
+			e.logf("[sync] WARNING: the pause is holding %d path(s) and operation(s), past its cap of %d; "+
+				"resuming now rather than either dropping them or blocking writes through the mount", n, e.pauseCap)
+			resume(fmt.Sprintf("held %d, past the cap of %d", n, e.pauseCap))
+		}
 	}
 
 loop:
@@ -362,7 +491,13 @@ loop:
 			switch ev.Op {
 			case fsevent.OpCreate, fsevent.OpWrite:
 				c.markContent(ev.Path, ev.Dirty)
+				e.mon.coalescing(ev.Path, true)
 				stopTimer(ev.Path)
+				if pz.on {
+					// No timer while paused: nothing would act on it, and resume
+					// flushes the whole map regardless.
+					break
+				}
 				p := ev.Path
 				now := time.Now()
 				if _, pending := since[p]; !pending {
@@ -386,26 +521,58 @@ loop:
 			default:
 				for _, t := range c.structural(ev) {
 					settle(t.Path)
+					if t.Op == fsevent.OpWrite {
+						e.mon.coalescing(t.Path, false)
+					}
 					dispatch(t)
 				}
 			}
+			e.mon.coalesced(len(c.pending))
+			overflowed()
 		case p := <-flushCh:
+			if pz.on {
+				// A timer armed before the pause began. Leave the path pending;
+				// resume flushes it.
+				stopTimer(p)
+				continue
+			}
 			settle(p)
 			for _, t := range c.flush(p) {
+				e.mon.coalescing(t.Path, false)
 				dispatch(t)
 			}
+			e.mon.coalesced(len(c.pending))
+		case req := <-e.ctl:
+			handle(req)
+			e.mon.coalesced(len(c.pending))
+		case <-pz.expiry:
+			resume(fmt.Sprintf("the pause expired after %s", time.Since(pz.since).Round(time.Second)))
+			e.mon.coalesced(len(c.pending))
 		case <-satC:
 			if !bp.sample() {
 				satStop()
+				e.mon.saturated(false)
 			}
 		}
 	}
 
+	draining = true
+	// A shutdown drains exactly as it would have unpaused — pause is not
+	// persisted, and the drain is what stops a queued write being lost — so a
+	// paused engine resumes first and says why.
+	if pz.on {
+		resume("the mount is shutting down, and the drain sends what was held")
+	}
+	// Requests arriving from here on find no run loop to answer them.
+	e.stopOnce.Do(func() { close(e.stopped) })
+
 	// Drain: flush every pending content push, then close worker inputs so the
 	// pool finishes its queue, bounded by drainTimeout.
 	for _, t := range c.flushAll() {
+		e.mon.coalescing(t.Path, false)
 		dispatch(t)
 	}
+	e.mon.coalesced(0)
 	for _, t := range timers {
 		t.Stop()
 	}
@@ -426,6 +593,7 @@ loop:
 	// an unterminated "queue full" is exactly the kind of thing that gets read as
 	// a hang. The drain above has ended it one way or the other by now.
 	bp.end()
+	e.mon.saturated(false)
 }
 
 // backpressure reports, once each way, that the outbound path has begun making
@@ -604,17 +772,32 @@ func workerFor(path string, n int) int {
 
 // executeWithRetry pushes one event, retrying transient failures with exponential
 // backoff + full jitter. It stops early if ctx is cancelled (shutdown/drain).
+//
+// The caller has told the monitor the operation began (Monitor.began for a
+// queued one, pushStarted for a direct Push); this reports how it ended.
 func (e *Engine) executeWithRetry(ctx context.Context, ev fsevent.Event) {
 	delay := e.retry.base
 	for attempt := 1; ; attempt++ {
+		if attempt > 1 {
+			// A pause that landed during the backoff holds the next attempt too.
+			if !e.gate.wait(ctx) {
+				e.mon.finished(ev, nil, true)
+				return
+			}
+			e.mon.attemptAgain(ev)
+		}
 		err := e.push(ctx, ev)
+		e.mon.observe(err)
 		if err == nil {
+			e.mon.finished(ev, nil, false)
 			return
 		}
 		if ctx.Err() != nil {
+			e.mon.finished(ev, nil, true)
 			return // cancelled: give up quietly (drain deadline or shutdown)
 		}
 		if !provider.IsRetryable(err) || attempt >= e.retry.max {
+			e.mon.finished(ev, err, false)
 			// One line, not two: the shape that abandons the most pushes is a
 			// non-retryable error, which gives up after a single attempt, so a
 			// permission failure over a large tree writes one of these per file.
@@ -623,7 +806,10 @@ func (e *Engine) executeWithRetry(ctx context.Context, ev fsevent.Event) {
 			return
 		}
 		e.logf("[sync] push %s %s attempt %d failed, retrying: %v", ev.Op, ev.Path, attempt, err)
-		if !sleepCtx(ctx, jitter(delay)) {
+		wait := jitter(delay)
+		e.mon.retrying(ev, attempt, time.Now().Add(wait), err)
+		if !sleepCtx(ctx, wait) {
+			e.mon.finished(ev, nil, true)
 			return
 		}
 		if delay *= 2; delay > e.retry.cap {
@@ -704,7 +890,18 @@ func (e *Engine) handle(ctx context.Context, ev fsevent.Event) {
 //
 // It bypasses only the debounce window, which exists to coalesce bursts; a
 // reconcile produces one event per path by construction.
-func (e *Engine) Push(ctx context.Context, ev fsevent.Event) { e.handle(ctx, ev) }
+//
+// A pause holds it too: the reconciler is one of the things a pause promises to
+// stop, and it reaches the store through here rather than through the run loop.
+func (e *Engine) Push(ctx context.Context, ev fsevent.Event) {
+	if e.store != nil {
+		if !e.gate.wait(ctx) {
+			return
+		}
+		e.mon.pushStarted(ev)
+	}
+	e.handle(ctx, ev)
+}
 
 // push maps one event to store calls. The store creates ancestor directories and
 // resolves paths to its native addressing itself, so this stays path-only.
@@ -725,6 +922,7 @@ func (e *Engine) push(ctx context.Context, ev fsevent.Event) error {
 			return err
 		}
 		e.recordEcho(rf)
+		e.mon.count(cMkdirs, 1)
 		e.logf("[sync] mkdir    %s", ev.Path)
 		return nil
 
@@ -740,6 +938,7 @@ func (e *Engine) push(ctx context.Context, ev fsevent.Event) error {
 			return err
 		}
 		e.entombPath(ev.Path, base)
+		e.mon.count(cDeletes, 1)
 		e.logf("[sync] delete   %s", ev.Path)
 		return nil
 
@@ -766,6 +965,7 @@ func (e *Engine) push(ctx context.Context, ev fsevent.Event) error {
 		// local path so the baseline still describes something that exists.
 		fi, _ := os.Stat(filepath.Join(e.dataDir, filepath.FromSlash(ev.NewPath)))
 		e.recordEchoOf(rf, fi)
+		e.mon.count(cRenames, 1)
 		e.logf("[sync] rename   %s -> %s", ev.Path, ev.NewPath)
 		return nil
 
@@ -800,6 +1000,7 @@ const hashSkipMinSize = ranges.DefaultBlockSize
 func (e *Engine) pushContent(ctx context.Context, p string, dirty *ranges.Set) error {
 	if e.holes != nil && e.holes.IsPlaceholder(p) {
 		e.logf("[sync] skip %s: unhydrated placeholder (nothing local to push)", p)
+		e.mon.count(cPlaceholderDeclined, 1)
 		return nil
 	}
 	f, err := os.Open(filepath.Join(e.dataDir, filepath.FromSlash(p)))
@@ -845,6 +1046,8 @@ func (e *Engine) pushContent(ctx context.Context, p string, dirty *ranges.Set) e
 	// Only here, never on the routes above: a range write and both skips log their
 	// own lines, and counting this one as well would report an upload that did not
 	// happen — which is exactly what MC-21 (a touch must cost nothing) asserts.
+	e.mon.count(cUploads, 1)
+	e.mon.count(cUploadBytes, counted.n)
 	e.logf("[sync] upload   %s (%d B)", p, counted.n)
 	return nil
 }
@@ -902,6 +1105,8 @@ func (e *Engine) pushShortcut(ctx context.Context, p string, f *os.File, size in
 				p, len(extents), dirty.Bytes(), size, err)
 		} else {
 			e.logf("[sync] range write %s: %d extent(s), %d of %d B", p, len(extents), dirty.Bytes(), size)
+			e.mon.count(cRangePuts, 1)
+			e.mon.count(cRangeBytes, dirty.Bytes())
 			e.recordEchoOf(rf, statOf(f))
 			return true, nil
 		}
@@ -914,6 +1119,8 @@ func (e *Engine) pushShortcut(ctx context.Context, p string, f *os.File, size in
 		}
 		if unchanged {
 			e.logf("[sync] skip %s: remote already holds these bytes (%d B not uploaded)", p, size)
+			e.mon.count(cUnchangedSkips, 1)
+			e.mon.count(cUnchangedBytes, size)
 			// Record it. A digest match against what Stat reports NOW is the
 			// strongest evidence this engine ever has that the two sides agree —
 			// stronger than the echo a successful Put writes, which is a claim

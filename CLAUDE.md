@@ -46,6 +46,12 @@ bidirectional sync — don't regress it.
   description of a program. Imported **only** by `cmd/drivel/completions.go`,
   which is behind the `completions` build tag, so no release binary contains it.
   See "Shell completions" below.
+- `internal/control` — M14's server: the control socket (`listen.go`, private
+  directory and stale-socket rules), the peer-uid check per platform, the routes,
+  the NDJSON stream and the Prometheus adapter. Imports `syncengine` for its
+  types and **nothing else of ours**: `cmd/drivel` hands it the open mounts behind
+  its own `control.Mount` interface. `wire.go` holds the JSON types, deliberately
+  separate from the engine's.
 - `internal/fsevent` — backend-neutral change `Event`/`Op` types (shared by any
   mount backend and the sync engine).
 - `internal/mount` — the mount-backend seam: `Backend` interface + `Options`, and
@@ -218,9 +224,11 @@ in both places. When it stops being true, it comes out of all of them together.
 
 ## CLI
 
-`drivel` has two subcommands (`mount` is the default, so `drivel -mount … -data …`
-still works): `drivel login` (interactive OAuth wizard → credentials.json +
-token.json) and `drivel mount`. **Both entry points build their registry through
+`drivel` has two main subcommands (`mount` is the default, so `drivel -mount …
+-data …` still works): `drivel login` (interactive OAuth wizard → credentials.json +
+token.json) and `drivel mount`. Since M14 four more talk to a running mount over
+its control socket — `status`, `pause`, `resume`, `stop` — and do nothing without
+`mount -control`. **Both entry points build their registry through
 `newRegistry()` in `cmd/drivel/mount.go`** — the flag/config path and the M16 mount
 helper — because a backend registered in one but not the other is a config file
 that works from the shell and fails at boot. Two more are **hidden and stay
@@ -378,8 +386,8 @@ mount and are refused beside a config file (a precedence rule nobody would
 remember). `mountSelectorFlags` (`-name`, `-account`) *choose* among the mounts a
 file already describes, so they compose with `-config` and **require** it.
 `mountListingFlags` (`-list`, `-full`) read the file and mount nothing.
-`mountProcessFlags` (`-debug`, `-pprof`, `-pprof-allow-remote`) describe how this
-*process* reports. `TestFlagCategoriesAreDisjoint` walks `mountFlagSet` and fails
+`mountProcessFlags` (`-debug`, `-pprof`, `-pprof-allow-remote`, `-control`,
+`-control-socket`) describe how this *process* reports. `TestFlagCategoriesAreDisjoint` walks `mountFlagSet` and fails
 on a flag in two categories or in none, because a flag with no category silently
 inherits whatever the fall-through does.
 
@@ -455,25 +463,13 @@ M27 the sync path's two silences **shipped 2026-10-12, part 4 added
 than forgotten, and a push *lost* to a crash is found by the next sweep. See
 "The sync path's two silences" below for the invariants.
 
-**M14** control & status API — a unix socket (`internal/control`, HTTP/JSON,
-`/v1/…`) so third-party tools can read per-path sync status and per-backend stats,
-pause/resume a mount, see whether a backend is reachable, and stop the process,
-with `drivel status|pause|resume|stop` as the in-tree first client. Depends only on
-M8, so it can be scheduled at any time. Five things in DESIGN.md §9's entry are
-load-bearing and easy to get wrong: it is a **view, never an authority** (M7
-invariant 2 again — no sync decision may read from it); status is served from a
-**snapshot**, never from `Engine.Run`, whose coalescer is goroutine-confined and
-whose `dispatch` blocks when a worker queue fills; **pause holds the dispatch, not
-the event channel** — `vfs.node.emit` blocks rather than drops, so pausing
-consumption hangs FUSE, and discarding the pending set is not a fallback because
-`reconcile.pushLocalOnly` skips paths that already have an echo; **`unknown` is a
-first-class status**, because reporting "synced" for a path with no record is the
-placeholder-vs-empty-file lie in a new place; and shutdown cancels the SIGINT
-context rather than exiting, so the three-phase `Close` and its bounded drain still
-run. Reachability is **observed, never probed**. Unsettled and deliberately so:
-on-by-default vs off (the `-pprof` precedent says off), authorisation beyond the
-socket mode, and whether status answers for a whole *tree* — that last one decides
-the response schema, so it comes first.
+**M14** control & status API **shipped 2026-10-17**: `drivel mount -control`
+opens a unix socket (`internal/control`, HTTP/JSON, `/v1/…`), and `drivel
+status|pause|resume|stop` is the first client. See "Control & status API" below
+for the invariants. The schema is `docs/dev/control-api.md` — **that file is the
+contract, not the Go types**. Off by default; no tree roll-up (per-path status
+plus a bounded, name-paged listing of a directory's children); not offered to
+the fstab helper yet.
 
 **M15** special files, POSIX metadata & mount safety — **items 1–3 shipped
 (2026-09-08); 4 and 5 remain.** See "Special files" below for what landed and the
@@ -951,6 +947,62 @@ DESIGN.md §10 is a design note on carrying POSIX metadata (mode, ACLs, xattrs,
 SELinux) over Drive — unscheduled. If you touch it, the rule is that permission
 metadata from a remote source is *executable trust*: authenticate it, bind it to
 the file, fail closed, and mask setuid/setgid by default.
+
+## Control & status API (M14)
+
+The first compatibility surface with code we do not control. Seven things carry
+it; DESIGN.md §9/M14 has the reasoning and the shipped note.
+
+1. **A view, never an authority.** `syncengine.Monitor` is written by the engine,
+   the pull loop and the sweep, and read only by `internal/control`. No sync
+   decision may read it; if one wants a value that lives there, the value belongs
+   in the deciding component and the monitor gets a copy.
+2. **A status read never touches the run loop and never calls a provider.** The
+   monitor's lock is never held across a send, a provider call or I/O; readers
+   take it once per batch; `StatusReader` reads the monitor, `state.Lookup` (one
+   read transaction, **zero commits** — §12), an `lstat`, the parent directory for
+   conflict copies, and the placeholder xattr. Never a hash.
+   `TestStatusIsServedWhileTheRunLoopIsBlocked` is the assertion.
+3. **`unknown` is first-class and `synced` is narrow**: a baseline whose M18
+   fingerprint still matches. No record, no fingerprint, or a diverged file with
+   nothing queued are all `unknown`, with a `detail` saying which. `local-only` is
+   the one added value (conflict copies, special files, `.drivel-` temporaries).
+   A directory's status is about the directory; there is no roll-up and adding
+   one is a new index with its own drift bug — it was decided against.
+4. **Pause stops dispatch, never consumption.** While paused the run loop still
+   reads and coalesces; content stays in the debounce map (no timers armed),
+   structural ops go to an ordered held list, and workers wait at a gate **the
+   run loop shuts after it has stopped sending** — the only reason that wait
+   cannot back up into `vfs.node.emit` and hang FUSE. A pause request is also
+   answered from inside a blocked dispatch. The pull loop, the sweep (between
+   pages) and `Engine.Push` wait at the same gate; **hydration does not** (a read
+   is a user on the FUSE path), and an in-flight upload finishes. Ends on expiry
+   (`for`, default 1h, at most 24h, refused out of range), on overflow
+   (`DefaultPauseCap` 10000, loudly), or at shutdown (resume first, then drain).
+   Never persisted. **Discarding the held set is not an option**, whatever the
+   memory pressure argument.
+5. **Shutdown cancels the context the signals cancel** (`context.WithCancelCause`
+   under `signal.NotifyContext` in `runMount`), so the three-phase `Close` and
+   the bounded drain run unchanged; it answers `202` before draining and logs the
+   peer. `TestAnAPIShutdownDrainsLikeASignal` runs both paths over a real mount.
+6. **The socket's directory is the authentication.** `$XDG_RUNTIME_DIR/drivel/`
+   or `-control-socket`, **no `/tmp` fallback**, an existing directory that is
+   not ours and `0700` is refused (never chmod'ed), socket `0600`, peer uid
+   checked where the platform reports it (root allowed). A stale socket is
+   *connected to first* and unlinked only on `ECONNREFUSED`. `Authorization` is
+   accepted and ignored so a token scheme can grow later.
+7. **The client imports nothing internal.** `cmd/drivel/ctl.go` decodes into its
+   own types from the documented schema — it is the acceptance test that a
+   stranger's tool can do everything the in-tree one does. If it needs something
+   the API does not offer, change the API, not the client.
+
+Reachability is **observed at call sites** (engine attempts, `Changes`,
+`StartCursor`, `Enumerate`, the downloader's `Get`; hydration not yet) and never
+probed; a non-retryable error counts as contact, an hour of silence is
+`unknown`. Do not wrap the store to observe it — a wrapper must re-declare every
+capability, which is M9 rule 1's trap. **Not merged with the plugin protocol**,
+whose trust runs the other way. Profiling over the socket serves the snapshot
+profiles only; `profile`, `trace` and `cmdline` are refused there.
 
 ## Lazy hydration (M5)
 

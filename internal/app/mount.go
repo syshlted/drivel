@@ -157,6 +157,16 @@ func (s MountSpec) fsName() string {
 	return "drivel"
 }
 
+// controlName is what the control API calls this mount: its configured name, or
+// for the flag path — which has one mount and no name — the same short form the
+// log prefix uses.
+func (s MountSpec) controlName() string {
+	if s.Name != "" {
+		return s.Name
+	}
+	return s.logName()
+}
+
 // logName is label shortened for a log prefix. The flag path has no name and
 // its mountpoint may be an absolute path long enough to bury the message.
 func (s MountSpec) logName() string {
@@ -182,6 +192,12 @@ type Mount struct {
 	engine  *syncengine.Engine
 	down    *syncengine.Downloader
 	events  chan fsevent.Event
+
+	// mon is this mount's observation surface (M14): the engine, the pull loop
+	// and the sweep write to it, and the control API reads it. Built for every
+	// mount, log-only included, so a status query never has to ask whether one
+	// exists.
+	mon *syncengine.Monitor
 
 	// closeStore is the provider's release hook, if it has one. provider.Store
 	// says nothing about closing — most backends have nothing to release — so a
@@ -228,7 +244,10 @@ func Open(ctx context.Context, spec MountSpec, reg *provider.Registry) (*Mount, 
 		}
 	}
 
-	m := &Mount{spec: spec, lg: spec.Logger, events: make(chan fsevent.Event, eventBuffer)}
+	m := &Mount{
+		spec: spec, lg: spec.Logger, events: make(chan fsevent.Event, eventBuffer),
+		mon: syncengine.NewMonitor(spec.controlName()),
+	}
 	// Anything acquired before a later failure has to be handed back, or a failed
 	// startup leaks a dirfd, a bbolt lock and an HTTP/3 transport per mount.
 	ok := false
@@ -330,6 +349,7 @@ func Open(ctx context.Context, spec MountSpec, reg *provider.Registry) (*Mount, 
 			m.logf("WARNING: xattrs are served through %s while lazy hydration is on; %s is readable and writable there, and removing it from a placeholder loses that file's remote content", spec.Mountpoint, hydrate.XattrName)
 		}
 		m.logf("lazy hydration enabled (ranged reads: %t)", m.hyd.SupportsRanges())
+		m.mon.WatchHydration(m.hyd)
 	}
 
 	m.engine = syncengine.New(syncengine.Config{
@@ -340,6 +360,7 @@ func Open(ctx context.Context, spec MountSpec, reg *provider.Registry) (*Mount, 
 		Logger:   m.lg,
 		Workers:  spec.UploadWorkers,
 		Debounce: spec.PushDelay,
+		Monitor:  m.mon,
 	})
 
 	// Inbound sync. A change feed (M3) is one way in and the M7b sweep is the
@@ -359,7 +380,7 @@ func Open(ctx context.Context, spec MountSpec, reg *provider.Registry) (*Mount, 
 		// start token before the sweep, poll from it only after — is a statement
 		// about the cursor. It runs off the FUSE path, so the mount comes up and
 		// stays usable while a large remote is swept.
-		m.down = dl.Logger(m.lg).Reconcile(syncengine.ReconcileOptions{
+		m.down = dl.Logger(m.lg).Monitor(m.mon).PausedBy(m.engine).Reconcile(syncengine.ReconcileOptions{
 			Push:       m.engine,
 			Fetch:      spec.Materialize,
 			Force:      spec.Resync,

@@ -10,6 +10,8 @@
 //
 //	drivel login  [flags]   # interactive OAuth setup (writes credentials.json + token.json)
 //	drivel mount  [flags]   # mount and sync (default if no subcommand given)
+//	drivel status [flags] [PATH...]  # ask a running drivel (mount -control) what it is doing
+//	drivel pause | resume | stop     # ...and tell it to stop doing it
 //
 // It is also the mount(8) helper for /etc/fstab, when invoked through the
 // /sbin/mount.fuse.drivel symlink or as `drivel mount-helper` (Linux only), and
@@ -59,6 +61,14 @@ func main() {
 		failHelper(runMountHelper(args))
 	case "completion":
 		fail(runCompletion(args))
+	case "status":
+		fail(runStatus(args))
+	case "pause":
+		fail(runPause(args))
+	case "resume":
+		fail(runResume(args))
+	case "stop":
+		fail(runStop(args))
 	case plugin.ServeCommand:
 		// This program as one of the backends it carries (M23). Hidden on purpose
 		// — it is not a command anyone has a reason to run, and it is absent from
@@ -126,9 +136,12 @@ This is free software with NO WARRANTY, to the extent permitted by law.
 Usage:
   drivel login [flags]     Interactive Google OAuth setup (credentials.json + token.json)
   drivel mount [flags]     Mount a directory and sync it with Google Drive
+  drivel status [PATH...]  Ask a running drivel what it is syncing (needs mount -control)
+  drivel pause | resume    Hold a running drivel's syncing for a while, or end the hold
+  drivel stop              Unmount and drain a running drivel, as SIGTERM would
   drivel completion SHELL  Print the completion script for bash or zsh
 
-Run 'drivel login -h' or 'drivel mount -h' for command flags.
+Run 'drivel COMMAND -h' for a command's flags.
 
 To try completion in this shell:  eval "$(drivel completion bash)"
 

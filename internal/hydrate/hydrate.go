@@ -35,6 +35,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/syshlted/drivel/provider"
@@ -98,6 +99,16 @@ type Hydrator struct {
 
 	mu       sync.Mutex
 	inflight map[string]*fetch // singleflight: concurrent opens fault once
+
+	// Counted for the status API (M14), and only there: nothing here reads them.
+	hydrated, hydratedBytes, failed atomic.Int64
+}
+
+// HydrationStats reports how many placeholders this hydrator has filled, how
+// many bytes that faulted in, and how many fetches failed — for the life of the
+// process.
+func (h *Hydrator) HydrationStats() (count, bytes, failed int64) {
+	return h.hydrated.Load(), h.hydratedBytes.Load(), h.failed.Load()
 }
 
 // fetch is one in-progress hydration that later arrivals wait on.
@@ -314,6 +325,9 @@ func (h *Hydrator) Hydrate(ctx context.Context, rel string) error {
 	h.mu.Unlock()
 
 	f.err = h.fetchLimited(ctx, rel, m)
+	if f.err != nil && ctx.Err() == nil {
+		h.failed.Add(1)
+	}
 
 	h.mu.Lock()
 	delete(h.inflight, rel)
@@ -394,6 +408,8 @@ func (h *Hydrator) fetchWhole(ctx context.Context, rel string, m Marker) error {
 	rs := ranges.New(n, ranges.DefaultBlockSize)
 	rs.MarkAll()
 	h.putRanges(rel, rs)
+	h.hydrated.Add(1)
+	h.hydratedBytes.Add(n)
 	return nil
 }
 

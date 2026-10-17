@@ -109,6 +109,36 @@ type Downloader struct {
 	// since this instant is one the running engine is already responsible for,
 	// and one modified before it is not. See repushDiverged.
 	openedAt time.Time
+
+	// M14. mon is written to and never read (see Monitor); hold is what a pause
+	// makes this loop wait at, between polls and between sweep pages.
+	mon  *Monitor
+	hold Holder
+}
+
+// Holder is satisfied by *Engine: WaitUnpaused blocks while the mount is paused.
+type Holder interface {
+	WaitUnpaused(ctx context.Context) bool
+}
+
+// Monitor sets where this pull loop reports, and returns d for chaining.
+func (d *Downloader) Monitor(m *Monitor) *Downloader {
+	d.mon = m
+	return d
+}
+
+// PausedBy makes this pull loop, and the sweep it owns, stop while h is paused.
+func (d *Downloader) PausedBy(h Holder) *Downloader {
+	d.hold = h
+	return d
+}
+
+// waitUnpaused blocks while the mount is paused, reporting false if ctx ended.
+func (d *Downloader) waitUnpaused(ctx context.Context) bool {
+	if d.hold == nil {
+		return ctx.Err() == nil
+	}
+	return d.hold.WaitUnpaused(ctx)
 }
 
 // Materializer is the OPTIONAL lazy-hydration hook (M5), satisfied by
@@ -188,6 +218,9 @@ func (d *Downloader) Run(ctx context.Context) {
 			return
 		case <-time.After(wait):
 		}
+		if !d.waitUnpaused(ctx) {
+			return
+		}
 
 		// Before polling, not after: a sweep replaces the cursor, so applying a page
 		// fetched with the old one and then sweeping would advance past changes the
@@ -197,10 +230,12 @@ func (d *Downloader) Run(ctx context.Context) {
 		}
 
 		changes, next, err := d.src.Changes(ctx, cursor)
+		d.mon.observe(err)
 		if err != nil {
 			if ctx.Err() != nil {
 				return
 			}
+			d.mon.count(cPollErrors, 1)
 			// An expired cursor is not a transient failure: the changes it covered
 			// no longer exist to be fetched, so retrying it never recovers. Before
 			// M7b there was no case for it and inbound sync simply stopped, forever
@@ -242,12 +277,15 @@ func (d *Downloader) Run(ctx context.Context) {
 			continue // leave the cursor where it is; the page replays idempotently
 		}
 
-		if next != "" && next != cursor {
+		advanced := next != "" && next != cursor
+		if advanced {
 			if err := d.state.SetCursor(next); err != nil {
 				d.logf("[pull] persist cursor: %v", err)
 			}
 			cursor = next
 		}
+		d.mon.count(cPolls, 1)
+		d.mon.polled(advanced)
 
 		// Adaptive cadence: stay fast while the feed is active, else back off
 		// geometrically toward Slow.
@@ -328,6 +366,9 @@ func (d *Downloader) runWithoutFeed(ctx context.Context) {
 			return
 		case <-time.After(wait):
 		}
+		if !d.waitUnpaused(ctx) {
+			return
+		}
 		// dueSweep reschedules before it runs, so a failure backs off by a whole
 		// interval rather than spinning.
 		d.dueSweep(ctx)
@@ -381,6 +422,7 @@ func (d *Downloader) resumeCursor(ctx context.Context) (string, error) {
 		return cursor, nil
 	}
 	cursor, err := d.src.StartCursor(ctx)
+	d.mon.observe(err)
 	if err != nil {
 		return "", err
 	}
@@ -434,6 +476,8 @@ func (d *Downloader) applyTo(ctx context.Context, ch provider.RemoteChange, forg
 			return err
 		}
 		d.logf("[pull] delete  %s", ch.Path)
+		d.mon.count(cRemoteDeletes, 1)
+		d.mon.applied(ch.Path, StatusDeleted)
 		forget[ch.Path] = struct{}{}
 		return nil
 	}
@@ -482,6 +526,7 @@ func (d *Downloader) applyTo(ctx context.Context, ch provider.RemoteChange, forg
 			return err
 		}
 		d.logf("[pull] mkdir   %s", ch.Path)
+		d.mon.applied(ch.Path, StatusSynced)
 		return d.rememberApplied(ch.Path, dst, f)
 	}
 
@@ -495,6 +540,8 @@ func (d *Downloader) applyTo(ctx context.Context, ch provider.RemoteChange, forg
 			return err
 		}
 		d.logf("[pull] restamp %s (placeholder, %d bytes pending)", ch.Path, f.Size)
+		d.mon.count(cRestamps, 1)
+		d.mon.applied(ch.Path, StatusPlaceholder)
 		return d.rememberApplied(ch.Path, dst, f)
 	}
 
@@ -600,6 +647,10 @@ func (d *Downloader) moveLocally(ch provider.RemoteChange) bool {
 		d.logf("[pull] move %s -> %s: re-keying records: %v", ch.MovedFrom, ch.Path, err)
 	}
 	d.logf("[pull] move    %s -> %s (%d record(s) re-keyed)", ch.MovedFrom, ch.Path, n)
+	d.mon.count(cRemoteMoves, 1)
+	// A subtree's worth of paths changed name at once, and itemising them would
+	// be a walk; a subscriber is told to re-read instead.
+	d.mon.resyncAll("a directory moved: " + ch.MovedFrom + " -> " + ch.Path)
 	return true
 }
 
@@ -634,12 +685,15 @@ func (d *Downloader) materialize(ctx context.Context, rel, dst string, f *provid
 			return err
 		}
 		d.logf("[pull] download %s", rel)
+		d.mon.applied(rel, StatusSynced)
 		return nil
 	}
 	if err := d.mat.CreatePlaceholder(rel, *f); err != nil {
 		return err
 	}
 	d.logf("[pull] placeholder %s (%d bytes, hydrates on read)", rel, f.Size)
+	d.mon.count(cPlaceholders, 1)
+	d.mon.applied(rel, StatusPlaceholder)
 	return nil
 }
 
@@ -673,6 +727,7 @@ func (d *Downloader) suppressDeleted(rel string, f *provider.RemoteFile) (bool, 
 	}
 	d.logf("[pull] ignore  %s (deleted here %s ago; the remote is still reporting what we deleted)",
 		rel, age.Round(time.Second))
+	d.mon.count(cSuppressed, 1)
 	return true, nil
 }
 
@@ -700,6 +755,7 @@ func (d *Downloader) resolveConflict(ctx context.Context, rel, dst string, f *pr
 			return err
 		}
 		d.logf("[pull] conflict %s: remote newer, local kept as %s", rel, copyRel)
+		d.conflicted(rel, copyRel)
 		return d.rememberApplied(rel, dst, f)
 	}
 
@@ -713,7 +769,15 @@ func (d *Downloader) resolveConflict(ctx context.Context, rel, dst string, f *pr
 		return err
 	}
 	d.logf("[pull] conflict %s: local newer, remote saved as %s", rel, copyRel)
+	d.conflicted(rel, copyRel)
 	return nil
+}
+
+// conflicted reports a §6 resolution to the monitor.
+func (d *Downloader) conflicted(rel, copyRel string) {
+	d.mon.count(cConflicts, 1)
+	d.mon.applied(rel, StatusConflict)
+	d.mon.applied(copyRel, StatusLocalOnly)
 }
 
 // download streams the object at path into dst atomically (temp file + rename in
@@ -723,6 +787,7 @@ func (d *Downloader) download(ctx context.Context, path, dst string, modified ti
 		return err
 	}
 	rc, err := d.store.Get(ctx, path)
+	d.mon.observe(err)
 	if err != nil {
 		return err
 	}
@@ -735,10 +800,13 @@ func (d *Downloader) download(ctx context.Context, path, dst string, modified ti
 	tmpName := tmp.Name()
 	defer os.Remove(tmpName) // no-op after a successful rename
 
-	if _, err := io.Copy(tmp, rc); err != nil {
+	n, err := io.Copy(tmp, rc)
+	if err != nil {
 		tmp.Close()
 		return err
 	}
+	d.mon.count(cDownloads, 1)
+	d.mon.count(cDownloadBytes, n)
 	if err := tmp.Close(); err != nil {
 		return err
 	}

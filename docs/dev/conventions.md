@@ -221,6 +221,22 @@ backing-tree/mountpoint overlap, shared mountpoints, duplicate names, and a stat
 DB inside a backing tree. That last one needs no second mount to be wrong — the DB
 would sync itself, and its own writes would generate more events.
 
+## The control API is a view
+
+DESIGN.md §9/M14; the schema is [control-api.md](control-api.md).
+
+- **Nothing that decides what to sync reads `syncengine.Monitor`**, and nothing
+  in `internal/control` writes anything but pause, resume and shutdown.
+- **A status read never waits on `Engine.Run` and never calls a provider.** The
+  monitor's lock is never held across a send, a provider call or I/O. Status is
+  served from local state with zero bbolt commits.
+- **`unknown` is never rounded up to `synced`.** A path is `synced` only while
+  its baseline's local fingerprint still matches.
+- **Pause stops dispatch, never consumption**, and only the run loop shuts the
+  workers' gate — after it has stopped sending. Hydration is never paused.
+- **The in-tree client imports nothing internal**; it is the test that the
+  documented schema is enough.
+
 ## bbolt commits are the unit of disk cost
 
 A write transaction in either store fdatasyncs twice and rewrites every page it

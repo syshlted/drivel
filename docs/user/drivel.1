@@ -1,6 +1,6 @@
 .\" Manpage for drivel.
 .\" Render with:  man ./docs/drivel.1     or     mandoc -a docs/drivel.1
-.TH DRIVEL 1 "2026-09-09" "drivel" "User Commands"
+.TH DRIVEL 1 "2026-10-17" "drivel" "User Commands"
 .SH NAME
 drivel \- cloud-backed FUSE interceptor filesystem
 .SH SYNOPSIS
@@ -84,6 +84,38 @@ drivel \- cloud-backed FUSE interceptor filesystem
 .RB [ -pprof
 .IR addr ]
 .RB [ -pprof-allow-remote ]
+.RB [ -control ]
+.RB [ -control-socket
+.IR path ]
+.br
+.B drivel status
+.RB [ -socket
+.IR path ]
+.RB [ -name
+.IR name ]
+.RB [ -json ]
+.RB [ -d ]
+.RB [ -limit
+.IR n ]
+.RI [ path ...]
+.br
+.B drivel pause
+.RB [ -socket
+.IR path ]
+.RB [ -name
+.IR name ]
+.RB [ -for
+.IR d ]
+.br
+.B drivel resume
+.RB [ -socket
+.IR path ]
+.RB [ -name
+.IR name ]
+.br
+.B drivel stop
+.RB [ -socket
+.IR path ]
 .br
 .B mount.fuse.drivel
 .I spec dir
@@ -239,6 +271,88 @@ is what defines the
 .B compdef
 the script uses to register itself. Placed earlier it reports that and does
 nothing.
+.TP
+.B status \fR[\fIpath\fR ...]
+Ask a running
+.B drivel mount -control
+what it is doing, over its control socket. With no
+.IR path ,
+one line per mount: its state
+.RB ( idle ,
+.BR syncing ,
+.BR paused ,
+.B saturated
+while writes through the mount wait on uploads,
+.BR sweeping )
+and whether its backend is
+.BR online ,
+.B offline
+or
+.BR unknown .
+Reachability is observed from drivel's own requests and never probed; with no
+traffic for an hour it is
+.BR unknown .
+.IP
+With a
+.IR path ,
+inside one of the mounts: a file's sync status, or, for a directory, one line
+per entry in it
+.RB ( -d
+reports the directory itself instead, and
+.B -limit
+caps the listing, default 1000). The statuses are
+.BR synced ,
+.BR pending ,
+.BR uploading ,
+.BR retrying ,
+.B error
+(given up; the next sweep re-sends it),
+.BR placeholder ,
+.B conflict
+(a conflict copy sits beside it),
+.B local-only
+(a conflict copy, a special file, or a drivel temporary: deliberately not
+synced), and
+.BR unknown ,
+which means no record vouches for the file and is
+.B not
+a synonym for synced. A directory's status is never a roll-up of its contents.
+Nothing here contacts the backend.
+.B -json
+prints the API's responses as they are.
+.TP
+.B pause
+Hold a running mount's uploads, change-feed polling and sweep, for
+.B -for
+(default
+.BR 1h ,
+at most
+.BR 24h ).
+Writes through the mount are still accepted and never block; they go out when the
+pause ends. An upload already running finishes, and in lazy mode a placeholder
+that is opened is still fetched. A pause ends on its own when it expires, when it
+is holding more than ten thousand changes (with a warning), or when the mount
+stops, and is never kept across a restart. Every mount of the process, or the one
+named by
+.BR -name .
+.TP
+.B resume
+End a pause early.
+.TP
+.B stop
+Shut a running drivel down exactly as
+.B SIGTERM
+would \(em unmount, drain queued uploads, exit \(em and wait until it has.
+.IP
+All four take
+.BI -socket " path"
+for a mount started with
+.BR -control-socket ,
+and need the mount to have been started with
+.BR -control .
+The protocol is HTTP and JSON over the socket, documented for other tools in
+.I docs/dev/control-api.md
+in the source tree.
 .TP
 .B help
 Print top-level usage and exit. The flag spellings
@@ -724,6 +838,37 @@ to bind an address that is not loopback, publishing the profiling endpoint \(em
 and so the paths and some contents of synced files \(em to whoever can reach
 that address. Refused on its own, without
 .BR -pprof .
+.TP
+.B -control
+Serve the control & status API on a unix socket, so that
+.BR "drivel status" ,
+.BR pause ,
+.B resume
+and
+.B stop
+\(em and other tools \(em can reach this process. One socket serves every mount
+the process runs. Off by default: the socket names every synced path and can stop
+the process. It lives in a directory that must be owned by this user and mode
+.BR 0700 ,
+is itself
+.BR 0600 ,
+and a connection from another uid is refused where the platform reports one. A
+socket left by a crashed drivel is replaced; one a live drivel is answering on
+is not, and the second process refuses to start. Not available to the
+.BR mount (8)
+helper.
+.TP
+.BI -control-socket " path"
+Where
+.B -control
+puts its socket, instead of
+.IR $XDG_RUNTIME_DIR/drivel/control.sock .
+With
+.B XDG_RUNTIME_DIR
+unset there is no default, and
+.B -control
+alone is refused. Refused without
+.BR -control .
 .SH LOGIN OPTIONS
 .TP
 .BI -account " name"
@@ -1410,7 +1555,16 @@ the mount is unmounted first (flushing pending FUSE events), then the sync engin
 drains its bounded queue of in-flight uploads before the process exits. A second
 .B Ctrl-C
 forces an immediate exit.
+.B drivel stop
+(with
+.BR -control )
+takes the same path, and the log says which of the two it was.
 .SH FILES
+.TP
+.I $XDG_RUNTIME_DIR/drivel/control.sock
+The control socket, while a mount started with
+.B -control
+is running. Removed when it exits.
 .TP
 .I /sbin/mount.fuse.drivel
 Symlink to the drivel binary, making it the

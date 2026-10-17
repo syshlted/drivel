@@ -90,6 +90,21 @@ var completionHints = map[string]hint{
 	"mount/debug":              {"enable FUSE debug logging", completion.None, nil, ""},
 	"mount/pprof":              {"serve net/http/pprof on this address, e.g. localhost:6060", completion.Opaque, nil, "address"},
 	"mount/pprof-allow-remote": {"let -pprof bind a non-loopback address, publishing this process's heap", completion.None, nil, ""},
+	"mount/control":            {"serve the control & status API on a unix socket", completion.None, nil, ""},
+	"mount/control-socket":     {"with -control, the socket path to serve on", completion.File, nil, "socket"},
+
+	// --- status / pause / resume / stop --------------------------------------
+	"status/socket": {"control socket of the drivel to ask", completion.File, nil, "socket"},
+	"status/name":   {"report on this mount only", completion.Opaque, nil, "mount name"},
+	"status/json":   {"print the API's JSON instead of a table", completion.None, nil, ""},
+	"status/d":      {"report a directory itself rather than its contents", completion.None, nil, ""},
+	"status/limit":  {"list at most this many entries of a directory", completion.Opaque, nil, "count"},
+	"pause/socket":  {"control socket of the drivel to pause", completion.File, nil, "socket"},
+	"pause/name":    {"pause this mount only", completion.Opaque, nil, "mount name"},
+	"pause/for":     {"how long the pause lasts (at most 24h)", completion.Opaque, nil, "duration"},
+	"resume/socket": {"control socket of the drivel to resume", completion.File, nil, "socket"},
+	"resume/name":   {"resume this mount only", completion.Opaque, nil, "mount name"},
+	"stop/socket":   {"control socket of the drivel to stop", completion.File, nil, "socket"},
 
 	// --- login ---------------------------------------------------------------
 	"login/account":       {"store this login as a named account under $XDG_CONFIG_HOME/drivel", completion.Opaque, nil, "account name"},
@@ -137,9 +152,25 @@ func completionApp() (completion.App, error) {
 	if err != nil {
 		return completion.App{}, err
 	}
+	commands := []completion.Command{login, mount}
+	for _, c := range []struct {
+		name, summary string
+		fset          *flag.FlagSet
+	}{
+		{"status", "Ask a running drivel what it is syncing", statusFlagSet(&statusCLI{})},
+		{"pause", "Hold a running drivel's syncing for a while", pauseFlagSet(&pauseCLI{})},
+		{"resume", "End a pause", resumeFlagSet(&ctlFlags{})},
+		{"stop", "Unmount and drain a running drivel", stopFlagSet(&ctlFlags{})},
+	} {
+		cmd, err := describe(c.name, c.summary, c.fset)
+		if err != nil {
+			return completion.App{}, err
+		}
+		commands = append(commands, cmd)
+	}
 	app := completion.App{
 		Name:     "drivel",
-		Commands: []completion.Command{login, mount},
+		Commands: commands,
 		Extra: []completion.Command{
 			{Name: "help", Summary: "Show top-level usage"},
 			{Name: "completion", Summary: "Print the completion script for bash or zsh"},

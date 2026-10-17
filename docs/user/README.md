@@ -43,11 +43,14 @@ Then, as you need them:
   hit, and what each one means.
 - **[Platform support](platforms.md)** — Linux, macOS, FreeBSD; what is verified
   and what is not.
+- **[Status, pause and stop](control.md)** — ask a running mount whether a file
+  is synced, hold its syncing for a while, or stop it cleanly; off unless you
+  start it with `-control`.
 - **[Mounting from /etc/fstab](fstab.md)** — describe a mount as an fstab line and
   bring it up with `mount -a` or at boot, with no terminal attached. Linux only.
 
-The [`drivel(1)` man page](drivel.1) is the complete reference for both
-subcommands: `man ./docs/user/drivel.1`.
+The [`drivel(1)` man page](drivel.1) is the complete reference for every
+subcommand: `man ./docs/user/drivel.1`.
 
 ## What Drivel is not
 

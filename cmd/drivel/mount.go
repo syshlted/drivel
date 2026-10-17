@@ -92,7 +92,7 @@ var mountListingFlags = []string{"list", "full"}
 // mountProcessFlags describe how this *process* reports and can be inspected,
 // rather than what it mounts. They are the ones that compose with -config, and
 // the ones -list has nothing to do with.
-var mountProcessFlags = []string{"debug", "pprof", "pprof-allow-remote"}
+var mountProcessFlags = []string{"debug", "pprof", "pprof-allow-remote", "control", "control-socket"}
 
 // mountCLI is everything `drivel mount` accepts: the mount description in
 // specFlags, plus the flags that describe how this *process* reports rather than
@@ -108,6 +108,11 @@ type mountCLI struct {
 
 	pprofAddr   string
 	pprofRemote bool
+
+	// The control & status API (M14). Process flags, like -pprof: one socket
+	// serves every mount this process runs.
+	control       bool
+	controlSocket string
 }
 
 // mountFlagSet defines the mount command's flags, binding them into c.
@@ -146,6 +151,8 @@ func mountFlagSet(c *mountCLI) *flag.FlagSet {
 	fset.BoolVar(&c.debug, "debug", false, "enable FUSE debug logging")
 	fset.StringVar(&c.pprofAddr, "pprof", "", "serve net/http/pprof on this address for goroutine and heap profiling; a bare port means loopback, and a non-loopback address needs -pprof-allow-remote; empty disables it")
 	fset.BoolVar(&c.pprofRemote, "pprof-allow-remote", false, "permit -pprof to bind an address other than loopback, publishing this process's heap — and so the paths and some contents of synced files — to whoever can reach it")
+	fset.BoolVar(&c.control, "control", false, "serve the control & status API on a unix socket, so `drivel status`, `pause`, `resume` and `stop` — and other tools — can reach this process; off by default because the socket names every synced path and can stop the process")
+	fset.StringVar(&c.controlSocket, "control-socket", "", "with -control, the socket's path instead of $XDG_RUNTIME_DIR/drivel/control.sock; its directory must be private to you (0700)")
 	return fset
 }
 
@@ -169,6 +176,9 @@ func runMount(args []string) error {
 	if err := validatePprofFlags(c.pprofAddr, given["pprof-allow-remote"]); err != nil {
 		return err
 	}
+	if err := validateControlFlags(c.control, given["control-socket"]); err != nil {
+		return err
+	}
 
 	specs, err := mountSpecs(fset, given, c.specFlags)
 	if err != nil {
@@ -180,8 +190,12 @@ func runMount(args []string) error {
 		return err
 	}
 
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	sigCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	// The control API's shutdown cancels this, which is the signal's own context
+	// one level down: the same unmount, the same drain, a different cause.
+	ctx, shutdown := context.WithCancelCause(sigCtx)
+	defer shutdown(nil)
 
 	// Before the mounts, so a bad address fails while nothing is mounted yet, and
 	// so a mount that hangs during startup is itself profilable.
@@ -202,6 +216,16 @@ func runMount(args []string) error {
 	defer a.Close() //nolint:errcheck // the process is exiting; Run's error is the one that matters
 	if a.Len() > 1 {
 		log.Printf("serving %d mounts", a.Len())
+	}
+	// After the mounts are open, so every one of them is addressable from the
+	// first request, and closed before a.Close by defer order, so no status read
+	// reaches a state DB that has been shut.
+	if c.control {
+		stopControl, err := startControl(c.controlSocket, a, shutdown)
+		if err != nil {
+			return err
+		}
+		defer stopControl()
 	}
 	return a.Run(ctx)
 }
