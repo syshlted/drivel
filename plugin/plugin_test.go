@@ -420,10 +420,44 @@ func TestPluginServesCreateAndTrash(t *testing.T) {
 	}
 }
 
-// Neither is reachable on a backend that did not offer it: the proxy has both
-// methods, so this is rule 1 for the two new capabilities.
+// Copy crosses the socket with both of its refusals.
+func TestPluginServesCopy(t *testing.T) {
+	store, _ := openFake(t, map[string]any{
+		"capabilities": []string{"copier"},
+		"seed":         []string{"a.txt=body", "taken.txt=old"},
+	})
+	ctx := context.Background()
+	c, ok := provider.AsCopier(store)
+	if !ok {
+		t.Fatal("no copier")
+	}
+	if _, err := c.Copy(ctx, "a.txt", "copies/a.txt"); err != nil {
+		t.Fatalf("Copy: %v", err)
+	}
+	rc, err := store.Get(ctx, "copies/a.txt")
+	if err != nil {
+		t.Fatalf("Get of the copy: %v", err)
+	}
+	got, _ := io.ReadAll(rc)
+	_ = rc.Close()
+	if string(got) != "body" {
+		t.Errorf("copy = %q; want body", got)
+	}
+	if _, err := c.Copy(ctx, "a.txt", "taken.txt"); !errors.Is(err, provider.ErrExist) {
+		t.Errorf("Copy over an occupied path = %v; want ErrExist", err)
+	}
+	if _, err := c.Copy(ctx, "never.txt", "x.txt"); !errors.Is(err, provider.ErrNotExist) {
+		t.Errorf("Copy of an absent path = %v; want ErrNotExist", err)
+	}
+}
+
+// None is reachable on a backend that did not offer it: the proxy has every
+// method, so this is rule 1 for the three newest capabilities.
 func TestPluginWithholdsUndeclaredCreateAndTrash(t *testing.T) {
 	store, _ := openFake(t, map[string]any{"capabilities": []string{"enumerator"}})
+	if _, ok := provider.AsCopier(store); ok {
+		t.Error("AsCopier succeeded for a backend that did not offer it")
+	}
 	if _, ok := provider.AsCreator(store); ok {
 		t.Error("AsCreator succeeded for a backend that did not offer it")
 	}

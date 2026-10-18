@@ -311,6 +311,10 @@ func (c *Conflicts) keepRemote(ctx context.Context, env conflictEnv, rel string,
 			c.remember(env, rel, identity)
 			return "", nil
 		}
+		if w, ok := c.keepRemoteByCopy(ctx, env, rel, copyRel, modified); ok {
+			where = w
+			break
+		}
 		if _, err := fetchTo(ctx, env.store, rel, dst, modified, env.observe); err != nil {
 			return "", err
 		}
@@ -318,6 +322,65 @@ func (c *Conflicts) keepRemote(ctx context.Context, env conflictEnv, rel string,
 	}
 	c.remember(env, rel, identity)
 	return where, nil
+}
+
+// keepRemoteByCopy keeps the remote object at rel as copyRel with the
+// backend's own copy (provider.Copier), so the loser's bytes never cross this
+// machine's network twice. It reports false when it did not keep it — no
+// Copier, a folder kept only here, or a copy the backend refused — and the
+// caller then downloads and uploads as before.
+//
+// The copy runs inline even on the pull side, where env.later would defer it:
+// it moves no bytes, and it must precede the push that is about to replace
+// the object it copies. What follows it may be deferred. With the folder on
+// both sides the local copy is downloaded from the new remote copy rather than
+// from rel, so the two are the same version by construction.
+func (c *Conflicts) keepRemoteByCopy(ctx context.Context, env conflictEnv, rel, copyRel string, modified time.Time) (string, bool) {
+	if c.action() == ConflictsDir && c.place() == ConflictsLocal {
+		return "", false
+	}
+	cp, ok := provider.AsCopier(env.store)
+	if !ok {
+		return "", false
+	}
+	crf, err := cp.Copy(ctx, rel, copyRel)
+	env.observe(err)
+	if err != nil {
+		env.logf("[sync] conflict copy %s: copying it on the remote: %v (sending it from here instead)", copyRel, err)
+		return "", false
+	}
+	switch {
+	case c.action() == ConflictsRemoteTrash:
+		return env.finish(ctx, copyRel, "the remote trash, as "+copyRel+" (being trashed)", func(ctx context.Context) string {
+			if err := c.trashRemote(ctx, env, copyRel); err != nil {
+				env.logf("[sync] conflict copy %s: %v (left on the remote, untrashed)", copyRel, err)
+				return copyRel + " (on the remote, because trashing it failed)"
+			}
+			return "the remote trash, as " + copyRel
+		}), true
+	case c.place() == ConflictsRemote:
+		return copyRel + " (on the remote)", true
+	}
+	dst := env.abs(copyRel)
+	if _, err := fetchTo(ctx, env.store, copyRel, dst, modified, env.observe); err != nil {
+		// Kept on the remote, and the folder syncs, so the sweep brings it here.
+		env.logf("[sync] conflict copy %s: downloading it: %v (on the remote; the next sweep fetches it)", copyRel, err)
+		return copyRel + " (on the remote; download pending)", true
+	}
+	if env.state != nil {
+		var size int64
+		var mtime time.Time
+		if fi, err := os.Stat(dst); err == nil {
+			size, mtime = state.FingerprintOf(fi)
+		}
+		if err := env.state.SetEcho(copyRel, state.Echo{
+			Hash: crf.Hash, Version: crf.Version, At: time.Now(),
+			LocalSize: size, LocalMTime: mtime,
+		}); err != nil {
+			env.logf("[sync] conflict copy %s: recording it: %v", copyRel, err)
+		}
+	}
+	return copyRel + " (here and on the remote)", true
 }
 
 // publish puts a copy already in the local folder where the policy wants it,

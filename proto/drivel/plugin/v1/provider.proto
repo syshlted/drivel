@@ -84,6 +84,11 @@ service Provider {
   // provider.Trasher — optional. A recoverable removal whatever the backend's
   // ordinary Remove was configured to do.
   rpc Trash(RemoveRequest) returns (RemoveResponse);
+
+  // provider.Copier — optional. A copy the backend makes itself; the request's
+  // old_path is the source and new_path the copy. KIND_EXIST when the copy's
+  // path is occupied, KIND_NOT_EXIST when the source is gone.
+  rpc Copy(MoveRequest) returns (FileResponse);
 }
 
 // Content is served by the HOST and called by the plugin: random access to a

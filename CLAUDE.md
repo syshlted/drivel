@@ -60,7 +60,7 @@ bidirectional sync — don't regress it.
   store and emits an `fsevent.Event` per mutation. Reads/lookups/attrs pass through.
   `special.go` holds M15's refusals and skips; `mountopts_*.go` the compulsory
   `nodev`/`nosuid`, which is per platform for a reason (see "Special files" below).
-- `provider` — **public**: the backend seam. `Store` + the seven optional
+- `provider` — **public**: the backend seam. `Store` + the eight optional
   capability interfaces, `Registry` (kind → `Factory`, an explicit value rather
   than an `init()`-filled package map, M8), `Config` (a provider's own settings as
   the TOML the user wrote), and M9's capability negotiation (`Capability`,
@@ -1165,11 +1165,16 @@ boundaries call. Five things carry it.
    does not duplicate) stop the second copy. `SetEcho` and `ForgetMany`
    discharge the record in their own transaction; one commit per conflict. The
    local folder is also checked by name.
-5. **`remote-trash` uploads the loser and trashes it; it does not move the
+5. **`remote-trash` copies the loser and trashes the copy; it does not move the
    remote object.** Moving the original away would show every other client a
-   deletion followed by a create at the path. The cost is a download and an
-   upload of the loser. Drive's `files.copy` would avoid that and is not
-   plumbed. `local-trash` writes the freedesktop.org home trash
+   deletion followed by a create at the path. With `provider.Copier` (Drive's
+   `files.copy`) the copy is the backend's and costs no transfer, and the same
+   goes for `conflicts-dir = "remote"`/`"both"` (for `both` the local copy is
+   downloaded *from the new remote copy*, so the two are one version). The copy
+   runs **inline even on the pull side**: it must precede the push that is
+   about to replace its source, and a deferred one would copy the winner.
+   Without a Copier, or when the copy is refused, it is a download and an
+   upload, as before. `local-trash` writes the freedesktop.org home trash
    (`internal/trash`, `.trashinfo` naming the *mountpoint* path so Restore
    writes through the mount) and is refused when the trash would be inside the
    backing tree or mountpoint.
@@ -2267,8 +2272,8 @@ Ten things carry the correctness.
 
 1. **Capability detection is negotiated, not asserted, and this is the load-bearing
    change.** The host-side proxy is *one type serving every backend*, so it
-   implements all seven optional interfaces whatever is behind it — a type assertion
-   would answer "yes" seven times for every plugin, and the mount would poll a change
+   implements all eight optional interfaces whatever is behind it — a type assertion
+   would answer "yes" eight times for every plugin, and the mount would poll a change
    feed that does not exist and splice extents into a store that cannot patch. Ask
    through `provider.AsChangeSource`/`AsEnumerator`/`AsRangeGetter`/`AsRangePutter`/
    `AsContentHasher`; never `store.(provider.X)`. The invariant is **a declaration

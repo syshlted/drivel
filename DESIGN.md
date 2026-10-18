@@ -268,7 +268,11 @@ that the remote already holds something at no cost on a store whose `Put` alread
 resolves the path. Without it the engine pays a `Stat`. `Trasher` is a removal
 the user can undo whatever `Remove` is configured to do. Its absence costs one
 setting, `conflicts = "remote-trash"`, which is refused at open rather than
-quietly given a permanent deletion.
+quietly given a permanent deletion. A third followed: `Copier` is a copy the
+backend makes itself (Drive's `files.copy`), which keeps a remote loser on the
+remote without its bytes crossing this machine's link twice. Its absence costs a
+download and an upload of the loser, never correctness, and a refused copy falls
+back to exactly that.
 
 **Which of them a store offers is asked, not assumed** (M9). Until the backend could
 live in another process the question was a Go type assertion, which is exact for a

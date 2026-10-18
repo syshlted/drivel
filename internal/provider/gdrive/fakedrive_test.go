@@ -56,6 +56,7 @@ type fakeDrive struct {
 	lists   int // Files.List
 	creates int // Files.Create
 	updates int // Files.Update with a body
+	copies  int // Files.Copy
 	deletes int // Files.Delete
 
 	// nextID mints an opaque ID per create, as Drive does. It is what makes a
@@ -148,6 +149,7 @@ const fakeRootID = "root-concrete"
 
 var (
 	reFileID   = regexp.MustCompile(`^/files/([^/]+)$`)
+	reFileCopy = regexp.MustCompile(`^/files/([^/]+)/copy$`)
 	reQueryOne = regexp.MustCompile(`name = '((?:[^'\\]|\\.)*)'`)
 	reQueryTwo = regexp.MustCompile(`'([^']*)' in parents`)
 )
@@ -425,6 +427,23 @@ func (f *fakeDrive) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			f.trashLocked(got)
 		}
 		writeJSON(w, got)
+
+	case reFileCopy.MatchString(fileIDPath) && r.Method == http.MethodPost:
+		// files.copy: a new object with the source's bytes, named and parented by
+		// the request, as Drive does it — no body crosses the wire.
+		id := f.normalize(reFileCopy.FindStringSubmatch(fileIDPath)[1])
+		src, ok := f.files[id]
+		if !ok || src.Trashed {
+			writeErr(w, http.StatusNotFound, "File not found: "+id)
+			return
+		}
+		var in drive.File
+		_ = json.NewDecoder(r.Body).Decode(&in)
+		if in.Name == "" {
+			in.Name = src.Name
+		}
+		f.copies++
+		writeJSON(w, f.createLocked(&in, append([]byte(nil), f.content[id]...)))
 
 	case reFileID.MatchString(fileIDPath) && r.Method == http.MethodDelete:
 		f.deletes++

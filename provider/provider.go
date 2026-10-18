@@ -305,3 +305,22 @@ type Creator interface {
 type Trasher interface {
 	Trash(ctx context.Context, path string) error
 }
+
+// Copier is an OPTIONAL capability: a copy made by the backend, without the
+// bytes crossing the network.
+//
+// It exists for conflict copies: keeping the remote's losing version on the
+// remote (`conflicts-dir = "remote"` or `"both"`, and `conflicts =
+// "remote-trash"`) otherwise costs downloading it and uploading it again. A
+// store that would have to do that itself to copy must not implement it; the
+// engine already knows how, and doing it below the seam would hide the cost.
+//
+// Copy makes a new object at to holding the content of the object at from now,
+// creating to's missing parent directories as Put does, and returns the new
+// object. It returns an error wrapping ErrNotExist when nothing stands at from
+// and one wrapping ErrExist when something stands at to, which it leaves
+// untouched. The source may have changed since the caller last looked; the
+// returned Hash is how a caller that cares finds out.
+type Copier interface {
+	Copy(ctx context.Context, from, to string) (RemoteFile, error)
+}

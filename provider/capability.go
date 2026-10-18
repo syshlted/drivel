@@ -53,6 +53,9 @@ const (
 	CapCreator
 	// CapTrasher is Trasher: a recoverable removal, used by remote-trash.
 	CapTrasher
+	// CapCopier is Copier: a server-side copy, used to keep a remote conflict
+	// loser on the remote without moving its bytes.
+	CapCopier
 
 	// capMax is one past the last defined bit. Everything at or above it is a
 	// capability this build does not know about.
@@ -71,6 +74,7 @@ var capNames = [...]string{
 	"content-hasher",
 	"creator",
 	"trasher",
+	"copier",
 }
 
 // String names the capability, or reports the raw bit if it is one this build
@@ -203,6 +207,9 @@ func Capabilities(s Store) CapabilitySet {
 	if _, ok := s.(Trasher); ok {
 		have = have.With(CapTrasher)
 	}
+	if _, ok := s.(Copier); ok {
+		have = have.With(CapCopier)
+	}
 	if d, ok := s.(Declarer); ok {
 		have &= d.Capabilities() & AllCapabilities
 	}
@@ -273,4 +280,13 @@ func AsTrasher(s Store) (Trasher, bool) {
 	}
 	t, ok := s.(Trasher)
 	return t, ok
+}
+
+// AsCopier returns s as a Copier if it offers that capability.
+func AsCopier(s Store) (Copier, bool) {
+	if !Capabilities(s).Has(CapCopier) {
+		return nil, false
+	}
+	c, ok := s.(Copier)
+	return c, ok
 }

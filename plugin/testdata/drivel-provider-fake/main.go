@@ -218,6 +218,24 @@ func (f *fake) Trash(_ context.Context, path string) error {
 	return nil
 }
 
+func (f *fake) Copy(_ context.Context, from, to string) (provider.RemoteFile, error) {
+	if err := f.gate("copy"); err != nil {
+		return provider.RemoteFile{}, err
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	body, ok := f.files[from]
+	if !ok {
+		return provider.RemoteFile{}, fmt.Errorf("fake: %q: %w", from, provider.ErrNotExist)
+	}
+	if _, taken := f.files[to]; taken {
+		return provider.RemoteFile{}, fmt.Errorf("fake: %q: %w", to, provider.ErrExist)
+	}
+	f.files[to] = body
+	f.note("copy %s %s", from, to)
+	return f.stat(to), nil
+}
+
 func (f *fake) Mkdir(_ context.Context, path string) (provider.RemoteFile, error) {
 	if err := f.gate("mkdir"); err != nil {
 		return provider.RemoteFile{}, err

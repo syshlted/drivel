@@ -58,6 +58,7 @@ const (
 	Provider_HashContent_FullMethodName = "/drivel.plugin.v1.Provider/HashContent"
 	Provider_Create_FullMethodName      = "/drivel.plugin.v1.Provider/Create"
 	Provider_Trash_FullMethodName       = "/drivel.plugin.v1.Provider/Trash"
+	Provider_Copy_FullMethodName        = "/drivel.plugin.v1.Provider/Copy"
 )
 
 // ProviderClient is the client API for Provider service.
@@ -112,6 +113,10 @@ type ProviderClient interface {
 	// provider.Trasher — optional. A recoverable removal whatever the backend's
 	// ordinary Remove was configured to do.
 	Trash(ctx context.Context, in *RemoveRequest, opts ...grpc.CallOption) (*RemoveResponse, error)
+	// provider.Copier — optional. A copy the backend makes itself; the request's
+	// old_path is the source and new_path the copy. KIND_EXIST when the copy's
+	// path is occupied, KIND_NOT_EXIST when the source is gone.
+	Copy(ctx context.Context, in *MoveRequest, opts ...grpc.CallOption) (*FileResponse, error)
 }
 
 type providerClient struct {
@@ -309,6 +314,16 @@ func (c *providerClient) Trash(ctx context.Context, in *RemoveRequest, opts ...g
 	return out, nil
 }
 
+func (c *providerClient) Copy(ctx context.Context, in *MoveRequest, opts ...grpc.CallOption) (*FileResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(FileResponse)
+	err := c.cc.Invoke(ctx, Provider_Copy_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // ProviderServer is the server API for Provider service.
 // All implementations must embed UnimplementedProviderServer
 // for forward compatibility.
@@ -361,6 +376,10 @@ type ProviderServer interface {
 	// provider.Trasher — optional. A recoverable removal whatever the backend's
 	// ordinary Remove was configured to do.
 	Trash(context.Context, *RemoveRequest) (*RemoveResponse, error)
+	// provider.Copier — optional. A copy the backend makes itself; the request's
+	// old_path is the source and new_path the copy. KIND_EXIST when the copy's
+	// path is occupied, KIND_NOT_EXIST when the source is gone.
+	Copy(context.Context, *MoveRequest) (*FileResponse, error)
 	mustEmbedUnimplementedProviderServer()
 }
 
@@ -418,6 +437,9 @@ func (UnimplementedProviderServer) Create(grpc.ClientStreamingServer[PutRequest,
 }
 func (UnimplementedProviderServer) Trash(context.Context, *RemoveRequest) (*RemoveResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method Trash not implemented")
+}
+func (UnimplementedProviderServer) Copy(context.Context, *MoveRequest) (*FileResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method Copy not implemented")
 }
 func (UnimplementedProviderServer) mustEmbedUnimplementedProviderServer() {}
 func (UnimplementedProviderServer) testEmbeddedByValue()                  {}
@@ -681,6 +703,24 @@ func _Provider_Trash_Handler(srv interface{}, ctx context.Context, dec func(inte
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Provider_Copy_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(MoveRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ProviderServer).Copy(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Provider_Copy_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ProviderServer).Copy(ctx, req.(*MoveRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // Provider_ServiceDesc is the grpc.ServiceDesc for Provider service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -731,6 +771,10 @@ var Provider_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "Trash",
 			Handler:    _Provider_Trash_Handler,
+		},
+		{
+			MethodName: "Copy",
+			Handler:    _Provider_Copy_Handler,
 		},
 	},
 	Streams: []grpc.StreamDesc{

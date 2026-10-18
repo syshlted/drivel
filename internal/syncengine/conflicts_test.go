@@ -720,3 +720,95 @@ func TestADirectoryCrossesAPrivateConflictsFolder(t *testing.T) {
 		}
 	}
 }
+
+// copyingStore is a trashingStore whose backend can copy (provider.Copier),
+// and can be told to refuse.
+type copyingStore struct {
+	*trashingStore
+	refuse bool
+}
+
+func (s copyingStore) Copy(_ context.Context, from, to string) (provider.RemoteFile, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.refuse {
+		return provider.RemoteFile{}, errors.New("copy refused")
+	}
+	b, ok := s.content[from]
+	if !ok {
+		return provider.RemoteFile{}, provider.ErrNotExist
+	}
+	if _, taken := s.content[to]; taken {
+		return provider.RemoteFile{}, provider.ErrExist
+	}
+	s.content[to] = append([]byte(nil), b...)
+	s.record("Copy(%s,%s)", from, to)
+	return s.file(to), nil
+}
+
+// uploadsOfCopies counts the Puts of conflict copies the store received.
+func uploadsOfCopies(s *patchStore) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	n := 0
+	for _, c := range s.calls {
+		if strings.HasPrefix(c, "Put(") && strings.Contains(c, ConflictDirName) {
+			n++
+		}
+	}
+	return n
+}
+
+// With a backend that copies, keeping the remote's losing version on the
+// remote moves no bytes up: the copy is the backend's, and for the folder on
+// both sides the local one is downloaded from it.
+func TestARemoteLoserIsKeptByTheBackendsCopy(t *testing.T) {
+	for _, c := range []*Conflicts{{Place: ConflictsBoth}, {Place: ConflictsRemote}, {Action: ConflictsRemoteTrash}} {
+		t.Run(c.String(), func(t *testing.T) {
+			ts := newTrashingStore()
+			dir, st, _, err := pushOver(t, copyingStore{trashingStore: ts}, ts.patchStore, c)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if n := uploadsOfCopies(ts.patchStore); n != 0 {
+				t.Errorf("%d conflict cop(ies) uploaded; want the backend to copy", n)
+			}
+			if got := string(ts.remoteBytes("a.txt")); got != "ours" {
+				t.Errorf("remote a.txt = %q; the local edit should win", got)
+			}
+			switch c.action() {
+			case ConflictsRemoteTrash:
+				if onlyValue(ts.trashed2()) != "theirs" || len(remoteCopies(ts.patchStore)) != 0 {
+					t.Errorf("trashed = %v, left = %v; want the loser trashed", ts.trashed2(), remoteCopies(ts.patchStore))
+				}
+			default:
+				if onlyValue(remoteCopies(ts.patchStore)) != "theirs" {
+					t.Errorf("remote copies = %v; want the loser", remoteCopies(ts.patchStore))
+				}
+			}
+			local := localCopies(t, dir)
+			if want := c.place() == ConflictsBoth && c.action() == ConflictsDir; (onlyValue(local) == "theirs") != want {
+				t.Errorf("local copies = %v; want one only with the folder on both sides", local)
+			}
+			if c.place() == ConflictsBoth && c.action() == ConflictsDir {
+				for name := range local {
+					if _, ok, _ := st.GetEcho(ConflictDirName + "/" + name); !ok {
+						t.Errorf("the copy %s has no baseline, so its echo would read as a new remote file", name)
+					}
+				}
+			}
+		})
+	}
+}
+
+// A copy the backend refuses falls back to sending the bytes from here.
+func TestARefusedBackendCopyFallsBackToAnUpload(t *testing.T) {
+	ts := newTrashingStore()
+	_, _, _, err := pushOver(t, copyingStore{trashingStore: ts, refuse: true}, ts.patchStore, &Conflicts{Place: ConflictsRemote})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if onlyValue(remoteCopies(ts.patchStore)) != "theirs" || uploadsOfCopies(ts.patchStore) != 1 {
+		t.Errorf("remote copies = %v after %d upload(s); want the loser uploaded once", remoteCopies(ts.patchStore), uploadsOfCopies(ts.patchStore))
+	}
+}

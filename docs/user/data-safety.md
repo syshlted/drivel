@@ -93,10 +93,13 @@ A few things follow from those choices:
   download that would replace it fails and is retried.
 - **`overwrite` also skips the first-upload check** described below. Use it for
   a mount nothing else writes to, such as a one-way backup.
-- **`remote-trash` downloads the losing remote version and uploads it again** to
-  trash it, so a large file costs its size twice. On Drive, trashing on its own
-  would have needed no transfer, but the file then has to move away from its
-  path, which every other machine would see as a deletion followed by a new file.
+- **On Google Drive, keeping the remote's losing version on the remote costs no
+  transfer.** Drive copies it itself, for `remote-trash` and for a
+  `.drivel-conflicts` folder on the remote or on both sides. `remote-trash`
+  trashes that copy rather than the original, because moving the original away
+  from its path would look to every other machine like a deletion followed by a
+  new file. On a backend that cannot copy, the losing version is downloaded and
+  uploaded again, so a large file costs its size twice.
 
 Copies made before 18 October 2026 are beside their file instead, as
 `report (conflict 2026-09-07 14-22-08).txt`, and stay local-only. Drivel still

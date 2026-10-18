@@ -195,6 +195,19 @@ func (s *remoteStore) Trash(ctx context.Context, path string) error {
 	return nil
 }
 
+// Copy is a server-side copy (provider.Copier).
+func (s *remoteStore) Copy(ctx context.Context, from, to string) (provider.RemoteFile, error) {
+	api, _, err := s.sess.acquire(ctx)
+	if err != nil {
+		return provider.RemoteFile{}, err
+	}
+	resp, err := api.Copy(ctx, &pb.MoveRequest{OldPath: from, NewPath: to})
+	if err != nil {
+		return provider.RemoteFile{}, decodeError(err)
+	}
+	return fileFromPB(resp.GetFile()), nil
+}
+
 func (s *remoteStore) Get(ctx context.Context, path string) (io.ReadCloser, error) {
 	api, _, err := s.sess.acquire(ctx)
 	if err != nil {

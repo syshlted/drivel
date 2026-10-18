@@ -514,6 +514,43 @@ func (d *Drive) Trash(ctx context.Context, p string) error {
 // child on a parent no longer in the listing and drop it as outside the mount —
 // but do not write code that assumes the flag is there the moment Remove
 // returns.
+// Copy implements provider.Copier with files.copy: Drive duplicates the
+// content itself, so keeping a remote conflict loser on the remote moves no
+// bytes through this machine. Missing parents of to are created as Put creates
+// them, and an occupied to is refused, untouched.
+func (d *Drive) Copy(ctx context.Context, from, to string) (provider.RemoteFile, error) {
+	release := d.lockPath(to)
+	defer release()
+
+	d.mu.Lock()
+	srcID, ok := d.resolveLocked(ctx, from)
+	if !ok {
+		d.mu.Unlock()
+		return provider.RemoteFile{}, fmt.Errorf("copy %q: %w", from, provider.ErrNotExist)
+	}
+	if _, taken := d.resolveLocked(ctx, to); taken {
+		d.mu.Unlock()
+		return provider.RemoteFile{}, fmt.Errorf("copy to %q: %w", to, provider.ErrExist)
+	}
+	parentID, err := d.ensureDirLocked(ctx, path.Dir(to))
+	d.mu.Unlock()
+	if err != nil {
+		return provider.RemoteFile{}, classify(err)
+	}
+
+	f := &drive.File{Name: path.Base(to)}
+	if parentID != "" {
+		f.Parents = []string{parentID}
+	}
+	res, err := d.svc.Files.Copy(srcID, f).Fields(fileFields).Context(ctx).Do()
+	if err != nil {
+		return provider.RemoteFile{}, classify(err)
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.rememberLocked(ctx, to, res), nil
+}
+
 func (d *Drive) removeLocked(ctx context.Context, id string) error {
 	if d.deleteMode == DeletePermanent {
 		return d.svc.Files.Delete(id).Context(ctx).Do()

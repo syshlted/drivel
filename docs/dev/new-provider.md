@@ -227,9 +227,9 @@ not really change. Getting the encoding subtly wrong is harmless in the dangerou
 direction — hashes simply never match and every push proceeds — but you lose the
 optimisation, so it is worth a test against a real round-trip.
 
-## 3c. (Optional) Implement `Creator` and `Trasher`
+## 3c. (Optional) Implement `Creator`, `Trasher` and `Copier`
 
-Two small capabilities serve conflict handling (DESIGN.md §6).
+Three small capabilities serve conflict handling (DESIGN.md §6).
 
 ```go
 type Creator interface {
@@ -237,6 +237,9 @@ type Creator interface {
 }
 type Trasher interface {
     Trash(ctx context.Context, path string) error
+}
+type Copier interface {
+    Copy(ctx context.Context, from, to string) (provider.RemoteFile, error)
 }
 ```
 
@@ -255,6 +258,15 @@ only if the backend has a real trash. `conflicts = "remote-trash"` is refused at
 open on a store without it, which is the right answer for a backend that cannot
 keep the promise. Don't emulate a trash with a hidden folder: the group-wide
 decision against that is in DESIGN.md §9.
+
+`Copy` is a copy **the backend makes itself**: a new object at `to` with the
+content `from` holds now, missing parents created as `Put` creates them,
+`provider.ErrExist` for an occupied `to` and `provider.ErrNotExist` for an absent
+`from`. It lets the engine keep a remote conflict loser on the remote without
+downloading and re-uploading it. Implement it only if no bytes cross the network
+(Drive's `files.copy`). A copy you would have to stream through drivel is what
+the engine does already without it, and doing it below the seam would hide the
+cost.
 
 ## 4. Ship it
 

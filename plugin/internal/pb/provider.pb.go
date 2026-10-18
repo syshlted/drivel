@@ -1735,7 +1735,8 @@ const file_drivel_plugin_v1_provider_proto_rawDesc = "" +
 	"\x0eKIND_NOT_EXIST\x10\x01\x12\x17\n" +
 	"\x13KIND_CURSOR_EXPIRED\x10\x02\x12\x0e\n" +
 	"\n" +
-	"KIND_EXIST\x10\x032\xc8\t\n" +
+	"KIND_EXIST\x10\x032\x8f\n" +
+	"\n" +
 	"\bProvider\x12E\n" +
 	"\x04Open\x12\x1d.drivel.plugin.v1.OpenRequest\x1a\x1e.drivel.plugin.v1.OpenResponse\x12H\n" +
 	"\x05Close\x12\x1e.drivel.plugin.v1.CloseRequest\x1a\x1f.drivel.plugin.v1.CloseResponse\x12E\n" +
@@ -1752,7 +1753,8 @@ const file_drivel_plugin_v1_provider_proto_rawDesc = "" +
 	"\bPutRange\x12!.drivel.plugin.v1.PutRangeRequest\x1a\x1e.drivel.plugin.v1.FileResponse\x12O\n" +
 	"\vHashContent\x12\x17.drivel.plugin.v1.Chunk\x1a%.drivel.plugin.v1.HashContentResponse(\x01\x12H\n" +
 	"\x06Create\x12\x1c.drivel.plugin.v1.PutRequest\x1a\x1e.drivel.plugin.v1.FileResponse(\x01\x12J\n" +
-	"\x05Trash\x12\x1f.drivel.plugin.v1.RemoveRequest\x1a .drivel.plugin.v1.RemoveResponse2V\n" +
+	"\x05Trash\x12\x1f.drivel.plugin.v1.RemoveRequest\x1a .drivel.plugin.v1.RemoveResponse\x12E\n" +
+	"\x04Copy\x12\x1d.drivel.plugin.v1.MoveRequest\x1a\x1e.drivel.plugin.v1.FileResponse2V\n" +
 	"\aContent\x12K\n" +
 	"\x06ReadAt\x12\x1f.drivel.plugin.v1.ReadAtRequest\x1a .drivel.plugin.v1.ReadAtResponseB2Z0github.com/syshlted/drivel/plugin/internal/pb;pbb\x06proto3"
 
@@ -1828,26 +1830,28 @@ var file_drivel_plugin_v1_provider_proto_depIdxs = []int32{
 	7,  // 21: drivel.plugin.v1.Provider.HashContent:input_type -> drivel.plugin.v1.Chunk
 	8,  // 22: drivel.plugin.v1.Provider.Create:input_type -> drivel.plugin.v1.PutRequest
 	12, // 23: drivel.plugin.v1.Provider.Trash:input_type -> drivel.plugin.v1.RemoveRequest
-	27, // 24: drivel.plugin.v1.Content.ReadAt:input_type -> drivel.plugin.v1.ReadAtRequest
-	2,  // 25: drivel.plugin.v1.Provider.Open:output_type -> drivel.plugin.v1.OpenResponse
-	4,  // 26: drivel.plugin.v1.Provider.Close:output_type -> drivel.plugin.v1.CloseResponse
-	9,  // 27: drivel.plugin.v1.Provider.Put:output_type -> drivel.plugin.v1.FileResponse
-	9,  // 28: drivel.plugin.v1.Provider.Mkdir:output_type -> drivel.plugin.v1.FileResponse
-	9,  // 29: drivel.plugin.v1.Provider.Move:output_type -> drivel.plugin.v1.FileResponse
-	13, // 30: drivel.plugin.v1.Provider.Remove:output_type -> drivel.plugin.v1.RemoveResponse
-	7,  // 31: drivel.plugin.v1.Provider.Get:output_type -> drivel.plugin.v1.Chunk
-	16, // 32: drivel.plugin.v1.Provider.Stat:output_type -> drivel.plugin.v1.StatResponse
-	18, // 33: drivel.plugin.v1.Provider.StartCursor:output_type -> drivel.plugin.v1.StartCursorResponse
-	20, // 34: drivel.plugin.v1.Provider.Changes:output_type -> drivel.plugin.v1.ChangesResponse
-	22, // 35: drivel.plugin.v1.Provider.Enumerate:output_type -> drivel.plugin.v1.EnumerateResponse
-	7,  // 36: drivel.plugin.v1.Provider.GetRange:output_type -> drivel.plugin.v1.Chunk
-	9,  // 37: drivel.plugin.v1.Provider.PutRange:output_type -> drivel.plugin.v1.FileResponse
-	26, // 38: drivel.plugin.v1.Provider.HashContent:output_type -> drivel.plugin.v1.HashContentResponse
-	9,  // 39: drivel.plugin.v1.Provider.Create:output_type -> drivel.plugin.v1.FileResponse
-	13, // 40: drivel.plugin.v1.Provider.Trash:output_type -> drivel.plugin.v1.RemoveResponse
-	28, // 41: drivel.plugin.v1.Content.ReadAt:output_type -> drivel.plugin.v1.ReadAtResponse
-	25, // [25:42] is the sub-list for method output_type
-	8,  // [8:25] is the sub-list for method input_type
+	11, // 24: drivel.plugin.v1.Provider.Copy:input_type -> drivel.plugin.v1.MoveRequest
+	27, // 25: drivel.plugin.v1.Content.ReadAt:input_type -> drivel.plugin.v1.ReadAtRequest
+	2,  // 26: drivel.plugin.v1.Provider.Open:output_type -> drivel.plugin.v1.OpenResponse
+	4,  // 27: drivel.plugin.v1.Provider.Close:output_type -> drivel.plugin.v1.CloseResponse
+	9,  // 28: drivel.plugin.v1.Provider.Put:output_type -> drivel.plugin.v1.FileResponse
+	9,  // 29: drivel.plugin.v1.Provider.Mkdir:output_type -> drivel.plugin.v1.FileResponse
+	9,  // 30: drivel.plugin.v1.Provider.Move:output_type -> drivel.plugin.v1.FileResponse
+	13, // 31: drivel.plugin.v1.Provider.Remove:output_type -> drivel.plugin.v1.RemoveResponse
+	7,  // 32: drivel.plugin.v1.Provider.Get:output_type -> drivel.plugin.v1.Chunk
+	16, // 33: drivel.plugin.v1.Provider.Stat:output_type -> drivel.plugin.v1.StatResponse
+	18, // 34: drivel.plugin.v1.Provider.StartCursor:output_type -> drivel.plugin.v1.StartCursorResponse
+	20, // 35: drivel.plugin.v1.Provider.Changes:output_type -> drivel.plugin.v1.ChangesResponse
+	22, // 36: drivel.plugin.v1.Provider.Enumerate:output_type -> drivel.plugin.v1.EnumerateResponse
+	7,  // 37: drivel.plugin.v1.Provider.GetRange:output_type -> drivel.plugin.v1.Chunk
+	9,  // 38: drivel.plugin.v1.Provider.PutRange:output_type -> drivel.plugin.v1.FileResponse
+	26, // 39: drivel.plugin.v1.Provider.HashContent:output_type -> drivel.plugin.v1.HashContentResponse
+	9,  // 40: drivel.plugin.v1.Provider.Create:output_type -> drivel.plugin.v1.FileResponse
+	13, // 41: drivel.plugin.v1.Provider.Trash:output_type -> drivel.plugin.v1.RemoveResponse
+	9,  // 42: drivel.plugin.v1.Provider.Copy:output_type -> drivel.plugin.v1.FileResponse
+	28, // 43: drivel.plugin.v1.Content.ReadAt:output_type -> drivel.plugin.v1.ReadAtResponse
+	26, // [26:44] is the sub-list for method output_type
+	8,  // [8:26] is the sub-list for method input_type
 	8,  // [8:8] is the sub-list for extension type_name
 	8,  // [8:8] is the sub-list for extension extendee
 	0,  // [0:8] is the sub-list for field type_name

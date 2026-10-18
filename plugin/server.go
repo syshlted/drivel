@@ -233,6 +233,22 @@ func (s *server) Trash(ctx context.Context, req *pb.RemoveRequest) (*pb.RemoveRe
 	return &pb.RemoveResponse{}, nil
 }
 
+func (s *server) Copy(ctx context.Context, req *pb.MoveRequest) (*pb.FileResponse, error) {
+	store, err := s.current()
+	if err != nil {
+		return nil, err
+	}
+	c, ok := provider.AsCopier(store)
+	if !ok {
+		return nil, unsupported(provider.CapCopier)
+	}
+	rf, err := c.Copy(ctx, req.GetOldPath(), req.GetNewPath())
+	if err != nil {
+		return nil, encodeError(err)
+	}
+	return &pb.FileResponse{File: fileToPB(rf)}, nil
+}
+
 func (s *server) Get(req *pb.GetRequest, stream pb.Provider_GetServer) error {
 	store, err := s.current()
 	if err != nil {
