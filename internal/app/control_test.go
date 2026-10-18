@@ -97,17 +97,21 @@ func TestAnAPIShutdownDrainsLikeASignal(t *testing.T) {
 				return d.DialContext(ctx, "unix", sock)
 			}}}
 			// The status of a write still in the debounce map, through the real
-			// mount's wiring: pending, and not synced.
+			// mount's wiring: pending, and not synced. Waited for rather than read
+			// once, because a new file's event leaves with its RELEASE, which the
+			// kernel sends after close(2) has already returned.
 			var st struct {
 				Status string `json:"status"`
 			}
-			resp, err := client.Get("http://drivel/v1/mounts/test/status?path=f00.bin")
-			if err != nil {
-				t.Fatal(err)
-			}
-			_ = json.NewDecoder(resp.Body).Decode(&st)
-			resp.Body.Close()
-			if st.Status != "pending" {
+			if !waitFor(5*time.Second, func() bool {
+				resp, err := client.Get("http://drivel/v1/mounts/test/status?path=f00.bin")
+				if err != nil {
+					return false
+				}
+				_ = json.NewDecoder(resp.Body).Decode(&st)
+				resp.Body.Close()
+				return st.Status == "pending"
+			}) {
 				t.Errorf("a write waiting out the push delay reads %q; want pending", st.Status)
 			}
 			store.mu.Lock()

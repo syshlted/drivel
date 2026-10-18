@@ -147,7 +147,8 @@ What it will **not** do:
 - It cannot hold a file forever. A file changed again inside every window is
   still uploaded, on a bound derived from the delay, so a busy file cannot starve.
 - It has no effect on a file that is held open and never closed — a database, a
-  VM disk image, a log an application keeps open. Drivel does not see those
+  VM disk image, a log an application keeps open, or a new file still being
+  written. Drivel does not see those
   changes until the file is closed; until then they are picked up by the periodic
   sweep (`sweep-interval`), not by this.
 - It changes nothing about conflicts. A longer window means a longer period in

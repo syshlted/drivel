@@ -775,7 +775,8 @@ files.
 .IP
 It cannot hold a file indefinitely: one changed again inside every window is still
 uploaded, on a bound derived from the delay. It has no effect at all on a file
-that is held open and never closed \(em a database, a VM image, a log \(em whose
+that is held open and never closed \(em a database, a VM image, a log, a new file
+still being written \(em whose
 changes are not seen until it is closed and are otherwise picked up by
 .BR -sweep-interval .
 And it does not reduce conflicts; a longer window leaves more time for the remote

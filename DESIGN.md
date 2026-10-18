@@ -1317,8 +1317,11 @@ are both lossy and racy.
    `Release` becomes one upload) and serializes per-path to avoid reordering.
    The window is `-push-delay` (config `push-delay`, default 300ms). It is short
    by default because what it merges is already coarse: `OpWrite` is emitted once
-   per *close*, not once per `write(2)` (§2.1), so a 50 GB copy arrives as one
-   `OpCreate` and one `OpWrite` rather than as millions of events. Raising it
+   per *close*, not once per `write(2)` (§2.1), and a new file's `OpCreate` is
+   emitted by the creating handle's close rather than by `Create` (2026-10-18),
+   so a 50 GB copy arrives as one event rather than as millions — or as the two
+   it used to be, which the window could merge only for a copy finishing inside
+   it, so every larger one was uploaded twice (MC-40). Raising it
    buys quota — a file rewritten repeatedly uploads once per window — and drains
    the outbound queue on a longer cycle, which is what keeps a bulk import of
    small files from filling the event channel and back-pressuring the FUSE
@@ -4000,7 +4003,7 @@ this whole group walks through, so it is a precondition rather than a note.
     protocol would be available unmodified and is rejected twice over: `net/rpc`
     has no streaming, while `Put` is a client stream and `Get` a server stream of
     `Chunk`s — buffering a whole file in memory is fatal for the 50 GB copy that
-    arrives as one `OpCreate` plus one `OpWrite`, and hand-rolling chunking over
+    arrives as one event, and hand-rolling chunking over
     the `MuxBroker` reimplements on the data path what gRPC already does — and the
     stdlib package is frozen with its own documentation pointing at gRPC. The
     protocol is also already generated, committed, and guarded by `make

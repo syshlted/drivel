@@ -156,10 +156,15 @@ func (n *node) Create(ctx context.Context, name string, flags, mode uint32, out 
 	inode, fh, ff, errno := n.LoopbackNode.Create(ctx, name, flags, mode, out)
 	if errno == 0 {
 		path := n.childPath(name)
-		n.emit(fsevent.Event{Op: fsevent.OpCreate, Path: path})
+		// No event yet: the handle emits OpCreate when it is released (file.go).
+		// Emitting here as well made every large copy two uploads — this event
+		// dispatched one push-delay later and sent whatever had been written so
+		// far, and the close sent the whole file again — because the two only
+		// coalesce for a write that finishes inside one debounce window.
+		//
 		// The file was just created or truncated, so its content is resident by
 		// definition — mark the handle so no read on it tries to fault anything in.
-		h := &fileHandle{wrapped: fh, path: path, events: n.events, hyd: n.hyd, lg: n.lg}
+		h := &fileHandle{wrapped: fh, path: path, events: n.events, hyd: n.hyd, lg: n.lg, created: true}
 		h.resident.Store(true)
 		fh = h
 	}

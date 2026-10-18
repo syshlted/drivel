@@ -708,13 +708,14 @@ roughly in descending order of how likely they are to change a decision:
     `TestUploadLineReportsTheBytesActuallySent`. Any volume figure taken from a
     log written before 2026-10-13 under-reports a growing file.
 
-    What to do about the doubling is a design question and is **not** scheduled.
-    `OpCreate`'s content push cannot simply be dropped: it is what creates an
-    empty file, so `touch` would stop syncing until something else touched it,
-    and push-on-close means a handle held open emits nothing at all. The shape to
-    consider is the mount declining to push content for a create whose handle is
-    still open, which makes the event pair one event and is a `vfs` change rather
-    than an engine one.
+    **CLOSED 2026-10-18, in the shape proposed here.** `OpCreate`'s push could
+    not simply be dropped — it is what creates an empty file, so `touch` would
+    stop syncing — so it moved: `Create` emits nothing and the creating handle's
+    `Release` emits the one `OpCreate`, written or not. The pair is one event
+    and one upload; `TestANewFileIsOneEventAtClose` fails with the old emission
+    restored. The cost is push-on-close applied to creates: a new file held open
+    is invisible until closed, where it used to be pushed as whatever it held at
+    the first window. Not re-run live.
 
 20. **A crash and an outage are not the same failure — CLOSED 2026-10-16 as M27
     part 4.** MC-44b's abandoned push is recorded for repair because giving up is
@@ -1088,8 +1089,9 @@ corroborating observation rather than the experiment.
    that was already in force so that nobody's dependency bump moves a number four
    documents quote.
 
-   **One `cp` of a large file costs two full uploads**, which is §4.19 and is also
-   the answer to §5.3's open question about MC-11's extra upload. The byte count on
+   **One `cp` of a large file costs two full uploads** (fixed 2026-10-18), which
+   is §4.19 and is also the answer to §5.3's open question about MC-11's extra
+   upload. The byte count on
    the upload line was taken before the transfer rather than measured by it, so a
    log written before 2026-10-13 under-reports any file that grew during its own
    push.

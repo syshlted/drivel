@@ -348,8 +348,9 @@ up/down differently); nothing crosses the seam for that yet.
 the engine's per-path coalescing window (`syncengine.Config.Debounce`), and three
 things about it are load-bearing. **The default is short because what it merges is
 already coarse** — `OpWrite` is emitted once per *close*, not once per `write(2)`,
-so a 50 GB copy arrives as one `OpCreate` plus one `OpWrite`, and the window is
-merging those two rather than batching a transfer; anyone reasoning about this as
+and since 2026-10-18 a *new* file's `OpCreate` is emitted by its handle's
+`Release` instead of by `Create`, so a 50 GB copy arrives as **one event**, and
+the window is merging an edit's few closes rather than batching a transfer; anyone reasoning about this as
 if writes streamed will get every trade-off backwards. **A trailing timer re-armed
 by every later change cannot bound how long a path is held**, so there is a
 max-wait deadline measured from the change that made the path pending
@@ -878,7 +879,10 @@ shutdown gap in M8 rule 1 above; **an eager SFTP mount without
 child (M9 rule 10); **one `cp` of a large file costing two full uploads**,
 because `OpCreate` and `OpWrite` can only coalesce for a write that finishes
 inside the debounce window — which is also the answer to the duplicate upload
-MC-11 recorded and the plan had sent to Tier A to be chased; and the permanent
+MC-11 recorded and the plan had sent to Tier A to be chased, and is **fixed
+2026-10-18** by emitting a new file's one event at close (`vfs` `fileHandle.created`,
+`TestANewFileIsOneEventAtClose`); a new file held open is now invisible until
+closed, which is push-on-close applied to creates too; and the permanent
 HTTP/3 downgrade in "Transport" below.
 
 **Groups II, III, IV and V are finished and Group VI is partly done** (ran

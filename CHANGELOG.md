@@ -13,6 +13,13 @@ from source with `make build`.
 
 ## Unreleased
 
+### Copying a large file uploads it once — 2026-10-18
+
+A new file that took longer than the push delay (300ms by default) to write was
+uploaded twice: once while it was still being written, and again when it was
+closed. A new file is now uploaded once, when it is closed. Like any file still
+being written, a new one held open is not uploaded until it is closed.
+
 ### SFTP cleans up abandoned upload temporaries — 2026-10-17
 
 An upload that was cut off (a killed mount, a power cut) left a hidden

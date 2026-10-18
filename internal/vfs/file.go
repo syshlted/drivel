@@ -35,6 +35,10 @@ type fileHandle struct {
 	// resident latches once the content is known to be present, so the steady-state
 	// read path costs one atomic load rather than a getxattr per operation.
 	resident atomic.Bool
+	// created marks the handle Create returned. Its Release carries the file's
+	// one event, OpCreate, whether or not anything was written: an empty file is
+	// still a file to create remotely.
+	created bool
 }
 
 // dirtyTracker records which byte extents a handle wrote, so the uploader can
@@ -195,7 +199,14 @@ func (f *fileHandle) Release(ctx context.Context) syscall.Errno {
 	// Emit the content-change event only after a successful close of a handle we
 	// actually wrote to. Coalesces a burst of Writes into one upload trigger, and
 	// carries the extents those writes touched (nil if they cannot be trusted).
-	if written, extents := f.dirty.snapshot(size); errno == 0 && written && f.events != nil {
+	written, extents := f.dirty.snapshot(size)
+	switch {
+	case f.events == nil:
+	case f.created:
+		// The file exists whatever the close returned. No extents: nothing is
+		// remote yet for a range write to patch.
+		f.events <- fsevent.Event{Op: fsevent.OpCreate, Path: f.path}
+	case errno == 0 && written:
 		f.events <- fsevent.Event{Op: fsevent.OpWrite, Path: f.path, Dirty: extents}
 	}
 	return errno

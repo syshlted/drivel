@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/syshlted/drivel/internal/fsevent"
 )
@@ -73,4 +74,56 @@ func TestPartialWriteThroughWriteOnlyHandle(t *testing.T) {
 			}
 		}
 	}
+}
+
+// A new file is one event, at close. Create used to emit OpCreate at once and
+// the close an OpWrite, and the engine coalesces those only when the writing
+// finishes inside one push-delay — so a copy of any size that took longer was
+// uploaded twice, the first time part-written (MC-40's double upload). Emit at
+// Create again and the first assertion fails.
+func TestANewFileIsOneEventAtClose(t *testing.T) {
+	backing := t.TempDir()
+	mnt, events := mountTest(t, backing, nil)
+	drain(events)
+
+	f, err := os.Create(filepath.Join(mnt, "copy.bin"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.Write(bytes.Repeat([]byte{1}, 64<<10)); err != nil {
+		t.Fatal(err)
+	}
+	var early *fsevent.Event
+	select {
+	case ev := <-events:
+		early = &ev
+	case <-time.After(300 * time.Millisecond):
+	}
+	// Closed before any verdict: a failure that left it open would hang the
+	// unmount in cleanup instead of reporting.
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if early != nil {
+		t.Fatalf("event %s %s while the new file was still open; want none until it is closed", early.Op, early.Path)
+	}
+	ev := waitEvent(t, events, fsevent.OpCreate, "copy.bin")
+	if ev.Dirty != nil {
+		t.Errorf("a new file's event carries extents %v; nothing remote exists to patch", ev.Dirty)
+	}
+	select {
+	case ev := <-events:
+		t.Errorf("a second event, %s %s, for one new file", ev.Op, ev.Path)
+	case <-time.After(300 * time.Millisecond):
+	}
+
+	// Created and never written is still a file to create remotely.
+	g, err := os.Create(filepath.Join(mnt, "empty"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := g.Close(); err != nil {
+		t.Fatal(err)
+	}
+	waitEvent(t, events, fsevent.OpCreate, "empty")
 }

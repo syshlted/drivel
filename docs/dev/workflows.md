@@ -48,9 +48,11 @@ Three details that look incidental and are not:
   with respect to each other, while unrelated paths proceed in parallel.
 - **The `OpWrite` arrives on `close`, not on each `write(2)`** — note where the
   arrow leaves the diagram. That is why `-push-delay` defaults to a value as short
-  as 300ms: it is merging an `OpCreate` with one `OpWrite`, not batching a
-  transfer, and a 50 GB copy passes through it as two events. It also means a file
-  held open and never closed produces *no* event at all, at any setting, and is
+  as 300ms: it is merging an edit's few closes, not batching a transfer, and a
+  50 GB copy passes through it as one event — a new file's `OpCreate` also leaves
+  from the creating handle's `Release`, not from `Create`, which until 2026-10-18
+  made every copy outlasting the window two uploads. It also means a file
+  held open and never closed — new or not — produces *no* event at all, at any setting, and is
   reached only by the sweep. Because each later event re-arms the timer, the
   window alone cannot bound how long a path waits; the max-wait deadline, counted
   from the change that made the path pending, is what stops a never-quiet path
