@@ -1820,8 +1820,9 @@ three, and 13-byte files.
    transaction they already commit**, so a retry that downloads costs one
    commit and §12's ratchet does not move; a push's `SetEcho` discharging it
    is right too, since the retry would have found that echo and done
-   nothing. `RenameSubtree` carries it. Not run live; real ENOSPC is still
-   MC-46's Tier B half.
+   nothing. `RenameSubtree` carries it. Real ENOSPC ran on 2026-10-18 over
+   SFTP (a full tmpfs backing store, byte-identical once it grew), but there
+   the sweep retries first, so the feed path's live half is still unrun.
 
 **One thing M27 does not close, and it is not an oversight.** An abandoned
 **deletion** is not repaired — no local content to re-send, and inferring it
