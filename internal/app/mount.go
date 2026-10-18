@@ -232,14 +232,14 @@ func Open(ctx context.Context, spec MountSpec, reg *provider.Registry) (*Mount, 
 	if spec.Lazy && spec.Provider == "" {
 		// A placeholder is a promise that the bytes can be fetched later; without a
 		// provider there is nothing to redeem it against.
-		return nil, fmt.Errorf("%s: lazy hydration needs a provider (there is nothing to hydrate from)", spec.label())
+		return nil, errors.New("lazy hydration needs a provider (there is nothing to hydrate from)")
 	}
 	if spec.Provider != "" && spec.StateDB == "" {
 		// Not merely a bad path: an engine with no state store records no echoes,
 		// and §4 echo suppression is what stops every inbound change from being
 		// re-uploaded — and what M7b uses as its delete baseline. Refuse rather
 		// than quietly running without it.
-		return nil, fmt.Errorf("%s: a provider needs a state DB (cursor + echo records)", spec.label())
+		return nil, errors.New("a provider needs a state DB (cursor + echo records)")
 	}
 	if err := os.MkdirAll(spec.Mountpoint, 0o755); err != nil {
 		return nil, fmt.Errorf("creating %s: %w", spec.Mountpoint, err)
@@ -292,10 +292,10 @@ func Open(ctx context.Context, spec MountSpec, reg *provider.Registry) (*Mount, 
 	// "full stop" should not come up, and before the provider opens because there
 	// is no reason to launch a backend for a mount that cannot run.
 	if spec.Lazy && !xattrsUsable(backing.Path) {
-		return nil, fmt.Errorf("%s: -lazy needs a backing store that holds user extended attributes, and %s cannot hold %s: "+
+		return nil, fmt.Errorf("-lazy needs a backing store that holds user extended attributes, and %s cannot hold %s: "+
 			"without it an unfetched placeholder is indistinguishable from an empty file and can be uploaded over the remote copy. "+
 			"Use eager mode, or move the backing store to a filesystem with user xattrs",
-			spec.label(), backing.Path, hydrate.XattrName)
+			backing.Path, hydrate.XattrName)
 	}
 
 	// Wire the provider if one was named; otherwise run log-only (M1 behaviour),
@@ -646,9 +646,9 @@ func (m *Mount) claimBacking(spec MountSpec, backing *mount.Backing) error {
 			continue
 		}
 		if found.Live {
-			return fmt.Errorf("%s: the %s is inside %s, the backing store of the running drivel mount %q; "+
+			return fmt.Errorf("the %s is inside %s, the backing store of the running drivel mount %q; "+
 				"syncing it from here would sync that mount's files a second time, nested one level deeper on every sweep",
-				spec.label(), c.what, found.Dir, found.Owner)
+				c.what, found.Dir, found.Owner)
 		}
 		m.logf("note: the %s is inside %s, which was the backing store of drivel mount %q (not running now); "+
 			"if that mount is started again, its sweep will leave this tree alone, but the two should not overlap",
@@ -657,7 +657,7 @@ func (m *Mount) claimBacking(spec MountSpec, backing *mount.Backing) error {
 
 	c, err := claim.Acquire(backing.Path, spec.controlName())
 	if errors.Is(err, claim.ErrHeld) {
-		return fmt.Errorf("%s: backing store %s is already being served by another drivel process: %w", spec.label(), root, err)
+		return fmt.Errorf("backing store %s is already being served by another drivel process: %w", root, err)
 	}
 	if err != nil {
 		// Not fatal: a backing store we cannot write a marker into is one the
