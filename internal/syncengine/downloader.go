@@ -1156,8 +1156,9 @@ func (d *Downloader) removeIfSynced(ctx context.Context, rel, abs string, fi os.
 		d.logf("[pull] clearing the baseline for %s: %v", rel, err)
 	}
 	// A new file still open through the mount is pushed by its own close; sent
-	// now it would go part-written (fsevent.Writing).
-	if d.rec.Push != nil && !d.rec.Writing.Has(rel) {
+	// now it would go part-written (fsevent.Writing). One changed since this
+	// process opened is already queued in the engine (engineOwns).
+	if d.rec.Push != nil && !d.rec.Writing.Has(rel) && !d.engineOwns(fi) {
 		d.rec.Push.Push(ctx, fsevent.Event{Op: fsevent.OpWrite, Path: rel})
 	}
 	return false

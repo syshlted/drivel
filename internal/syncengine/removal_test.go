@@ -101,3 +101,21 @@ func TestARemoteDirectoryDeletionRemovesASyncedTree(t *testing.T) {
 		t.Error("the directory survived")
 	}
 }
+
+// A kept file changed since this process opened changed through the mount, so
+// the engine already holds its push, and the deletion's keep does not send it
+// a second time. Before 2026-10-18 it did, and a live SFTP run logged both.
+func TestAKeptFileTheEngineHoldsIsNotPushedTwice(t *testing.T) {
+	dir, _, push, d := removalFixture(t)
+	writeFile(t, dir, "solo-edited.txt", "edited through the mount")
+	setMtime(t, dir, "solo-edited.txt", d.openedAt.Add(time.Second))
+	if err := d.apply(context.Background(), provider.RemoteChange{Path: "solo-edited.txt", Removed: true}); err != nil {
+		t.Fatal(err)
+	}
+	if got, ok := readBacking(t, dir, "solo-edited.txt"); !ok || got != "edited through the mount" {
+		t.Errorf("the edit was not kept: %q, %v", got, ok)
+	}
+	if got := push.ops(); len(got) != 0 {
+		t.Errorf("pushes = %v; want none (the engine has it queued)", got)
+	}
+}

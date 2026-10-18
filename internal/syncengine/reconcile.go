@@ -1032,7 +1032,7 @@ func (d *Downloader) repushDiverged(ctx context.Context, sw state.Sweep, rel, ab
 	if err != nil {
 		return // vanished or unreadable since the walk saw it; nothing to send
 	}
-	if !fi.ModTime().Before(d.openedAt) {
+	if d.engineOwns(fi) {
 		return
 	}
 	if e.LocalMTime.IsZero() {
@@ -1217,6 +1217,18 @@ func (d *Downloader) deleteGone(ctx context.Context, rel string, e state.Echo, s
 	forget[rel] = struct{}{}
 	d.logf("[sweep] delete  %s locally (gone remotely)", rel)
 	st.localDel++
+}
+
+// engineOwns reports whether the running engine already holds a push of the
+// file fi describes: it changed after this process opened, so it changed
+// through the mount, which queued it. It is the boundary repushDiverged uses,
+// and the feed's removal uses it to avoid uploading a kept file twice. The
+// sweep's deleteGone does not: there the walk would push the file anyway once
+// its baseline is dropped, so skipping only moves the second upload. A write
+// made under a live mount without going through it is not owned by anything
+// and is found by the walk, which reads the dropped baseline as "new locally".
+func (d *Downloader) engineOwns(fi os.FileInfo) bool {
+	return !fi.ModTime().Before(d.openedAt)
 }
 
 // matchesBaseline reports whether the local file still holds exactly the content
