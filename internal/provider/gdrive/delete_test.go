@@ -6,8 +6,11 @@
 package gdrive
 
 import (
+	"errors"
 	"strings"
 	"testing"
+
+	"github.com/syshlted/drivel/provider"
 )
 
 // The default removal puts the object in the trash rather than deleting it, and
@@ -136,5 +139,49 @@ func TestOpenRejectsUnknownDeleteMode(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "delete") {
 		t.Fatalf("error %q does not name the option that was wrong", err)
+	}
+}
+
+// Create refuses an occupied path without uploading anything: the refusal comes
+// from the resolve Put already does, so the engine's first-push guard costs no
+// request and no transfer.
+func TestCreateRefusesAnOccupiedPathWithoutUploading(t *testing.T) {
+	there := file("id-a", "a.txt", fakeRootID)
+	d, fake := newFakeDrive(t, there)
+
+	_, err := d.Create(ctx, "a.txt", strings.NewReader("new"))
+	if !errors.Is(err, provider.ErrExist) {
+		t.Fatalf("Create over an existing file = %v; want ErrExist", err)
+	}
+	if _, _, creates, _ := fake.counts(); creates != 0 {
+		t.Errorf("%d create(s) issued for a refused Create", creates)
+	}
+	if n := fake.updateCount(); n != 0 {
+		t.Errorf("%d update(s) issued for a refused Create; the existing file was touched", n)
+	}
+
+	if _, err := d.Create(ctx, "b.txt", strings.NewReader("new")); err != nil {
+		t.Fatalf("Create of a free path: %v", err)
+	}
+	if _, _, creates, _ := fake.counts(); creates != 1 {
+		t.Errorf("creates = %d after creating a free path; want 1", creates)
+	}
+}
+
+// Trash trashes even on a mount configured to delete permanently, because the
+// caller's promise is that the bytes can be restored.
+func TestTrashIgnoresThePermanentDeleteMode(t *testing.T) {
+	doomed := file("id-a", "a.txt", fakeRootID)
+	d, fake := newFakeDrive(t, doomed)
+	d.deleteMode = DeletePermanent
+
+	if err := d.Trash(ctx, "a.txt"); err != nil {
+		t.Fatalf("trash: %v", err)
+	}
+	if !fake.has(doomed.Id) || !fake.trashed(doomed.Id) {
+		t.Fatal("Trash did not leave the object in the trash")
+	}
+	if err := d.Trash(ctx, "gone.txt"); !errors.Is(err, provider.ErrNotExist) {
+		t.Errorf("Trash of an absent path = %v; want ErrNotExist", err)
 	}
 }

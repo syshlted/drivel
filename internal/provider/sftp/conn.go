@@ -28,6 +28,10 @@ import (
 // replace is remove-then-rename and briefly not atomic. See conn.rename.
 const posixRenameExt = "posix-rename@openssh.com"
 
+// hardlinkExt is OpenSSH's link(2). Create uses it because link refuses an
+// occupied destination, which makes create-if-absent atomic. See Store.Create.
+const hardlinkExt = "hardlink@openssh.com"
+
 // conn is one live SSH transport, its SFTP session, and everything about the
 // server we only learn by connecting: where the mount root actually is, and which
 // optional extensions this session advertises.
@@ -45,6 +49,9 @@ type conn struct {
 	// entry calls for taking the extension when advertised; the fallback is not
 	// merely slower, it has a window where the destination does not exist.
 	posixRename bool
+	// hardlink records whether this session can link, which is what makes
+	// Create's refusal atomic rather than a check followed by a rename.
+	hardlink bool
 }
 
 func (c *conn) close() error {
@@ -193,6 +200,7 @@ func (s *Store) dial(ctx context.Context) (*conn, error) {
 
 	c := &conn{ssh: client, cli: cli}
 	_, c.posixRename = cli.HasExtension(posixRenameExt)
+	_, c.hardlink = cli.HasExtension(hardlinkExt)
 	if c.root, err = resolveRoot(cli, s.cfg.Root); err != nil {
 		_ = cli.Close()
 		_ = client.Close()

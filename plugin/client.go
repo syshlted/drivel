@@ -81,6 +81,29 @@ func (s *remoteStore) Capabilities() provider.CapabilitySet { return s.caps }
 // ---------------------------------------------------------------- Store
 
 func (s *remoteStore) Put(ctx context.Context, path string, r io.Reader) (provider.RemoteFile, error) {
+	return s.upload(ctx, path, r, func(api pb.ProviderClient, sctx context.Context) (uploadStream, error) {
+		return api.Put(sctx)
+	})
+}
+
+// Create is Put's refusing twin (provider.Creator). It runs the same stream
+// through a different call, and the backend may refuse before it reads a byte;
+// upload already handles a backend that closes the stream mid-send, by asking
+// it why, which here is the KIND_EXIST the engine is waiting for.
+func (s *remoteStore) Create(ctx context.Context, path string, r io.Reader) (provider.RemoteFile, error) {
+	return s.upload(ctx, path, r, func(api pb.ProviderClient, sctx context.Context) (uploadStream, error) {
+		return api.Create(sctx)
+	})
+}
+
+// uploadStream is the client half of Put and Create, which share a shape.
+type uploadStream interface {
+	Send(*pb.PutRequest) error
+	CloseAndRecv() (*pb.FileResponse, error)
+}
+
+// upload streams r to path through whichever call open starts.
+func (s *remoteStore) upload(ctx context.Context, path string, r io.Reader, open func(pb.ProviderClient, context.Context) (uploadStream, error)) (provider.RemoteFile, error) {
 	api, _, err := s.sess.acquire(ctx)
 	if err != nil {
 		return provider.RemoteFile{}, err
@@ -90,7 +113,7 @@ func (s *remoteStore) Put(ctx context.Context, path string, r io.Reader) (provid
 	sctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	stream, err := api.Put(sctx)
+	stream, err := open(api, sctx)
 	if err != nil {
 		return provider.RemoteFile{}, decodeError(err)
 	}
@@ -155,6 +178,18 @@ func (s *remoteStore) Remove(ctx context.Context, path string) error {
 		return err
 	}
 	if _, err := api.Remove(ctx, &pb.RemoveRequest{Path: path}); err != nil {
+		return decodeError(err)
+	}
+	return nil
+}
+
+// Trash is a recoverable removal (provider.Trasher).
+func (s *remoteStore) Trash(ctx context.Context, path string) error {
+	api, _, err := s.sess.acquire(ctx)
+	if err != nil {
+		return err
+	}
+	if _, err := api.Trash(ctx, &pb.RemoveRequest{Path: path}); err != nil {
 		return decodeError(err)
 	}
 	return nil

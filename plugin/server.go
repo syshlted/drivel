@@ -127,6 +127,31 @@ func (s *server) Put(stream pb.Provider_PutServer) error {
 	if err != nil {
 		return err
 	}
+	return receiveUpload(stream, store.Put)
+}
+
+// Create serves provider.Creator over Put's stream shape.
+func (s *server) Create(stream pb.Provider_CreateServer) error {
+	store, err := s.current()
+	if err != nil {
+		return err
+	}
+	c, ok := provider.AsCreator(store)
+	if !ok {
+		return unsupported(provider.CapCreator)
+	}
+	return receiveUpload(stream, c.Create)
+}
+
+// uploadServer is the server half of Put and Create.
+type uploadServer interface {
+	Recv() (*pb.PutRequest, error)
+	SendAndClose(*pb.FileResponse) error
+	Context() context.Context
+}
+
+// receiveUpload turns an upload stream into one call of put.
+func receiveUpload(stream uploadServer, put func(context.Context, string, io.Reader) (provider.RemoteFile, error)) error {
 	// The first message names the path and the rest are content, so the reader
 	// handed to the backend starts only once the path is known. chunkReader does
 	// the rest: it turns the remaining messages into an io.Reader without
@@ -147,7 +172,7 @@ func (s *server) Put(stream pb.Provider_PutServer) error {
 		}
 		return msg.GetData(), nil
 	}}
-	rf, err := store.Put(stream.Context(), path, r)
+	rf, err := put(stream.Context(), path, r)
 	if err != nil {
 		return encodeError(err)
 	}
@@ -188,6 +213,21 @@ func (s *server) Remove(ctx context.Context, req *pb.RemoveRequest) (*pb.RemoveR
 		return nil, err
 	}
 	if err := store.Remove(ctx, req.GetPath()); err != nil {
+		return nil, encodeError(err)
+	}
+	return &pb.RemoveResponse{}, nil
+}
+
+func (s *server) Trash(ctx context.Context, req *pb.RemoveRequest) (*pb.RemoveResponse, error) {
+	store, err := s.current()
+	if err != nil {
+		return nil, err
+	}
+	t, ok := provider.AsTrasher(store)
+	if !ok {
+		return nil, unsupported(provider.CapTrasher)
+	}
+	if err := t.Trash(ctx, req.GetPath()); err != nil {
 		return nil, encodeError(err)
 	}
 	return &pb.RemoveResponse{}, nil

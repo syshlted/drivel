@@ -51,6 +51,7 @@ const (
 	Error_KIND_UNSPECIFIED    Error_Kind = 0
 	Error_KIND_NOT_EXIST      Error_Kind = 1 // provider.ErrNotExist
 	Error_KIND_CURSOR_EXPIRED Error_Kind = 2 // provider.ErrCursorExpired
+	Error_KIND_EXIST          Error_Kind = 3 // provider.ErrExist
 )
 
 // Enum value maps for Error_Kind.
@@ -59,11 +60,13 @@ var (
 		0: "KIND_UNSPECIFIED",
 		1: "KIND_NOT_EXIST",
 		2: "KIND_CURSOR_EXPIRED",
+		3: "KIND_EXIST",
 	}
 	Error_Kind_value = map[string]int32{
 		"KIND_UNSPECIFIED":    0,
 		"KIND_NOT_EXIST":      1,
 		"KIND_CURSOR_EXPIRED": 2,
+		"KIND_EXIST":          3,
 	}
 )
 
@@ -1722,15 +1725,17 @@ const file_drivel_plugin_v1_provider_proto_rawDesc = "" +
 	"\x06handle\x18\x03 \x01(\x04R\x06handle\"6\n" +
 	"\x0eReadAtResponse\x12\x12\n" +
 	"\x04data\x18\x01 \x01(\fR\x04data\x12\x10\n" +
-	"\x03eof\x18\x02 \x01(\bR\x03eof\"\xbc\x01\n" +
+	"\x03eof\x18\x02 \x01(\bR\x03eof\"\xcc\x01\n" +
 	"\x05Error\x120\n" +
 	"\x04kind\x18\x01 \x01(\x0e2\x1c.drivel.plugin.v1.Error.KindR\x04kind\x12\x1c\n" +
 	"\tretryable\x18\x02 \x01(\bR\tretryable\x12\x18\n" +
-	"\amessage\x18\x03 \x01(\tR\amessage\"I\n" +
+	"\amessage\x18\x03 \x01(\tR\amessage\"Y\n" +
 	"\x04Kind\x12\x14\n" +
 	"\x10KIND_UNSPECIFIED\x10\x00\x12\x12\n" +
 	"\x0eKIND_NOT_EXIST\x10\x01\x12\x17\n" +
-	"\x13KIND_CURSOR_EXPIRED\x10\x022\xb2\b\n" +
+	"\x13KIND_CURSOR_EXPIRED\x10\x02\x12\x0e\n" +
+	"\n" +
+	"KIND_EXIST\x10\x032\xc8\t\n" +
 	"\bProvider\x12E\n" +
 	"\x04Open\x12\x1d.drivel.plugin.v1.OpenRequest\x1a\x1e.drivel.plugin.v1.OpenResponse\x12H\n" +
 	"\x05Close\x12\x1e.drivel.plugin.v1.CloseRequest\x1a\x1f.drivel.plugin.v1.CloseResponse\x12E\n" +
@@ -1745,7 +1750,9 @@ const file_drivel_plugin_v1_provider_proto_rawDesc = "" +
 	"\tEnumerate\x12\".drivel.plugin.v1.EnumerateRequest\x1a#.drivel.plugin.v1.EnumerateResponse\x12H\n" +
 	"\bGetRange\x12!.drivel.plugin.v1.GetRangeRequest\x1a\x17.drivel.plugin.v1.Chunk0\x01\x12M\n" +
 	"\bPutRange\x12!.drivel.plugin.v1.PutRangeRequest\x1a\x1e.drivel.plugin.v1.FileResponse\x12O\n" +
-	"\vHashContent\x12\x17.drivel.plugin.v1.Chunk\x1a%.drivel.plugin.v1.HashContentResponse(\x012V\n" +
+	"\vHashContent\x12\x17.drivel.plugin.v1.Chunk\x1a%.drivel.plugin.v1.HashContentResponse(\x01\x12H\n" +
+	"\x06Create\x12\x1c.drivel.plugin.v1.PutRequest\x1a\x1e.drivel.plugin.v1.FileResponse(\x01\x12J\n" +
+	"\x05Trash\x12\x1f.drivel.plugin.v1.RemoveRequest\x1a .drivel.plugin.v1.RemoveResponse2V\n" +
 	"\aContent\x12K\n" +
 	"\x06ReadAt\x12\x1f.drivel.plugin.v1.ReadAtRequest\x1a .drivel.plugin.v1.ReadAtResponseB2Z0github.com/syshlted/drivel/plugin/internal/pb;pbb\x06proto3"
 
@@ -1819,24 +1826,28 @@ var file_drivel_plugin_v1_provider_proto_depIdxs = []int32{
 	23, // 19: drivel.plugin.v1.Provider.GetRange:input_type -> drivel.plugin.v1.GetRangeRequest
 	25, // 20: drivel.plugin.v1.Provider.PutRange:input_type -> drivel.plugin.v1.PutRangeRequest
 	7,  // 21: drivel.plugin.v1.Provider.HashContent:input_type -> drivel.plugin.v1.Chunk
-	27, // 22: drivel.plugin.v1.Content.ReadAt:input_type -> drivel.plugin.v1.ReadAtRequest
-	2,  // 23: drivel.plugin.v1.Provider.Open:output_type -> drivel.plugin.v1.OpenResponse
-	4,  // 24: drivel.plugin.v1.Provider.Close:output_type -> drivel.plugin.v1.CloseResponse
-	9,  // 25: drivel.plugin.v1.Provider.Put:output_type -> drivel.plugin.v1.FileResponse
-	9,  // 26: drivel.plugin.v1.Provider.Mkdir:output_type -> drivel.plugin.v1.FileResponse
-	9,  // 27: drivel.plugin.v1.Provider.Move:output_type -> drivel.plugin.v1.FileResponse
-	13, // 28: drivel.plugin.v1.Provider.Remove:output_type -> drivel.plugin.v1.RemoveResponse
-	7,  // 29: drivel.plugin.v1.Provider.Get:output_type -> drivel.plugin.v1.Chunk
-	16, // 30: drivel.plugin.v1.Provider.Stat:output_type -> drivel.plugin.v1.StatResponse
-	18, // 31: drivel.plugin.v1.Provider.StartCursor:output_type -> drivel.plugin.v1.StartCursorResponse
-	20, // 32: drivel.plugin.v1.Provider.Changes:output_type -> drivel.plugin.v1.ChangesResponse
-	22, // 33: drivel.plugin.v1.Provider.Enumerate:output_type -> drivel.plugin.v1.EnumerateResponse
-	7,  // 34: drivel.plugin.v1.Provider.GetRange:output_type -> drivel.plugin.v1.Chunk
-	9,  // 35: drivel.plugin.v1.Provider.PutRange:output_type -> drivel.plugin.v1.FileResponse
-	26, // 36: drivel.plugin.v1.Provider.HashContent:output_type -> drivel.plugin.v1.HashContentResponse
-	28, // 37: drivel.plugin.v1.Content.ReadAt:output_type -> drivel.plugin.v1.ReadAtResponse
-	23, // [23:38] is the sub-list for method output_type
-	8,  // [8:23] is the sub-list for method input_type
+	8,  // 22: drivel.plugin.v1.Provider.Create:input_type -> drivel.plugin.v1.PutRequest
+	12, // 23: drivel.plugin.v1.Provider.Trash:input_type -> drivel.plugin.v1.RemoveRequest
+	27, // 24: drivel.plugin.v1.Content.ReadAt:input_type -> drivel.plugin.v1.ReadAtRequest
+	2,  // 25: drivel.plugin.v1.Provider.Open:output_type -> drivel.plugin.v1.OpenResponse
+	4,  // 26: drivel.plugin.v1.Provider.Close:output_type -> drivel.plugin.v1.CloseResponse
+	9,  // 27: drivel.plugin.v1.Provider.Put:output_type -> drivel.plugin.v1.FileResponse
+	9,  // 28: drivel.plugin.v1.Provider.Mkdir:output_type -> drivel.plugin.v1.FileResponse
+	9,  // 29: drivel.plugin.v1.Provider.Move:output_type -> drivel.plugin.v1.FileResponse
+	13, // 30: drivel.plugin.v1.Provider.Remove:output_type -> drivel.plugin.v1.RemoveResponse
+	7,  // 31: drivel.plugin.v1.Provider.Get:output_type -> drivel.plugin.v1.Chunk
+	16, // 32: drivel.plugin.v1.Provider.Stat:output_type -> drivel.plugin.v1.StatResponse
+	18, // 33: drivel.plugin.v1.Provider.StartCursor:output_type -> drivel.plugin.v1.StartCursorResponse
+	20, // 34: drivel.plugin.v1.Provider.Changes:output_type -> drivel.plugin.v1.ChangesResponse
+	22, // 35: drivel.plugin.v1.Provider.Enumerate:output_type -> drivel.plugin.v1.EnumerateResponse
+	7,  // 36: drivel.plugin.v1.Provider.GetRange:output_type -> drivel.plugin.v1.Chunk
+	9,  // 37: drivel.plugin.v1.Provider.PutRange:output_type -> drivel.plugin.v1.FileResponse
+	26, // 38: drivel.plugin.v1.Provider.HashContent:output_type -> drivel.plugin.v1.HashContentResponse
+	9,  // 39: drivel.plugin.v1.Provider.Create:output_type -> drivel.plugin.v1.FileResponse
+	13, // 40: drivel.plugin.v1.Provider.Trash:output_type -> drivel.plugin.v1.RemoveResponse
+	28, // 41: drivel.plugin.v1.Content.ReadAt:output_type -> drivel.plugin.v1.ReadAtResponse
+	25, // [25:42] is the sub-list for method output_type
+	8,  // [8:25] is the sub-list for method input_type
 	8,  // [8:8] is the sub-list for extension type_name
 	8,  // [8:8] is the sub-list for extension extendee
 	0,  // [0:8] is the sub-list for field type_name

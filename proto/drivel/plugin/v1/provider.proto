@@ -74,6 +74,16 @@ service Provider {
 
   // provider.ContentHasher — optional. Streamed for the same reason Put is.
   rpc HashContent(stream Chunk) returns (HashContentResponse);
+
+  // provider.Creator — optional. Put's shape, refusing with KIND_EXIST when the
+  // path is occupied. A separate call rather than a flag on Put on purpose: an
+  // older plugin would ignore an unknown field and overwrite, while an unknown
+  // call fails, and the capability gate means the host never makes one anyway.
+  rpc Create(stream PutRequest) returns (FileResponse);
+
+  // provider.Trasher — optional. A recoverable removal whatever the backend's
+  // ordinary Remove was configured to do.
+  rpc Trash(RemoveRequest) returns (RemoveResponse);
 }
 
 // Content is served by the HOST and called by the plugin: random access to a
@@ -277,6 +287,7 @@ message Error {
     KIND_UNSPECIFIED = 0;
     KIND_NOT_EXIST = 1;      // provider.ErrNotExist
     KIND_CURSOR_EXPIRED = 2; // provider.ErrCursorExpired
+    KIND_EXIST = 3;          // provider.ErrExist
   }
   Kind kind = 1;
   // retryable is provider.IsRetryable's answer, computed on the plugin side

@@ -374,7 +374,65 @@ func TestPluginPutRangeReadsBackThroughTheBroker(t *testing.T) {
 	}
 }
 
-// The three classifications the engine switches on have to survive the process
+// Create's refusal and Trash both cross the socket. The refusal is the shape
+// that matters: the fake refuses before reading a byte, so the host is still
+// sending a large body when the stream closes, and what it must report is the
+// backend's reason — ErrExist — rather than the broken send.
+func TestPluginServesCreateAndTrash(t *testing.T) {
+	store, _ := openFake(t, map[string]any{
+		"capabilities": []string{"creator", "trasher"},
+		"seed":         []string{"taken.txt=old"},
+	})
+	ctx := context.Background()
+	c, ok := provider.AsCreator(store)
+	if !ok {
+		t.Fatal("no creator")
+	}
+	big := bytes.Repeat([]byte("x"), 4<<20)
+	if _, err := c.Create(ctx, "taken.txt", bytes.NewReader(big)); !errors.Is(err, provider.ErrExist) {
+		t.Fatalf("Create over an occupied path = %v; want ErrExist", err)
+	}
+	rc, err := store.Get(ctx, "taken.txt")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	got, _ := io.ReadAll(rc)
+	_ = rc.Close()
+	if string(got) != "old" {
+		t.Errorf("a refused Create changed the path: %q", got)
+	}
+	if _, err := c.Create(ctx, "new.txt", bytes.NewReader(big)); err != nil {
+		t.Fatalf("Create of a free path: %v", err)
+	}
+
+	tr, ok := provider.AsTrasher(store)
+	if !ok {
+		t.Fatal("no trasher")
+	}
+	if err := tr.Trash(ctx, "new.txt"); err != nil {
+		t.Fatalf("Trash: %v", err)
+	}
+	if _, ok, _ := store.Stat(ctx, "new.txt"); ok {
+		t.Error("a trashed path is still there")
+	}
+	if err := tr.Trash(ctx, "never.txt"); !errors.Is(err, provider.ErrNotExist) {
+		t.Errorf("Trash of an absent path = %v; want ErrNotExist", err)
+	}
+}
+
+// Neither is reachable on a backend that did not offer it: the proxy has both
+// methods, so this is rule 1 for the two new capabilities.
+func TestPluginWithholdsUndeclaredCreateAndTrash(t *testing.T) {
+	store, _ := openFake(t, map[string]any{"capabilities": []string{"enumerator"}})
+	if _, ok := provider.AsCreator(store); ok {
+		t.Error("AsCreator succeeded for a backend that did not offer it")
+	}
+	if _, ok := provider.AsTrasher(store); ok {
+		t.Error("AsTrasher succeeded for a backend that did not offer it")
+	}
+}
+
+// The classifications the engine switches on have to survive the process
 // boundary. Each one, lost, is a silent behaviour change rather than a visible
 // failure — see the note at the top of errors.go.
 func TestPluginPreservesErrorClassification(t *testing.T) {
@@ -396,6 +454,11 @@ func TestPluginPreservesErrorClassification(t *testing.T) {
 		{"retryable", "retryable", func(t *testing.T, err error) {
 			if !provider.IsRetryable(err) {
 				t.Errorf("IsRetryable = false for %v", err)
+			}
+		}},
+		{"exist", "exist", func(t *testing.T, err error) {
+			if !errors.Is(err, provider.ErrExist) {
+				t.Errorf("errors.Is(ErrExist) = false for %v", err)
 			}
 		}},
 		{"canceled", "canceled", func(t *testing.T, err error) {

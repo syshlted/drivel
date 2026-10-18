@@ -60,7 +60,7 @@ bidirectional sync — don't regress it.
   store and emits an `fsevent.Event` per mutation. Reads/lookups/attrs pass through.
   `special.go` holds M15's refusals and skips; `mountopts_*.go` the compulsory
   `nodev`/`nosuid`, which is per platform for a reason (see "Special files" below).
-- `provider` — **public**: the backend seam. `Store` + the five optional
+- `provider` — **public**: the backend seam. `Store` + the seven optional
   capability interfaces, `Registry` (kind → `Factory`, an explicit value rather
   than an `init()`-filled package map, M8), `Config` (a provider's own settings as
   the TOML the user wrote), and M9's capability negotiation (`Capability`,
@@ -2002,6 +2002,13 @@ makes it different from `gdrive` follows from that plus one absence, so most of
    threshold need not exceed the longest plausible upload after all, only
    comfortably exceed clock skew between client and server. A failed `Remove` is
    ignored; the next sweep tries again.
+
+   **`Create` (provider.Creator) links the temporary instead of renaming it**
+   when the session offers `hardlink@openssh.com`, because `link(2)` refuses an
+   occupied name, which makes create-if-absent atomic: two clients creating one
+   path cannot both win. Without the extension it is a check and then a rename.
+   `TestCreateLosesARaceWithoutReplacing` writes the destination mid-upload, and
+   it fails with the link swapped for a rename.
 8. **`Remove` is permanent and there is nothing behind it** — the group-wide
    decision above, arrived at here first. `-max-deletes` is the only guard, and
    `docs/user/sftp.md` says so in those words. Don't re-open it per backend.
@@ -2194,8 +2201,8 @@ Ten things carry the correctness.
 
 1. **Capability detection is negotiated, not asserted, and this is the load-bearing
    change.** The host-side proxy is *one type serving every backend*, so it
-   implements all five optional interfaces whatever is behind it — a type assertion
-   would answer "yes" five times for every plugin, and the mount would poll a change
+   implements all seven optional interfaces whatever is behind it — a type assertion
+   would answer "yes" seven times for every plugin, and the mount would poll a change
    feed that does not exist and splice extents into a store that cannot patch. Ask
    through `provider.AsChangeSource`/`AsEnumerator`/`AsRangeGetter`/`AsRangePutter`/
    `AsContentHasher`; never `store.(provider.X)`. The invariant is **a declaration
@@ -2220,9 +2227,10 @@ Ten things carry the correctness.
    files could then claim one kind with a resolution order that is either a
    directory listing or last-install-wins. Two files claiming one kind *by filename*
    resolve first-on-the-path-wins and the loser is named in the log.
-5. **Three error classifications are rebuilt on the far side, and each one lost is
+5. **Four error classifications are rebuilt on the far side, and each one lost is
    silent.** The plugin classifies (only it can see its backend's error types) and
-   sends the classification as a gRPC status detail. `ErrNotExist` lost ⇒ renames
+   sends the classification as a gRPC status detail. `ErrExist` lost ⇒ a first
+   push over an unknown remote fails instead of keeping a conflict copy. `ErrNotExist` lost ⇒ renames
    stop syncing. `ErrCursorExpired` lost ⇒ inbound sync stops forever, which is the
    bug the sentinel exists for. `IsRetryable` lost ⇒ the first 429 is permanent. The
    concrete error *type* is deliberately not preserved.

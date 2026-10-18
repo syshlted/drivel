@@ -255,12 +255,20 @@ type ContentHasher interface {
 }
 ```
 
-The five optional interfaces are all *accelerators that may decline*. Every one of
+The optional interfaces are all *accelerators that may decline*. Every one of
 them has a correct, slower answer available if the provider omits it or a call
 fails, and the engine is written so that "unsure" always selects that answer.
 `Enumerator` is the one whose absence costs a *feature* rather than speed — without
 it a pre-existing remote tree stays invisible (§9, M7b) — but its absence is still
 safe, because nothing infers anything from a sweep that never ran.
+
+Two were added with configurable conflict handling (2026-10-18) and follow the
+same rule. `Creator` is `Put` refusing an occupied path, so a first push learns
+that the remote already holds something at no cost on a store whose `Put` already
+resolves the path. Without it the engine pays a `Stat`. `Trasher` is a removal
+the user can undo whatever `Remove` is configured to do. Its absence costs one
+setting, `conflicts = "remote-trash"`, which is refused at open rather than
+quietly given a permanent deletion.
 
 **Which of them a store offers is asked, not assumed** (M9). Until the backend could
 live in another process the question was a Go type assertion, which is exact for a
@@ -2704,7 +2712,7 @@ are both lossy and racy.
    where a plugin API either composes or does not, and the piece that decides it is
    capability forwarding. `provider.Declarer` is what makes that tractable — a
    wrapper forwards the inner store's declared set as one value, where type
-   assertions would have needed one wrapper type per subset of the five optional
+   assertions would have needed one wrapper type per subset of the optional
    interfaces.
 
    **Where the seam fights back, all of which is findable before writing code.**

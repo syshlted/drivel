@@ -56,6 +56,8 @@ const (
 	Provider_GetRange_FullMethodName    = "/drivel.plugin.v1.Provider/GetRange"
 	Provider_PutRange_FullMethodName    = "/drivel.plugin.v1.Provider/PutRange"
 	Provider_HashContent_FullMethodName = "/drivel.plugin.v1.Provider/HashContent"
+	Provider_Create_FullMethodName      = "/drivel.plugin.v1.Provider/Create"
+	Provider_Trash_FullMethodName       = "/drivel.plugin.v1.Provider/Trash"
 )
 
 // ProviderClient is the client API for Provider service.
@@ -102,6 +104,14 @@ type ProviderClient interface {
 	PutRange(ctx context.Context, in *PutRangeRequest, opts ...grpc.CallOption) (*FileResponse, error)
 	// provider.ContentHasher — optional. Streamed for the same reason Put is.
 	HashContent(ctx context.Context, opts ...grpc.CallOption) (grpc.ClientStreamingClient[Chunk, HashContentResponse], error)
+	// provider.Creator — optional. Put's shape, refusing with KIND_EXIST when the
+	// path is occupied. A separate call rather than a flag on Put on purpose: an
+	// older plugin would ignore an unknown field and overwrite, while an unknown
+	// call fails, and the capability gate means the host never makes one anyway.
+	Create(ctx context.Context, opts ...grpc.CallOption) (grpc.ClientStreamingClient[PutRequest, FileResponse], error)
+	// provider.Trasher — optional. A recoverable removal whatever the backend's
+	// ordinary Remove was configured to do.
+	Trash(ctx context.Context, in *RemoveRequest, opts ...grpc.CallOption) (*RemoveResponse, error)
 }
 
 type providerClient struct {
@@ -276,6 +286,29 @@ func (c *providerClient) HashContent(ctx context.Context, opts ...grpc.CallOptio
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
 type Provider_HashContentClient = grpc.ClientStreamingClient[Chunk, HashContentResponse]
 
+func (c *providerClient) Create(ctx context.Context, opts ...grpc.CallOption) (grpc.ClientStreamingClient[PutRequest, FileResponse], error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	stream, err := c.cc.NewStream(ctx, &Provider_ServiceDesc.Streams[4], Provider_Create_FullMethodName, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	x := &grpc.GenericClientStream[PutRequest, FileResponse]{ClientStream: stream}
+	return x, nil
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type Provider_CreateClient = grpc.ClientStreamingClient[PutRequest, FileResponse]
+
+func (c *providerClient) Trash(ctx context.Context, in *RemoveRequest, opts ...grpc.CallOption) (*RemoveResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(RemoveResponse)
+	err := c.cc.Invoke(ctx, Provider_Trash_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // ProviderServer is the server API for Provider service.
 // All implementations must embed UnimplementedProviderServer
 // for forward compatibility.
@@ -320,6 +353,14 @@ type ProviderServer interface {
 	PutRange(context.Context, *PutRangeRequest) (*FileResponse, error)
 	// provider.ContentHasher — optional. Streamed for the same reason Put is.
 	HashContent(grpc.ClientStreamingServer[Chunk, HashContentResponse]) error
+	// provider.Creator — optional. Put's shape, refusing with KIND_EXIST when the
+	// path is occupied. A separate call rather than a flag on Put on purpose: an
+	// older plugin would ignore an unknown field and overwrite, while an unknown
+	// call fails, and the capability gate means the host never makes one anyway.
+	Create(grpc.ClientStreamingServer[PutRequest, FileResponse]) error
+	// provider.Trasher — optional. A recoverable removal whatever the backend's
+	// ordinary Remove was configured to do.
+	Trash(context.Context, *RemoveRequest) (*RemoveResponse, error)
 	mustEmbedUnimplementedProviderServer()
 }
 
@@ -371,6 +412,12 @@ func (UnimplementedProviderServer) PutRange(context.Context, *PutRangeRequest) (
 }
 func (UnimplementedProviderServer) HashContent(grpc.ClientStreamingServer[Chunk, HashContentResponse]) error {
 	return status.Error(codes.Unimplemented, "method HashContent not implemented")
+}
+func (UnimplementedProviderServer) Create(grpc.ClientStreamingServer[PutRequest, FileResponse]) error {
+	return status.Error(codes.Unimplemented, "method Create not implemented")
+}
+func (UnimplementedProviderServer) Trash(context.Context, *RemoveRequest) (*RemoveResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method Trash not implemented")
 }
 func (UnimplementedProviderServer) mustEmbedUnimplementedProviderServer() {}
 func (UnimplementedProviderServer) testEmbeddedByValue()                  {}
@@ -609,6 +656,31 @@ func _Provider_HashContent_Handler(srv interface{}, stream grpc.ServerStream) er
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
 type Provider_HashContentServer = grpc.ClientStreamingServer[Chunk, HashContentResponse]
 
+func _Provider_Create_Handler(srv interface{}, stream grpc.ServerStream) error {
+	return srv.(ProviderServer).Create(&grpc.GenericServerStream[PutRequest, FileResponse]{ServerStream: stream})
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type Provider_CreateServer = grpc.ClientStreamingServer[PutRequest, FileResponse]
+
+func _Provider_Trash_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RemoveRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ProviderServer).Trash(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Provider_Trash_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ProviderServer).Trash(ctx, req.(*RemoveRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // Provider_ServiceDesc is the grpc.ServiceDesc for Provider service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -656,6 +728,10 @@ var Provider_ServiceDesc = grpc.ServiceDesc{
 			MethodName: "PutRange",
 			Handler:    _Provider_PutRange_Handler,
 		},
+		{
+			MethodName: "Trash",
+			Handler:    _Provider_Trash_Handler,
+		},
 	},
 	Streams: []grpc.StreamDesc{
 		{
@@ -676,6 +752,11 @@ var Provider_ServiceDesc = grpc.ServiceDesc{
 		{
 			StreamName:    "HashContent",
 			Handler:       _Provider_HashContent_Handler,
+			ClientStreams: true,
+		},
+		{
+			StreamName:    "Create",
+			Handler:       _Provider_Create_Handler,
 			ClientStreams: true,
 		},
 	},

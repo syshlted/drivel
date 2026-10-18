@@ -227,6 +227,35 @@ not really change. Getting the encoding subtly wrong is harmless in the dangerou
 direction — hashes simply never match and every push proceeds — but you lose the
 optimisation, so it is worth a test against a real round-trip.
 
+## 3c. (Optional) Implement `Creator` and `Trasher`
+
+Two small capabilities serve conflict handling (DESIGN.md §6).
+
+```go
+type Creator interface {
+    Create(ctx context.Context, path string, r io.Reader) (provider.RemoteFile, error)
+}
+type Trasher interface {
+    Trash(ctx context.Context, path string) error
+}
+```
+
+`Create` is `Put` refusing an occupied path: return an error wrapping
+`provider.ErrExist`, leave the path untouched, and refuse **before** reading `r`
+if you can. The engine uploads a file it has no baseline for through it, so a
+remote object that mount has never seen is found by the upload rather than by a
+`Stat` first. If your `Put` already looks the path up (Drive's does), the check
+is free. If your protocol can make the check and the create one operation, do
+that (SFTP links the temporary into place, and `link(2)` refuses an occupied
+name). Without `Create`, the engine pays one `Stat` per first push.
+
+`Trash` is a removal the user can undo, **whatever** your ordinary `Remove` was
+configured to do, and an absent path is `provider.ErrNotExist`. Implement it
+only if the backend has a real trash. `conflicts = "remote-trash"` is refused at
+open on a store without it, which is the right answer for a backend that cannot
+keep the promise. Don't emulate a trash with a hidden folder: the group-wide
+decision against that is in DESIGN.md §9.
+
 ## 4. Ship it
 
 A backend always runs in **its own process**, launched by drivel and reached over

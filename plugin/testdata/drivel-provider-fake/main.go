@@ -148,6 +148,8 @@ func (f *fake) gate(op string) error {
 		return fmt.Errorf("fake %s: %w", op, provider.ErrNotExist)
 	case "cursor-expired":
 		return fmt.Errorf("fake %s: %w", op, provider.ErrCursorExpired)
+	case "exist":
+		return fmt.Errorf("fake %s: %w", op, provider.ErrExist)
 	case "retryable":
 		return retryable{fmt.Errorf("fake %s: try again", op)}
 	case "canceled":
@@ -174,6 +176,46 @@ func (f *fake) Put(_ context.Context, path string, r io.Reader) (provider.Remote
 	f.files[path] = body
 	f.note("put %s %d", path, len(body))
 	return f.stat(path), nil
+}
+
+// Create refuses an occupied path before reading a byte, which is the shape a
+// real Creator may take and the one the host's stream handling has to survive.
+func (f *fake) Create(_ context.Context, path string, r io.Reader) (provider.RemoteFile, error) {
+	if err := f.gate("create"); err != nil {
+		return provider.RemoteFile{}, err
+	}
+	f.mu.Lock()
+	_, taken := f.files[path]
+	f.mu.Unlock()
+	if taken {
+		f.note("create %s refused", path)
+		return provider.RemoteFile{}, fmt.Errorf("fake: %q: %w", path, provider.ErrExist)
+	}
+	body, err := io.ReadAll(r)
+	if err != nil {
+		return provider.RemoteFile{}, err
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.files[path] = body
+	f.note("create %s %d", path, len(body))
+	return f.stat(path), nil
+}
+
+// Trash removes path and says so differently from Remove, so a journal can tell
+// which one the host asked for.
+func (f *fake) Trash(_ context.Context, path string) error {
+	if err := f.gate("trash"); err != nil {
+		return err
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if _, ok := f.files[path]; !ok {
+		return fmt.Errorf("fake: %q: %w", path, provider.ErrNotExist)
+	}
+	delete(f.files, path)
+	f.note("trash %s", path)
+	return nil
 }
 
 func (f *fake) Mkdir(_ context.Context, path string) (provider.RemoteFile, error) {

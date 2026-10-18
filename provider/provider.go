@@ -39,6 +39,12 @@ var ErrNotExist = errors.New("provider: path does not exist")
 // poll and inbound sync stayed silently stopped forever.
 var ErrCursorExpired = errors.New("provider: change cursor expired")
 
+// ErrExist is returned by Creator.Create when something already stands at the
+// path. The engine answers it by keeping what stands there as a conflict copy
+// before it uploads (DESIGN.md §6), so a provider must return it only when the
+// path is occupied, and must not have changed the path when it does.
+var ErrExist = errors.New("provider: path already exists")
+
 // IsRetryable reports whether err is a transient failure worth retrying with
 // backoff (a rate limit, a 5xx, a dropped connection) rather than a permanent
 // one (bad request, permission denied, not found). A provider signals "retryable"
@@ -259,4 +265,43 @@ type ContentHasher interface {
 	// HashContent returns the checksum of everything readable from r, in the same
 	// encoding the provider populates RemoteFile.Hash with.
 	HashContent(r io.Reader) (string, error)
+}
+
+// Creator is an OPTIONAL capability: a Put that refuses to replace.
+//
+// The engine uploads a file it has no baseline for — a first push — through
+// Create when the store offers it, so that a remote object this mount has never
+// seen is found by the upload itself instead of by a Stat before it. That is
+// what makes the check free on a store whose Put already resolves the path
+// (Drive's does, to choose between update and create), and it is why a Creator
+// may refuse BEFORE it reads r: the content need not cross the network to learn
+// that the path is taken.
+//
+// Create returns an error wrapping ErrExist when the path is occupied, by a file
+// or a directory, and leaves it untouched. It is not a conditional write and
+// callers must not treat it as one: a store that can make the check and the
+// create a single operation should (SFTP's hard link does), and one that cannot
+// checks and then creates, so two clients creating one path at one instant may
+// both succeed exactly as two Puts would. A store without the capability costs
+// the engine a Stat per first push instead.
+type Creator interface {
+	Create(ctx context.Context, path string, r io.Reader) (RemoteFile, error)
+}
+
+// Trasher is an OPTIONAL capability: a removal the user can undo, whatever the
+// store was configured to do on an ordinary Remove.
+//
+// It exists for conflict copies under `conflicts = "remote-trash"`, where the
+// promise is that the losing version can be restored from the backend's trash.
+// Remove cannot carry that promise, because a store may be configured to delete
+// permanently (Drive's `delete = "permanent"`) and the host cannot see that
+// setting. A store with no trash at all — SFTP, and every M17–M21 backend — does
+// not implement it, and a mount asking for remote-trash on one is refused at
+// open rather than quietly given a permanent deletion.
+//
+// Trash returns an error wrapping ErrNotExist when nothing stands at the path:
+// the caller has just uploaded the copy it is trashing, so absence means the
+// copy is not where it is about to report it to be.
+type Trasher interface {
+	Trash(ctx context.Context, path string) error
 }

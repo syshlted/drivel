@@ -316,26 +316,9 @@ func do[T any](ctx context.Context, s *Store, fn func(c *conn) (T, error)) (T, e
 func (s *Store) Put(ctx context.Context, p string, r io.Reader) (provider.RemoteFile, error) {
 	return do(ctx, s, func(c *conn) (provider.RemoteFile, error) {
 		abs := c.abs(p)
-		dir := path.Dir(abs)
-		if err := c.cli.MkdirAll(dir); err != nil {
-			return provider.RemoteFile{}, fmt.Errorf("creating %s: %w", dir, err)
-		}
-		tmp, err := tempNameFor(abs)
+		tmp, err := c.uploadTemp(abs, r)
 		if err != nil {
 			return provider.RemoteFile{}, err
-		}
-		f, err := c.cli.Create(tmp)
-		if err != nil {
-			return provider.RemoteFile{}, fmt.Errorf("creating %s: %w", tmp, err)
-		}
-		if _, err := f.ReadFrom(r); err != nil {
-			_ = f.Close()
-			_ = c.cli.Remove(tmp)
-			return provider.RemoteFile{}, fmt.Errorf("writing %s: %w", tmp, err)
-		}
-		if err := f.Close(); err != nil {
-			_ = c.cli.Remove(tmp)
-			return provider.RemoteFile{}, fmt.Errorf("closing %s: %w", tmp, err)
 		}
 		if err := c.rename(tmp, abs); err != nil {
 			_ = c.cli.Remove(tmp)
@@ -343,6 +326,83 @@ func (s *Store) Put(ctx context.Context, p string, r io.Reader) (provider.Remote
 		}
 		return c.statFile(p, abs)
 	})
+}
+
+// Create implements provider.Creator: Put, refusing an occupied path.
+//
+// Where the session offers hardlink@openssh.com the refusal is atomic: the
+// temporary is linked to the destination, and link(2) fails rather than replace
+// what is there, so two clients creating one path cannot both win. Without the
+// extension — or on a server filesystem that refuses hard links — it is a check
+// and then a rename, which two clients can both pass. Either way an occupied
+// path is reported before anything is uploaded, so the common refusal costs one
+// round trip and no transfer.
+func (s *Store) Create(ctx context.Context, p string, r io.Reader) (provider.RemoteFile, error) {
+	return do(ctx, s, func(c *conn) (provider.RemoteFile, error) {
+		abs := c.abs(p)
+		if err := c.vacant(p, abs); err != nil {
+			return provider.RemoteFile{}, err
+		}
+		tmp, err := c.uploadTemp(abs, r)
+		if err != nil {
+			return provider.RemoteFile{}, err
+		}
+		defer func() { _ = c.cli.Remove(tmp) }() // a no-op after the fallback rename
+		if c.hardlink && c.cli.Link(tmp, abs) == nil {
+			return c.statFile(p, abs)
+		}
+		// No extension, or a link that failed. link(2) reports an occupied
+		// destination as a generic failure over SFTP, so look rather than guess:
+		// taken means someone won the race, and anything else is a server that
+		// will not link, which the check-and-rename serves.
+		if err := c.vacant(p, abs); err != nil {
+			return provider.RemoteFile{}, err
+		}
+		if err := c.rename(tmp, abs); err != nil {
+			return provider.RemoteFile{}, fmt.Errorf("renaming %s into place: %w", tmp, err)
+		}
+		return c.statFile(p, abs)
+	})
+}
+
+// vacant reports ErrExist when something stands at abs.
+func (c *conn) vacant(p, abs string) error {
+	_, err := c.cli.Lstat(abs)
+	switch {
+	case err == nil:
+		return fmt.Errorf("create %q: %w", p, provider.ErrExist)
+	case isNotExist(err):
+		return nil
+	default:
+		return err
+	}
+}
+
+// uploadTemp writes r to a fresh temporary beside abs, creating any missing
+// parents, and returns its name. A failure removes the temporary.
+func (c *conn) uploadTemp(abs string, r io.Reader) (string, error) {
+	dir := path.Dir(abs)
+	if err := c.cli.MkdirAll(dir); err != nil {
+		return "", fmt.Errorf("creating %s: %w", dir, err)
+	}
+	tmp, err := tempNameFor(abs)
+	if err != nil {
+		return "", err
+	}
+	f, err := c.cli.Create(tmp)
+	if err != nil {
+		return "", fmt.Errorf("creating %s: %w", tmp, err)
+	}
+	if _, err := f.ReadFrom(r); err != nil {
+		_ = f.Close()
+		_ = c.cli.Remove(tmp)
+		return "", fmt.Errorf("writing %s: %w", tmp, err)
+	}
+	if err := f.Close(); err != nil {
+		_ = c.cli.Remove(tmp)
+		return "", fmt.Errorf("closing %s: %w", tmp, err)
+	}
+	return tmp, nil
 }
 
 // Mkdir creates the directory at p and any missing ancestors.

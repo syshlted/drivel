@@ -348,6 +348,27 @@ func (d *Drive) Close() error {
 // verifyLocked re-checks name and parent before anything acts on one, and a
 // failed check drops the entry.
 func (d *Drive) Put(ctx context.Context, p string, r io.Reader) (provider.RemoteFile, error) {
+	return d.put(ctx, p, r, false)
+}
+
+// Create implements provider.Creator: Put, refusing an occupied path.
+//
+// It costs nothing Put does not already spend. Put resolves the path before it
+// uploads, to choose between updating an object and creating one, and that
+// resolution — the in-memory map, the persistent index verified against Drive,
+// then a name query — is exactly the existence check a first push wants. So the
+// refusal arrives before a byte of content is sent, and the engine's no-baseline
+// guard costs Drive no round trip at all.
+//
+// It is not atomic, and Drive offers nothing that would make it so: a second
+// client creating the same name between the resolve and the create makes the
+// same-name siblings MC-30 describes, exactly as two Puts would.
+func (d *Drive) Create(ctx context.Context, p string, r io.Reader) (provider.RemoteFile, error) {
+	return d.put(ctx, p, r, true)
+}
+
+// put is Put and Create; refuse makes an occupied path an ErrExist.
+func (d *Drive) put(ctx context.Context, p string, r io.Reader, refuse bool) (provider.RemoteFile, error) {
 	release := d.lockPath(p)
 	defer release()
 
@@ -364,6 +385,9 @@ func (d *Drive) Put(ctx context.Context, p string, r io.Reader) (provider.Remote
 	d.mu.Unlock()
 	if err != nil {
 		return provider.RemoteFile{}, classify(err)
+	}
+	if exists && refuse {
+		return provider.RemoteFile{}, fmt.Errorf("create %q: %w", p, provider.ErrExist)
 	}
 
 	var res *drive.File
@@ -444,6 +468,26 @@ func (d *Drive) Remove(ctx context.Context, p string) error {
 		return nil // no such object remotely; nothing to remove
 	}
 	if err := d.removeLocked(ctx, id); err != nil {
+		return classify(err)
+	}
+	d.forgetLocked(ctx, p)
+	return nil
+}
+
+// Trash implements provider.Trasher: the removal a user can undo, whatever
+// -drive-delete says. remote-trash conflict copies depend on it — the promise
+// there is that the losing version is in the trash, and under delete =
+// "permanent" an ordinary Remove would break that promise silently.
+func (d *Drive) Trash(ctx context.Context, p string) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	id, ok := d.resolveLocked(ctx, p)
+	if !ok {
+		return fmt.Errorf("trash %q: %w", p, provider.ErrNotExist)
+	}
+	if _, err := d.svc.Files.Update(id, &drive.File{Trashed: true}).
+		Fields("id").Context(ctx).Do(); err != nil {
 		return classify(err)
 	}
 	d.forgetLocked(ctx, p)

@@ -29,6 +29,9 @@ import (
 //     sync silently stops — which is exactly the bug that made the sentinel exist.
 //   - provider.IsRetryable means "back off and try again". Lost, the first rate
 //     limit becomes permanent.
+//   - provider.ErrExist means "a first push found the path occupied", which the
+//     engine answers by keeping what stands there as a conflict copy. Lost, the
+//     push fails instead, and retries into the same refusal until it gives up.
 //
 // So a plugin classifies its own error — it is the only side that can, since the
 // backend's error types are its own — and sends the classification alongside the
@@ -78,6 +81,9 @@ func encodeError(err error) error {
 	case errors.Is(err, provider.ErrCursorExpired):
 		detail.Kind = pb.Error_KIND_CURSOR_EXPIRED
 		code = codes.FailedPrecondition
+	case errors.Is(err, provider.ErrExist):
+		detail.Kind = pb.Error_KIND_EXIST
+		code = codes.AlreadyExists
 	}
 
 	st := status.New(code, err.Error())
@@ -137,6 +143,8 @@ func decodeError(err error) error {
 		out = fmt.Errorf("%w: %s", provider.ErrNotExist, detail.GetMessage())
 	case pb.Error_KIND_CURSOR_EXPIRED:
 		out = fmt.Errorf("%w: %s", provider.ErrCursorExpired, detail.GetMessage())
+	case pb.Error_KIND_EXIST:
+		out = fmt.Errorf("%w: %s", provider.ErrExist, detail.GetMessage())
 	default:
 		out = errors.New(detail.GetMessage())
 	}

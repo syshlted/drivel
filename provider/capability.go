@@ -21,7 +21,7 @@ import (
 // method set of. An out-of-process plugin is not: the host side of the seam is
 // one generated proxy type, and a proxy that implements ChangeSource for the one
 // backend that has a change feed implements it for every backend that does not.
-// Type assertion would answer "yes" for all five capabilities, for every plugin,
+// Type assertion would answer "yes" for every capability, for every plugin,
 // and the pull loop would poll a feed that does not exist.
 //
 // So the question moves into the seam. A store may DECLARE what it offers, and
@@ -49,6 +49,10 @@ const (
 	// CapContentHasher is ContentHasher: a local digest in the provider's own
 	// encoding, used by M6's unchanged-content gate.
 	CapContentHasher
+	// CapCreator is Creator: a Put that refuses to replace, used by a first push.
+	CapCreator
+	// CapTrasher is Trasher: a recoverable removal, used by remote-trash.
+	CapTrasher
 
 	// capMax is one past the last defined bit. Everything at or above it is a
 	// capability this build does not know about.
@@ -65,6 +69,8 @@ var capNames = [...]string{
 	"range-getter",
 	"range-putter",
 	"content-hasher",
+	"creator",
+	"trasher",
 }
 
 // String names the capability, or reports the raw bit if it is one this build
@@ -191,6 +197,12 @@ func Capabilities(s Store) CapabilitySet {
 	if _, ok := s.(ContentHasher); ok {
 		have = have.With(CapContentHasher)
 	}
+	if _, ok := s.(Creator); ok {
+		have = have.With(CapCreator)
+	}
+	if _, ok := s.(Trasher); ok {
+		have = have.With(CapTrasher)
+	}
 	if d, ok := s.(Declarer); ok {
 		have &= d.Capabilities() & AllCapabilities
 	}
@@ -243,4 +255,22 @@ func AsContentHasher(s Store) (ContentHasher, bool) {
 	}
 	h, ok := s.(ContentHasher)
 	return h, ok
+}
+
+// AsCreator returns s as a Creator if it offers that capability.
+func AsCreator(s Store) (Creator, bool) {
+	if !Capabilities(s).Has(CapCreator) {
+		return nil, false
+	}
+	c, ok := s.(Creator)
+	return c, ok
+}
+
+// AsTrasher returns s as a Trasher if it offers that capability.
+func AsTrasher(s Store) (Trasher, bool) {
+	if !Capabilities(s).Has(CapTrasher) {
+		return nil, false
+	}
+	t, ok := s.(Trasher)
+	return t, ok
 }
