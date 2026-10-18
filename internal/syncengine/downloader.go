@@ -1084,7 +1084,7 @@ func (d *Downloader) removeIfSynced(ctx context.Context, rel, abs string, fi os.
 		forget[rel] = struct{}{}
 		return true
 	}
-	why := ""
+	var why string
 	switch e, ok, err := d.state.GetEcho(rel); {
 	case err != nil:
 		why = "its sync record could not be read"
