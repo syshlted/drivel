@@ -348,8 +348,11 @@ up/down differently); nothing crosses the seam for that yet.
 the engine's per-path coalescing window (`syncengine.Config.Debounce`), and three
 things about it are load-bearing. **The default is short because what it merges is
 already coarse** — `OpWrite` is emitted once per *close*, not once per `write(2)`,
-and since 2026-10-18 a *new* file's `OpCreate` is emitted by its handle's
-`Release` instead of by `Create`, so a 50 GB copy arrives as **one event**, and
+and since 2026-10-18 a *new* file's `OpCreate` is emitted at its handle's first
+`Flush` (the close that `close(2)` waits for) instead of by `Create`, so a 50 GB
+copy arrives as **one event** — not `Release`, which Linux sends in the
+background after close returns and FreeBSD may hold until the vnode goes
+inactive, which the FreeBSD fleet run caught as a file never announced — and
 the window is merging an edit's few closes rather than batching a transfer; anyone reasoning about this as
 if writes streamed will get every trade-off backwards. **A trailing timer re-armed
 by every later change cannot bound how long a path is held**, so there is a

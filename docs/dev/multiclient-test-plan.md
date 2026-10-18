@@ -711,7 +711,8 @@ roughly in descending order of how likely they are to change a decision:
     **CLOSED 2026-10-18, in the shape proposed here.** `OpCreate`'s push could
     not simply be dropped — it is what creates an empty file, so `touch` would
     stop syncing — so it moved: `Create` emits nothing and the creating handle's
-    `Release` emits the one `OpCreate`, written or not. The pair is one event
+    first `Flush` — the one `close(2)` waits for; `Release` came late on FreeBSD
+    — emits the one `OpCreate`, written or not. The pair is one event
     and one upload; `TestANewFileIsOneEventAtClose` fails with the old emission
     restored. The cost is push-on-close applied to creates: a new file held open
     is invisible until closed, where it used to be pushed as whatever it held at

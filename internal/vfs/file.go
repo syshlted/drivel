@@ -39,7 +39,9 @@ type fileHandle struct {
 	// one event, OpCreate, whether or not anything was written: an empty file is
 	// still a file to create remotely.
 	created bool
-	writing *fsevent.Writing // where a created handle is counted until Release
+	writing *fsevent.Writing // where a created handle is counted until announced
+	// announced latches once a created handle has sent its OpCreate.
+	announced atomic.Bool
 }
 
 // dirtyTracker records which byte extents a handle wrote, so the uploader can
@@ -83,6 +85,16 @@ func (d *dirtyTracker) mark(off int64, n int) {
 // it must guarantee is that a truncate *alongside* real writes downgrades the
 // push to whole-file rather than shipping extents measured against the old
 // length.
+// restart forgets the writes recorded so far — an event has just carried them —
+// so that only writes after this point make the next one. What follows is
+// measured against a file that changed under the old map, so it is whole-file.
+func (d *dirtyTracker) restart() {
+	d.mu.Lock()
+	d.written = false
+	d.whole = true
+	d.mu.Unlock()
+}
+
 func (d *dirtyTracker) poison() {
 	d.mu.Lock()
 	d.whole = true
@@ -182,11 +194,37 @@ func (f *fileHandle) Write(ctx context.Context, data []byte, off int64) (uint32,
 	return n, errno
 }
 
+// Flush is a close(2) of some descriptor on this handle, and it is synchronous
+// with that close where RELEASE is not: Linux queues RELEASE as a background
+// request after close has returned, and FreeBSD's fusefs may hold it until the
+// vnode goes inactive. So a new file announces itself here — the earliest
+// moment its content is complete — rather than whenever the kernel releases it,
+// which on FreeBSD left a copied file unannounced for longer than a fleet test
+// waits.
 func (f *fileHandle) Flush(ctx context.Context) syscall.Errno {
+	var errno syscall.Errno
 	if fl, ok := f.wrapped.(fs.FileFlusher); ok {
-		return fl.Flush(ctx)
+		errno = fl.Flush(ctx)
 	}
-	return 0
+	f.announce()
+	return errno
+}
+
+// announce sends a created handle's one OpCreate, once, and takes the file out
+// of the Writing set — after the event, never before: in between, the sweep's
+// walk would find a file that is neither open nor announced and push it as
+// local-only. The writes it covers are forgotten, so a descriptor that goes on
+// writing after this close produces an ordinary OpWrite at release.
+func (f *fileHandle) announce() {
+	if !f.created || !f.announced.CompareAndSwap(false, true) {
+		return
+	}
+	f.dirty.restart()
+	if f.events != nil {
+		// No extents: nothing is remote yet for a range write to patch.
+		f.events <- fsevent.Event{Op: fsevent.OpCreate, Path: f.path}
+	}
+	f.writing.Close(f.path)
 }
 
 func (f *fileHandle) Release(ctx context.Context) syscall.Errno {
@@ -200,20 +238,14 @@ func (f *fileHandle) Release(ctx context.Context) syscall.Errno {
 	// Emit the content-change event only after a successful close of a handle we
 	// actually wrote to. Coalesces a burst of Writes into one upload trigger, and
 	// carries the extents those writes touched (nil if they cannot be trusted).
-	written, extents := f.dirty.snapshot(size)
-	switch {
-	case f.events == nil:
-	case f.created:
-		// The file exists whatever the close returned. No extents: nothing is
-		// remote yet for a range write to patch.
-		f.events <- fsevent.Event{Op: fsevent.OpCreate, Path: f.path}
-	case errno == 0 && written:
-		f.events <- fsevent.Event{Op: fsevent.OpWrite, Path: f.path, Dirty: extents}
+	if f.created && !f.announced.Load() {
+		// Never flushed (a kernel that skipped FLUSH): the file exists whatever
+		// the close returned, and this is its one event.
+		f.announce()
+		return errno
 	}
-	// After the event, never before: in between, the walk would find a file
-	// that is neither open nor announced and push it as local-only.
-	if f.created {
-		f.writing.Close(f.path)
+	if written, extents := f.dirty.snapshot(size); errno == 0 && written && f.events != nil {
+		f.events <- fsevent.Event{Op: fsevent.OpWrite, Path: f.path, Dirty: extents}
 	}
 	return errno
 }

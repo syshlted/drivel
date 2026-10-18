@@ -40,8 +40,9 @@ func TestAnAPIShutdownDrainsLikeASignal(t *testing.T) {
 			store := newMemStore()
 			spec := baseSpec(t)
 			spec.Provider = "mem"
-			spec.PushDelay = time.Hour // nothing goes out until the drain sends it
-			spec.Logger = log.New(io.Discard, "", 0)
+			spec.PushDelay = time.Hour         // nothing goes out until the drain sends it
+			logs := &testLog{t: t, done: true} // kept, not printed
+			spec.Logger = log.New(logs, "", 0)
 
 			a, err := New(t.Context(), []MountSpec{spec}, registryWith(t, "mem", store))
 			if err != nil {
@@ -80,6 +81,13 @@ func TestAnAPIShutdownDrainsLikeASignal(t *testing.T) {
 			}) {
 				cancel()
 				testenv.Unavailable(t, testenv.FUSE, "mount did not come up within 10s")
+			}
+
+			// The startup sweep's walk pushes a closed local file with no baseline
+			// directly, bypassing the push delay this case depends on; write only
+			// once it has finished. (That race was the FreeBSD flake.)
+			if !waitFor(10*time.Second, func() bool { return logs.saw("[sweep] reconcile complete") }) {
+				t.Fatal("the startup sweep never completed")
 			}
 
 			want := map[string][]byte{}

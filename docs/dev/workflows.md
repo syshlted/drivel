@@ -50,7 +50,8 @@ Three details that look incidental and are not:
   arrow leaves the diagram. That is why `-push-delay` defaults to a value as short
   as 300ms: it is merging an edit's few closes, not batching a transfer, and a
   50 GB copy passes through it as one event — a new file's `OpCreate` also leaves
-  from the creating handle's `Release`, not from `Create`, which until 2026-10-18
+  at the creating handle's first `Flush` (synchronous with `close(2)`, where
+  `Release` is not), not from `Create`, which until 2026-10-18
   made every copy outlasting the window two uploads. It also means a file
   held open and never closed — new or not — produces *no* event at all, at any setting, and is
   reached only by the sweep. Because each later event re-arms the timer, the

@@ -114,7 +114,18 @@ func TestANewFileIsOneEventAtClose(t *testing.T) {
 	if !open {
 		t.Error("the new file was not in the mount's Writing set while open")
 	}
-	ev := waitEvent(t, events, fsevent.OpCreate, "copy.bin")
+	// Already sent by the time close(2) returned: it leaves with the FLUSH that
+	// close waits for, not with the RELEASE a kernel sends whenever it likes —
+	// which on FreeBSD can be long after (see fileHandle.Flush).
+	var ev fsevent.Event
+	select {
+	case ev = <-events:
+	default:
+		t.Fatal("close(2) returned before the new file's event was sent; it is waiting on RELEASE")
+	}
+	if ev.Op != fsevent.OpCreate || ev.Path != "copy.bin" {
+		t.Fatalf("event = %s %s; want create copy.bin", ev.Op, ev.Path)
+	}
 	if ev.Dirty != nil {
 		t.Errorf("a new file's event carries extents %v; nothing remote exists to patch", ev.Dirty)
 	}
