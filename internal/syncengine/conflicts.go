@@ -148,7 +148,8 @@ type Conflicts struct {
 	// of the local edit finds the same remote version diverged from its baseline
 	// — and the second must not keep a second copy. A copy in the local folder
 	// is found by name; this is what finds one that went to a trash or to the
-	// remote only. In memory: after a restart the worst case is one duplicate.
+	// remote only. Also in the state store (state.SetKept), so a restart between
+	// the two meetings does not keep a duplicate.
 	mu   sync.Mutex
 	kept map[string]string
 }
@@ -284,7 +285,7 @@ func (c *Conflicts) keepRemote(ctx context.Context, env conflictEnv, rel string,
 		modified = time.Now()
 	}
 	identity := rf.Version + "\x00" + rf.Hash
-	if c.alreadyKept(rel, identity) {
+	if c.alreadyKept(env, rel, identity) {
 		return "", nil
 	}
 	copyRel := copyPath(rel, modified)
@@ -307,7 +308,7 @@ func (c *Conflicts) keepRemote(ctx context.Context, env conflictEnv, rel string,
 		if _, err := os.Lstat(dst); err == nil {
 			// Made already, by name: the same remote version, kept by the pull
 			// before this push met it (or by an earlier run).
-			c.remember(rel, identity)
+			c.remember(env, rel, identity)
 			return "", nil
 		}
 		if _, err := fetchTo(ctx, env.store, rel, dst, modified, env.observe); err != nil {
@@ -315,7 +316,7 @@ func (c *Conflicts) keepRemote(ctx context.Context, env conflictEnv, rel string,
 		}
 		where = c.publish(ctx, env, copyRel)
 	}
-	c.remember(rel, identity)
+	c.remember(env, rel, identity)
 	return where, nil
 }
 
@@ -415,25 +416,40 @@ func (c *Conflicts) origin(rel string) string {
 	return "/" + rel
 }
 
-func (c *Conflicts) alreadyKept(rel, identity string) bool {
-	if c == nil {
+func (c *Conflicts) alreadyKept(env conflictEnv, rel, identity string) bool {
+	if c != nil {
+		c.mu.Lock()
+		hit := c.kept[rel] == identity
+		c.mu.Unlock()
+		if hit {
+			return true
+		}
+	}
+	if env.state == nil {
 		return false
 	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.kept[rel] == identity
+	have, ok, err := env.state.Kept(rel)
+	return err == nil && ok && have == identity
 }
 
-func (c *Conflicts) remember(rel, identity string) {
-	if c == nil {
-		return
+// remember records that identity has been kept at rel, in memory and in the
+// state store, so that a restart between the pull's keep and the push's does
+// not keep it twice. A record that cannot be written costs at most that
+// duplicate, so it is logged and not an error.
+func (c *Conflicts) remember(env conflictEnv, rel, identity string) {
+	if c != nil {
+		c.mu.Lock()
+		if c.kept == nil {
+			c.kept = map[string]string{}
+		}
+		c.kept[rel] = identity
+		c.mu.Unlock()
 	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.kept == nil {
-		c.kept = map[string]string{}
+	if env.state != nil {
+		if err := env.state.SetKept(rel, identity); err != nil {
+			env.logf("[sync] conflict %s: recording the kept version: %v", rel, err)
+		}
 	}
-	c.kept[rel] = identity
 }
 
 // uniqueCopy returns copyRel, or copyRel with a counter before the extension if

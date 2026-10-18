@@ -444,6 +444,36 @@ func TestOneConflictIsKeptOnceAcrossThePullAndThePush(t *testing.T) {
 	}
 }
 
+// The same, across a restart between the two meetings: a fresh Conflicts value
+// over the same state store still knows the version was kept, and the push's
+// SetEcho then discharges the record.
+func TestOneConflictIsKeptOnceAcrossARestart(t *testing.T) {
+	ts := newTrashingStore()
+	dir := t.TempDir()
+	st := newState(t)
+	ts.seed("a.txt", []byte("theirs"))
+	writeFile(t, dir, "a.txt", "ours")
+	_ = st.SetEcho("a.txt", state.Echo{Hash: md5hex("base"), Version: "1", At: time.Now()})
+
+	d := NewDownloader(nil, ts, dir, st, DefaultCadence).Conflicts(&Conflicts{Action: ConflictsRemoteTrash})
+	remote, _, _ := ts.Stat(context.Background(), "a.txt")
+	remote.Modified = time.Now().Add(-time.Hour)
+	if err := d.apply(context.Background(), provider.RemoteChange{Path: "a.txt", File: &remote}); err != nil {
+		t.Fatal(err)
+	}
+	d.sending.Wait()
+	e := New(Config{Store: ts, DataDir: dir, State: st, Conflicts: &Conflicts{Action: ConflictsRemoteTrash}})
+	if err := e.pushContent(context.Background(), "a.txt", nil); err != nil {
+		t.Fatal(err)
+	}
+	if len(ts.trashed) != 1 {
+		t.Errorf("trashed %v; want the remote version once", ts.trashed2())
+	}
+	if _, ok, _ := st.Kept("a.txt"); ok {
+		t.Error("the kept record outlived the push that settled it")
+	}
+}
+
 // What the folder's policy means to every other pass.
 func TestAConflictsFolderSyncsOnlyOnBothSides(t *testing.T) {
 	both, local := &Conflicts{}, &Conflicts{Place: ConflictsLocal}

@@ -61,6 +61,10 @@ erDiagram
         string path PK "root-relative slash path"
         timestamp at "when applying a remote change there first failed"
     }
+    KEPT {
+        string path PK "root-relative slash path"
+        string identity "version + NUL + hash of the remote version a conflict kept"
+    }
     TOMBSTONE {
         string path PK "root-relative slash path"
         json echo "the ECHO this path had when we deleted it"
@@ -73,6 +77,7 @@ erDiagram
     REPAIR ||--o| ECHO : "an owed path usually HAS a baseline; that is why the walk misses it"
     ECHO ||--o| TOMBSTONE : "never both: a delete moves the record across, a sync moves it back"
     ECHO ||--o| REFETCH : "a sync of the path discharges it, in the same transaction"
+    ECHO ||--o| KEPT : "the push's SetEcho discharges it, in the same transaction"
 ```
 
 What each bucket costs if the file is lost:
@@ -86,6 +91,7 @@ What each bucket costs if the file is lost:
 | `seen` | which paths one sweep observed remotely | a resumed sweep would infer false deletes — which is why these are on disk and not in memory |
 | `repair` | paths the uploader gave up on, for the next sweep to re-send (M27) | those files wait for `-sweep-interval` again, and are not repaired at all if it is `0` — though a lost push is still found by the walk's fingerprint row, which needs no record |
 | `refetch` | paths whose inbound apply failed while the cursor moved past them, for the pull loop to fetch again | those changes wait for the next sweep, and are not retried at all at `-sweep-interval 0` until something else touches the path — which is how every failed download behaved before this bucket existed (MC-46) |
+| `kept` | the remote version a §6 conflict already kept at a path, between the pull that kept it and the push that settles it (DESIGN.md §6) | a restart between those two keeps that version a second time: one duplicate copy, in a trash or on the remote |
 | `tombstone` | the baseline a deletion dropped, so a provider still serving its pre-deletion view is recognised rather than applied (§4.5) | a file deleted within the last few minutes can come back, and the directory it was in comes back permanently |
 
 `local-size` / `local-mtime` fingerprint the **backing** file, not the remote one,

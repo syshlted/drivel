@@ -40,6 +40,7 @@ var (
 	bucketRepair    = []byte("repair")
 	bucketTomb      = []byte("tombstone")
 	bucketRefetch   = []byte("refetch")
+	bucketKept      = []byte("kept")
 	keyCursor       = []byte("changefeed")
 	keySweep        = []byte("current")
 	keySweepDone    = []byte("done")
@@ -157,7 +158,7 @@ func Open(path string) (*Store, error) {
 	// Through s.update, not db.Update, so Commits() counts every commit this store
 	// has made rather than every one after the first.
 	if err := s.update(func(tx *bolt.Tx) error {
-		for _, b := range [][]byte{bucketCursor, bucketEcho, bucketHydration, bucketSweep, bucketSeen, bucketRepair, bucketTomb, bucketRefetch} {
+		for _, b := range [][]byte{bucketCursor, bucketEcho, bucketHydration, bucketSweep, bucketSeen, bucketRepair, bucketTomb, bucketRefetch, bucketKept} {
 			if _, err := tx.CreateBucketIfNotExists(b); err != nil {
 				return err
 			}
@@ -360,6 +361,9 @@ func (s *Store) SetEcho(path string, e Echo) error {
 		if err := tx.Bucket(bucketRefetch).Delete(k); err != nil {
 			return err
 		}
+		if err := tx.Bucket(bucketKept).Delete(k); err != nil {
+			return err
+		}
 		return tx.Bucket(bucketEcho).Put(k, v)
 	})
 }
@@ -414,6 +418,9 @@ func (s *Store) ForgetMany(paths []string) error {
 			}
 			// A path the remote no longer holds has nothing left to fetch.
 			if err := refetch.Delete(k); err != nil {
+				return err
+			}
+			if err := tx.Bucket(bucketKept).Delete(k); err != nil {
 				return err
 			}
 		}
@@ -1197,4 +1204,42 @@ func collectSubtree(b *bolt.Bucket, path string) []row {
 // within reports whether p is q itself or a path beneath it.
 func within(p, q string) bool {
 	return p == q || strings.HasPrefix(p, q+"/")
+}
+
+// --- kept conflict losers ---------------------------------------------------
+//
+// One conflict is usually met twice: by the pull, which finds the remote
+// changed under a local edit and keeps the remote's version, and then by the
+// push of that edit, which finds the same remote version diverged from its
+// baseline. The second must not keep a second copy. A record here names the
+// remote version already kept at a path, so that holds across a restart
+// between the two; the engine also remembers it in memory.
+//
+// SetEcho and ForgetMany discharge it in the transaction they already commit:
+// a fresh echo means the push replaced the version that was kept, and a path
+// the remote no longer holds has nothing to keep. So the bucket holds a path
+// only between a conflict and the push that settles it.
+
+// Kept returns the identity of the remote version last kept at path, if any.
+func (s *Store) Kept(path string) (identity string, ok bool, err error) {
+	err = s.db.View(func(tx *bolt.Tx) error {
+		if v := tx.Bucket(bucketKept).Get([]byte(path)); v != nil {
+			identity, ok = string(v), true
+		}
+		return nil
+	})
+	return identity, ok, err
+}
+
+// SetKept records that the remote version identity at path has been kept. It
+// costs no commit when that is already the record.
+func (s *Store) SetKept(path, identity string) error {
+	if have, ok, err := s.Kept(path); err != nil {
+		return err
+	} else if ok && have == identity {
+		return nil
+	}
+	return s.update(func(tx *bolt.Tx) error {
+		return tx.Bucket(bucketKept).Put([]byte(path), []byte(identity))
+	})
 }

@@ -1161,8 +1161,10 @@ boundaries call. Five things carry it.
    so the feed's echo of it is recognised and its later edits sync as content.
 4. **One conflict is met twice**: the pull ("local newer") and then the push of
    that edit find the same remote version. `Conflicts.kept` (path → version, in
-   memory) stops the second copy. The local folder is also checked by name. A
-   restart costs at most one duplicate in a trash or on the remote.
+   memory) and `state.SetKept` (the `kept` bucket, so a restart between the two
+   does not duplicate) stop the second copy. `SetEcho` and `ForgetMany`
+   discharge the record in their own transaction; one commit per conflict. The
+   local folder is also checked by name.
 5. **`remote-trash` uploads the loser and trashes it; it does not move the
    remote object.** Moving the original away would show every other client a
    deletion followed by a create at the path. The cost is a download and an

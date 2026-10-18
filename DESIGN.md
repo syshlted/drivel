@@ -1409,8 +1409,9 @@ are both lossy and racy.
   large loser no longer holds up the inbound changes queued behind it.
   **One conflict is usually met twice**, by the pull ("local newer") and then by
   the push of that edit, so `Conflicts` remembers the remote version it kept, per
-  path, in memory. A copy in the local folder is found by name anyway, and a
-  restart costs at most one duplicate in a trash. Default `both` reverses the
+  path, in memory and in the state store's `kept` bucket (discharged by the
+  push's `SetEcho`, so it holds a path only until the conflict settles). A copy
+  in the local folder is found by name anyway. Default `both` reverses the
   "local-only by policy" rule above: that rule existed so the walk would not
   upload sibling copies by accident, and those still stay local. A copy in the
   folder is uploaded on purpose, by `keepRemote`/`keepLocal` itself, with its
