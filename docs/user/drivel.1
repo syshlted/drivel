@@ -1291,7 +1291,10 @@ When a remote change arrives for a file that has also changed locally since the
 last sync, the newer modification time wins the path and the other version is
 kept beside it as
 .IR "name (conflict YYYY-MM-DD HH-MM-SS).ext" .
-Conflict copies are local-only and are never uploaded.
+Conflict copies are local-only and are never uploaded. On a backend that reports
+no checksums, such as SFTP, a local change is recognised by the size and
+modification time recorded at the last sync, or for a file never synced by
+comparing its bytes with the remote's.
 .PP
 The same check runs before an upload. Before replacing a file it has synced
 before,

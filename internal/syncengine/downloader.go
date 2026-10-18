@@ -6,6 +6,7 @@
 package syncengine
 
 import (
+	"bytes"
 	"context"
 	"crypto/md5" //nolint:gosec // G501: Drive addresses content by MD5; see fileMD5
 	"encoding/hex"
@@ -596,6 +597,23 @@ func (d *Downloader) applyTo(ctx context.Context, ch provider.RemoteChange, forg
 			return d.resolveConflict(ctx, ch.Path, dst, f)
 		}
 	}
+	// The same question without a remote digest — SFTP and every M17–M21
+	// backend. This used to fall through to the plain apply below, so on those
+	// backends any local edit not yet pushed was overwritten by the next remote
+	// change with no conflict copy at all (found by MC-31 over a real sshd,
+	// 2026-10-18).
+	if f.Hash == "" && localExists {
+		verdict, err := d.hashlessLocal(ctx, ch.Path, dst, f, echo, hasEcho)
+		if err != nil {
+			return err
+		}
+		switch verdict {
+		case localSame:
+			return d.rememberApplied(ch.Path, dst, f)
+		case localDiverged:
+			return d.resolveConflict(ctx, ch.Path, dst, f)
+		}
+	}
 
 	if err := d.materialize(ctx, ch.Path, dst, f); err != nil {
 		return err
@@ -834,6 +852,87 @@ func (d *Downloader) rememberApplied(path, dst string, f *provider.RemoteFile) e
 		Hash: f.Hash, Version: f.Version, At: time.Now(),
 		LocalSize: size, LocalMTime: mtime,
 	})
+}
+
+// hashlessVerdict is what hashlessLocal found out about a local file.
+type hashlessVerdict int
+
+const (
+	localUnchanged hashlessVerdict = iota // as last synced: apply the remote over it
+	localSame                             // already holds the remote's bytes: record, no download
+	localDiverged                         // edited here: a §6 conflict
+)
+
+// hashlessLocal decides, for a remote object with no content digest, whether
+// the local file at dst is an edit the remote change must not overwrite.
+//
+// With a baseline that carries a local fingerprint the answer is metadata:
+// the same test the delete rows and the lost-push row use (fingerprintDiverged),
+// so the three can never disagree about whether a file changed. Without one —
+// no baseline, or one written before M18 stored fingerprints — the only
+// evidence is the bytes: a different length is a different file, and an equal
+// one is settled by fetching the remote and comparing, which costs nothing the
+// plain apply would not have spent anyway.
+func (d *Downloader) hashlessLocal(ctx context.Context, rel, dst string, f *provider.RemoteFile, echo state.Echo, hasEcho bool) (hashlessVerdict, error) {
+	fi, err := os.Stat(dst)
+	if err != nil {
+		return localUnchanged, err
+	}
+	if hasEcho && !echo.LocalMTime.IsZero() {
+		if fingerprintDiverged(fi, echo) {
+			return localDiverged, nil
+		}
+		return localUnchanged, nil
+	}
+	if fi.Size() != f.Size {
+		return localDiverged, nil
+	}
+	cmp := filepath.Join(filepath.Dir(dst), ".drivel-cmp-"+filepath.Base(dst))
+	defer os.Remove(cmp)
+	if _, err := fetchTo(ctx, d.store, rel, cmp, time.Time{}, d.mon.observe); err != nil {
+		return localUnchanged, err
+	}
+	same, err := sameBytes(dst, cmp)
+	if err != nil {
+		return localUnchanged, err
+	}
+	if same {
+		return localSame, nil
+	}
+	return localDiverged, nil
+}
+
+// sameBytes reports whether two files hold identical content.
+func sameBytes(a, b string) (bool, error) {
+	fa, err := os.Open(a)
+	if err != nil {
+		return false, err
+	}
+	defer fa.Close()
+	fb, err := os.Open(b)
+	if err != nil {
+		return false, err
+	}
+	defer fb.Close()
+	ba, bb := make([]byte, 64<<10), make([]byte, 64<<10)
+	for {
+		na, ea := io.ReadFull(fa, ba)
+		nb, eb := io.ReadFull(fb, bb)
+		if na != nb || !bytes.Equal(ba[:na], bb[:nb]) {
+			return false, nil
+		}
+		aDone := ea == io.EOF || ea == io.ErrUnexpectedEOF
+		bDone := eb == io.EOF || eb == io.ErrUnexpectedEOF
+		if ea != nil && !aDone {
+			return false, ea
+		}
+		if eb != nil && !bDone {
+			return false, eb
+		}
+		if aDone || bDone {
+			return aDone && bDone, nil
+		}
+	}
 }
 
 // statMD5 returns the hex md5 of the file at p, reporting exists=false (no error)

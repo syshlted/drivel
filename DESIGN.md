@@ -1366,7 +1366,10 @@ are both lossy and racy.
   edit, so it is dropped and the pull applies the remote. A copy that cannot be
   downloaded fails the push, never the copy. Costs one `Stat` per rewrite of a
   small file with a baseline (creates still cost none); narrows the race to the
-  `Stat`→`Put` gap, which only a conditional write could close. A path with
+  `Stat`→`Put` gap, which only a conditional write could close. **The pull
+  half needed the hashless case too (2026-10-18)**: it ran only when the remote
+  reported a digest, so on SFTP an unpushed local edit was simply overwritten;
+  it now asks the M18 local fingerprint, and with no baseline compares bytes. A path with
   **no** baseline (a replaced state DB, two clients creating one path) is
   guarded on the same terms only when the gates already paid for the `Stat` —
   files of a block or more — since a small create would otherwise buy a round

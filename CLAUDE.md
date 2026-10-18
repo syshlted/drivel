@@ -2034,6 +2034,16 @@ makes it different from `gdrive` follows from that plus one absence, so most of
     write that landed mid-upload has already queued another event that will
     re-record it, while a pre-push fingerprint would describe bytes no longer on
     disk. Drive takes the digest branch exactly as before.
+
+    **The pull's §6 check had the same hole and kept it until 2026-10-18**:
+    `applyTo` ran the conflict test only when the remote reported a hash, so
+    on every hashless backend an unpushed local edit was overwritten by the
+    next remote change with no copy — the user docs promised one. Found by
+    MC-31 over a real sshd, where it left c2 holding c1's bytes and the remote
+    c2's. `hashlessLocal` now answers it: `fingerprintDiverged` against a
+    fingerprinted baseline (the third caller, so all three agree), else the
+    bytes — different length is a conflict, equal length fetches and compares,
+    which costs nothing the apply was not going to spend. `hashless_test.go`.
 13. **Directories report a constant `Version` (`"dir"`).** Empty made
     `Echo.Matches` false for every directory every pass, so the downloader
     re-created and re-logged each one — invisible at Drive's 24h sweep, the entire

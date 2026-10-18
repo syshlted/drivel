@@ -13,6 +13,14 @@ from source with `make build`.
 
 ## Unreleased
 
+### SFTP no longer overwrites an edit that has not uploaded yet — 2026-10-18
+
+On SFTP, a change arriving from the server replaced the local file even when it
+had been edited here and not yet uploaded, and no conflict copy was made. Drivel
+now keeps both, as it always has on Google Drive. A first sync of a folder that
+already matches the server compares the files and leaves identical ones alone.
+See [conflicts](docs/user/data-safety.md#conflicts).
+
 ### Copying a large file uploads it once — 2026-10-18
 
 A new file that took longer than the push delay (300ms by default) to write was

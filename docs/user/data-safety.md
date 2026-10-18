@@ -35,6 +35,12 @@ A conflict copy is only created when both sides genuinely diverged from the last
 synced state. A remote change to a file you have not touched is simply applied,
 and a local change that has not yet uploaded is simply uploaded.
 
+On SFTP, which reports no checksums, Drivel tells "changed here" from the size
+and modification time it recorded at the last sync, and for a file it has never
+synced it compares the bytes. Before 18 October 2026 it did not check on SFTP at
+all: a local edit that had not uploaded yet was overwritten by the next remote
+change, with no conflict copy.
+
 ### When both machines upload
 
 The case above is a remote change arriving *before* your edit is sent. The
