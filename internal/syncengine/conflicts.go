@@ -217,6 +217,26 @@ type conflictEnv struct {
 	dataDir string
 	logf    func(string, ...any)
 	observe func(error)
+
+	// later, when set, takes the remote half of keeping a loser — an upload, a
+	// trash — off the caller's goroutine, and nil runs it inline. The pull loop
+	// sets it, because an upload there held up every inbound change behind it
+	// and ignored a pause; the engine does not, because its workers are already
+	// off the event path and already stop at the pause gate. Only the remote
+	// half is deferred: the loser is safe on local disk before the caller goes
+	// on to replace it.
+	later func(copyRel string, job func(context.Context) string)
+}
+
+// finish runs job, the remote half of keeping the copy at copyRel, inline or
+// through env.later, and returns where the loser is: job's own answer, or
+// pending when it has been queued.
+func (env conflictEnv) finish(ctx context.Context, copyRel, pending string, job func(context.Context) string) string {
+	if env.later == nil {
+		return job(ctx)
+	}
+	env.later(copyRel, job)
+	return pending
 }
 
 func (env conflictEnv) abs(rel string) string {
@@ -239,13 +259,6 @@ func (c *Conflicts) keepLocal(ctx context.Context, env conflictEnv, rel string, 
 			return "", fmt.Errorf("moving the local edit to the trash: %w", err)
 		}
 		return "the trash, as " + filepath.Base(dst), nil
-
-	case ConflictsRemoteTrash:
-		copyRel := copyPath(rel, mtime)
-		if err := c.trashRemotely(ctx, env, copyRel, src); err != nil {
-			return "", err
-		}
-		return "the remote trash, as " + copyRel, nil
 	}
 
 	copyRel := uniqueCopy(env, copyPath(rel, mtime))
@@ -289,22 +302,6 @@ func (c *Conflicts) keepRemote(ctx context.Context, env conflictEnv, rel string,
 		}
 		where = "the trash, as " + filepath.Base(e.Path)
 
-	case ConflictsRemoteTrash:
-		tmp, err := os.CreateTemp(env.dataDir, ".drivel-conflict-*")
-		if err != nil {
-			return "", err
-		}
-		tmpName := tmp.Name()
-		_ = tmp.Close()
-		defer os.Remove(tmpName)
-		if _, err := fetchTo(ctx, env.store, rel, tmpName, modified, env.observe); err != nil {
-			return "", err
-		}
-		if err := c.trashRemotely(ctx, env, copyRel, tmpName); err != nil {
-			return "", err
-		}
-		where = "the remote trash, as " + copyRel
-
 	default:
 		dst := env.abs(copyRel)
 		if _, err := os.Lstat(dst); err == nil {
@@ -323,27 +320,49 @@ func (c *Conflicts) keepRemote(ctx context.Context, env conflictEnv, rel string,
 }
 
 // publish puts a copy already in the local folder where the policy wants it,
-// and says where that is. A failure to upload is reported and leaves the copy
-// local, which still preserves it: with the folder on both sides the sweep's
-// walk uploads it later, and with it on the remote only it stays where it is.
+// and says where that is: kept there, uploaded beside it, or uploaded and the
+// local one removed — into the remote trash for ConflictsRemoteTrash. A failed
+// upload is reported and leaves the copy local, which still preserves it: with
+// the folder on both sides the sweep's walk uploads it later, and otherwise it
+// stays where it is. This is the remote half of keeping a loser, so it goes
+// through env.finish.
 func (c *Conflicts) publish(ctx context.Context, env conflictEnv, copyRel string) string {
-	switch c.place() {
-	case ConflictsLocal:
+	switch {
+	case c.action() == ConflictsDir && c.place() == ConflictsLocal:
 		return copyRel
-	case ConflictsBoth:
-		if err := c.upload(ctx, env, copyRel, env.abs(copyRel), true); err != nil {
-			env.logf("[sync] conflict copy %s: uploading it: %v (kept here; the next sweep sends it)", copyRel, err)
-			return copyRel + " (here; upload pending)"
-		}
-		return copyRel + " (here and on the remote)"
+	case c.action() == ConflictsDir && c.place() == ConflictsBoth:
+		return env.finish(ctx, copyRel, copyRel+" (here; upload queued)", func(ctx context.Context) string {
+			if err := c.upload(ctx, env, copyRel, env.abs(copyRel), true); err != nil {
+				env.logf("[sync] conflict copy %s: uploading it: %v (kept here; the next sweep sends it)", copyRel, err)
+				return copyRel + " (here; upload pending)"
+			}
+			return copyRel + " (here and on the remote)"
+		})
 	}
+	trashIt := c.action() == ConflictsRemoteTrash
+	return env.finish(ctx, copyRel, copyRel+" (here until it is sent)", func(ctx context.Context) string {
+		return c.sendAway(ctx, env, copyRel, trashIt)
+	})
+}
+
+// sendAway uploads the local copy at copyRel without recording it — no client
+// syncs where it is going — trashes it there when trashIt, and then removes the
+// local one. Any failure leaves the local copy in place and says so.
+func (c *Conflicts) sendAway(ctx context.Context, env conflictEnv, copyRel string, trashIt bool) string {
 	src := env.abs(copyRel)
-	if err := c.upload(ctx, env, copyRel, src, false); err != nil {
-		env.logf("[sync] conflict copy %s: uploading it: %v (kept here instead)", copyRel, err)
-		return copyRel + " (here, because the upload failed)"
+	err := c.upload(ctx, env, copyRel, src, false)
+	if err == nil && trashIt {
+		err = c.trashRemote(ctx, env, copyRel)
+	}
+	if err != nil {
+		env.logf("[sync] conflict copy %s: %v (kept here instead)", copyRel, err)
+		return copyRel + " (here, because sending it failed)"
 	}
 	_ = os.Remove(src)
 	_ = os.Remove(filepath.Dir(src)) // only if empty
+	if trashIt {
+		return "the remote trash, as " + copyRel
+	}
 	return copyRel + " (on the remote)"
 }
 
@@ -372,19 +391,16 @@ func (c *Conflicts) upload(ctx context.Context, env conflictEnv, copyRel, src st
 	return nil
 }
 
-// trashRemotely uploads src as copyRel and trashes it at once.
-func (c *Conflicts) trashRemotely(ctx context.Context, env conflictEnv, copyRel, src string) error {
+// trashRemote trashes the object at copyRel, which upload has just put there.
+func (c *Conflicts) trashRemote(ctx context.Context, env conflictEnv, copyRel string) error {
 	t, ok := provider.AsTrasher(env.store)
 	if !ok {
 		// Open refuses this combination; reaching it means a store whose
-		// capabilities changed, and a copy kept nowhere would be a loss.
+		// capabilities changed. The copy is still kept, locally.
 		return fmt.Errorf("conflicts = %s, but this backend has no trash", ConflictsRemoteTrash)
 	}
-	if err := c.upload(ctx, env, copyRel, src, false); err != nil {
-		return fmt.Errorf("uploading the losing version to trash it: %w", err)
-	}
 	if err := t.Trash(ctx, copyRel); err != nil {
-		return fmt.Errorf("trashing the losing version: %w", err)
+		return fmt.Errorf("trashing it: %w", err)
 	}
 	return nil
 }

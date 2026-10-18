@@ -1141,9 +1141,17 @@ boundaries call. Five things carry it.
    is a restore (push the file), in is a removal (remove it remotely).
 2. **A loser that cannot be kept is never replaced.** keepLocal/keepRemote
    return an error and the caller fails the apply or the push, so the retry
-   machinery decides. The one softening: a copy already in the local folder
-   whose *upload* fails (`both`, `remote`) is logged and left there, because it
-   is preserved; with `both` the walk uploads it later.
+   machinery decides. Every keep is a **local step then a remote one**: the
+   loser lands in the local folder (or the home trash) first, and only that
+   step can fail the caller. The remote half — upload for `both`/`remote`,
+   upload-then-`Trash` for `remote-trash` — is logged and leaves the copy in
+   the local folder if it fails, because it is preserved; with `both` the walk
+   uploads it later. **On the pull side the remote half runs off the pull
+   loop** (`conflictEnv.later` → `Downloader.sendConflictCopy`, at most
+   `conflictSenders` at once, after the pause gate, waited for by `Run`),
+   because inline it held up every inbound change behind a large loser and
+   ignored a pause. The engine runs it inline: its workers are already off the
+   event path and already gated.
 3. **Default `both` reverses "conflict copies are local-only".** That rule
    existed so the walk would not publish sibling copies by accident; those
    (made before 2026-10-18) are still recognised by `conflictRe` and still

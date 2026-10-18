@@ -37,7 +37,9 @@ Two new settings, `conflicts` and `conflicts-dir`, choose otherwise:
 Also, a file's first upload now checks for a file already at that path whatever
 its size, and keeps it. Before, only files of 4 MiB or more were checked. On
 Google Drive and SFTP the check costs no extra request. `conflicts = "overwrite"`
-turns it off. Copies made before this release stay where they are. See
+turns it off. A copy is saved locally before it is uploaded, and the upload
+runs in the background, so incoming changes don't wait for it and `drivel pause`
+holds it. Copies made before this release stay where they are. See
 [where the loser goes](docs/user/data-safety.md#where-the-loser-goes).
 
 ### SFTP no longer overwrites an edit that has not uploaded yet — 2026-10-18

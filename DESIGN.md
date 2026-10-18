@@ -1401,8 +1401,12 @@ are both lossy and racy.
   asked by the push, the pull, the sweep's remote pass, its delete pass and its
   walk. One pass disagreeing would upload a copy and then infer it deleted.
   **A loser that cannot be kept fails the operation that would replace it**
-  (pull: the refetch pass retries; push: the engine retries), except that a copy
-  already safe in the local folder whose *upload* fails is logged and left there.
+  (pull: the refetch pass retries; push: the engine retries). Only the *local*
+  step of keeping it can fail that way — into the local folder or the home
+  trash — and the remote step after it (an upload, or an upload and a `Trash`)
+  is logged and leaves the copy in the local folder when it fails. On the pull
+  side that remote step runs on its own goroutine behind the pause gate, so a
+  large loser no longer holds up the inbound changes queued behind it.
   **One conflict is usually met twice**, by the pull ("local newer") and then by
   the push of that edit, so `Conflicts` remembers the remote version it kept, per
   path, in memory. A copy in the local folder is found by name anyway, and a

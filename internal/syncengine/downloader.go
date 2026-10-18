@@ -19,6 +19,7 @@ import (
 	"path"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/syshlted/drivel/internal/fsevent"
@@ -130,6 +131,11 @@ type Downloader struct {
 	// makes this loop wait at, between polls and between sweep pages.
 	mon  *Monitor
 	hold Holder
+
+	// sending counts conflict copies on their way to the remote, at most
+	// conflictSenders at once (sendConflictCopy).
+	sending sync.WaitGroup
+	senders chan struct{}
 }
 
 // Holder is satisfied by *Engine: WaitUnpaused blocks while the mount is paused.
@@ -210,7 +216,7 @@ func NewDownloader(src provider.ChangeSource, store provider.Store, dataDir stri
 	return &Downloader{
 		src: src, store: store, dataDir: dataDir, state: st, cad: cad,
 		repairBase: repairDelay, refetchBase: refetchDelay, openedAt: time.Now(),
-		conflicts: &Conflicts{},
+		conflicts: &Conflicts{}, senders: make(chan struct{}, conflictSenders),
 	}
 }
 
@@ -224,15 +230,50 @@ func (d *Downloader) Conflicts(c *Conflicts) *Downloader {
 	return d
 }
 
-// conflictEnv is what the shared conflict policy needs from the pull loop.
-func (d *Downloader) conflictEnv() conflictEnv {
-	return conflictEnv{store: d.store, state: d.state, dataDir: d.dataDir, logf: d.logf, observe: d.mon.observe}
+// conflictEnv is what the shared conflict policy needs from the pull loop. The
+// remote half of keeping a loser runs on its own goroutine (sendConflictCopy),
+// so a large copy's upload does not hold up the next inbound change.
+func (d *Downloader) conflictEnv(ctx context.Context) conflictEnv {
+	return conflictEnv{
+		store: d.store, state: d.state, dataDir: d.dataDir, logf: d.logf, observe: d.mon.observe,
+		later: func(copyRel string, job func(context.Context) string) { d.sendConflictCopy(ctx, copyRel, job) },
+	}
+}
+
+// conflictSenders bounds how many conflict copies one pull loop sends at once.
+// A page of a thousand conflicts would otherwise be a thousand uploads at once.
+const conflictSenders = 2
+
+// sendConflictCopy runs job — uploading, or uploading and trashing, a copy
+// already safe in the local conflicts folder — once the mount is not paused,
+// since a pause promises to stop every transfer and this is one. Run waits for
+// it before returning, so it never outlives the state store it records in. Cut
+// short by shutdown, the copy stays in the local folder, which preserves it;
+// with the folder on both sides the walk sends it later.
+func (d *Downloader) sendConflictCopy(ctx context.Context, copyRel string, job func(context.Context) string) {
+	d.sending.Add(1)
+	go func() {
+		defer d.sending.Done()
+		if !d.waitUnpaused(ctx) {
+			d.logf("[pull] conflict copy %s: not sent before shutdown (kept in the local folder)", copyRel)
+			return
+		}
+		select {
+		case d.senders <- struct{}{}:
+		case <-ctx.Done():
+			d.logf("[pull] conflict copy %s: not sent before shutdown (kept in the local folder)", copyRel)
+			return
+		}
+		defer func() { <-d.senders }()
+		d.logf("[pull] conflict copy %s: %s", copyRel, job(ctx))
+	}()
 }
 
 // Run polls until ctx is cancelled. It resumes from the persisted cursor, or
 // obtains a fresh start token on first run so it only ever sees changes from
 // "now" forward.
 func (d *Downloader) Run(ctx context.Context) {
+	defer d.sending.Wait()
 	if !d.hasFeed() {
 		d.runWithoutFeed(ctx)
 		return
@@ -816,7 +857,7 @@ func (d *Downloader) resolveConflict(ctx context.Context, rel, dst string, f *pr
 
 	if f.Modified.After(localMtime) {
 		// Remote is newer: it wins the real path, and the local edit is kept.
-		where, err := d.conflicts.keepLocal(ctx, d.conflictEnv(), rel, localMtime)
+		where, err := d.conflicts.keepLocal(ctx, d.conflictEnv(ctx), rel, localMtime)
 		if err != nil {
 			return fmt.Errorf("keeping the local edit before applying a newer remote: %w", err)
 		}
@@ -834,7 +875,7 @@ func (d *Downloader) resolveConflict(ctx context.Context, rel, dst string, f *pr
 	// version is kept. Leave dst and its echo untouched — the uploader still holds
 	// the local edit to push. The copy is downloaded in full even in lazy mode: it
 	// could never be hydrated later.
-	where, err := d.conflicts.keepRemote(ctx, d.conflictEnv(), rel, *f)
+	where, err := d.conflicts.keepRemote(ctx, d.conflictEnv(ctx), rel, *f)
 	if err != nil {
 		return fmt.Errorf("keeping the remote version: %w", err)
 	}

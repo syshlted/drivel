@@ -167,10 +167,10 @@ func TestTheConflictsFolderLivesWhereItIsConfigured(t *testing.T) {
 // A copy that cannot be uploaded is still kept — locally — and the push of the
 // winner goes ahead: the loser is preserved, which is the promise.
 func TestACopyThatCannotBeUploadedStaysLocal(t *testing.T) {
-	for _, place := range []ConflictPlace{ConflictsBoth, ConflictsRemote} {
-		t.Run(string(place), func(t *testing.T) {
+	for _, c := range []*Conflicts{{Place: ConflictsBoth}, {Place: ConflictsRemote}, {Action: ConflictsRemoteTrash}} {
+		t.Run(c.String(), func(t *testing.T) {
 			ts := newTrashingStore()
-			dir, _, logs, err := pushOver(t, putFailStore{ts}, ts.patchStore, &Conflicts{Place: place})
+			dir, _, logs, err := pushOver(t, putFailStore{ts}, ts.patchStore, c)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -211,16 +211,17 @@ func (s *trashingStore) trashed2() map[string]string {
 	return out
 }
 
-// remote-trash with nothing to trash it in must fail the push, never fall
-// through to an overwrite.
-func TestRemoteTrashWithoutATrashFailsThePush(t *testing.T) {
+// remote-trash with nothing to trash it in (Open refuses that; a store whose
+// capabilities changed could still reach it) keeps the remote's version here,
+// never nowhere.
+func TestRemoteTrashWithoutATrashKeepsTheCopyHere(t *testing.T) {
 	ps := newPatchStore()
-	_, _, _, err := pushOver(t, ps, ps, &Conflicts{Action: ConflictsRemoteTrash})
-	if err == nil {
-		t.Fatal("the push went ahead with nowhere to keep the remote's version")
+	dir, _, _, err := pushOver(t, ps, ps, &Conflicts{Action: ConflictsRemoteTrash})
+	if err != nil {
+		t.Fatal(err)
 	}
-	if got := string(ps.remoteBytes("a.txt")); got != "theirs" {
-		t.Errorf("remote = %q; it was overwritten unkept", got)
+	if got := localCopies(t, dir); onlyValue(got) != "theirs" {
+		t.Errorf("local copies = %v; want the remote's version kept here", got)
 	}
 }
 
@@ -333,7 +334,15 @@ func TestAFirstPushOfTheSameBytesKeepsNoCopy(t *testing.T) {
 // here to "ours" an hour ago, and a remote change to "theirs" arriving now.
 func pullConflict(t *testing.T, store provider.Store, ps *patchStore, c *Conflicts) (dir string, d *Downloader, err error) {
 	t.Helper()
+	return pullConflictWith(t, store, ps, c, func(string) {})
+}
+
+// pullConflictWith is pullConflict with prepare run on the backing directory
+// first. It returns once the copy's remote half has finished too.
+func pullConflictWith(t *testing.T, store provider.Store, ps *patchStore, c *Conflicts, prepare func(dir string)) (dir string, d *Downloader, err error) {
+	t.Helper()
 	dir = t.TempDir()
+	prepare(dir)
 	st := newState(t)
 	ps.seed("a.txt", []byte("theirs"))
 	writeFile(t, dir, "a.txt", "ours")
@@ -341,7 +350,9 @@ func pullConflict(t *testing.T, store provider.Store, ps *patchStore, c *Conflic
 	_ = st.SetEcho("a.txt", state.Echo{Hash: md5hex("base"), Version: "1", At: time.Now()})
 	d = NewDownloader(nil, store, dir, st, DefaultCadence).Conflicts(c)
 	remote := &provider.RemoteFile{Path: "a.txt", Hash: md5hex("theirs"), Version: "2", Modified: time.Now()}
-	return dir, d, d.apply(context.Background(), provider.RemoteChange{Path: "a.txt", File: remote})
+	err = d.apply(context.Background(), provider.RemoteChange{Path: "a.txt", File: remote})
+	d.sending.Wait()
+	return dir, d, err
 }
 
 // The pull's remote-newer branch keeps the LOCAL edit, which is the case where
@@ -387,10 +398,13 @@ func TestALocalEditThatLosesIsKeptByEachPolicy(t *testing.T) {
 }
 
 // A local edit that cannot be kept is not replaced: the apply fails and the
-// edit is where it was.
+// edit is where it was. A file where the conflicts folder should be is what
+// makes it unkeepable here.
 func TestALocalEditThatCannotBeKeptIsNotReplaced(t *testing.T) {
 	ts := newTrashingStore()
-	dir, _, err := pullConflict(t, putFailStore{ts}, ts.patchStore, &Conflicts{Action: ConflictsRemoteTrash})
+	dir, _, err := pullConflictWith(t, ts, ts.patchStore, &Conflicts{Action: ConflictsRemoteTrash}, func(dir string) {
+		writeFile(t, dir, ConflictDirName, "in the way")
+	})
 	if err == nil {
 		t.Fatal("the apply succeeded with nowhere to keep the local edit")
 	}
@@ -417,6 +431,7 @@ func TestOneConflictIsKeptOnceAcrossThePullAndThePush(t *testing.T) {
 	if err := d.apply(context.Background(), provider.RemoteChange{Path: "a.txt", File: &remote}); err != nil {
 		t.Fatal(err)
 	}
+	d.sending.Wait()
 	e := New(Config{Store: ts, DataDir: dir, State: st, Conflicts: c})
 	if err := e.pushContent(context.Background(), "a.txt", nil); err != nil {
 		t.Fatal(err)
@@ -528,5 +543,104 @@ func TestTheWalkSendsAConflictsFolderOnlyWhenItSyncs(t *testing.T) {
 		if got := f.push.ops(); !equal(got, tc.want) {
 			t.Errorf("%s: pushes = %v; want %v", tc.c, got, tc.want)
 		}
+	}
+}
+
+// blockingPutStore holds every Put inside a conflicts folder until release is
+// closed, and says when one has started.
+type blockingPutStore struct {
+	*trashingStore
+	started chan string
+	release chan struct{}
+}
+
+func (s blockingPutStore) Put(ctx context.Context, p string, r io.Reader) (provider.RemoteFile, error) {
+	if inConflictDir(p) {
+		s.started <- p
+		<-s.release
+	}
+	return s.trashingStore.Put(ctx, p, r)
+}
+
+// heldGate is a Holder that is paused until opened.
+type heldGate struct{ open chan struct{} }
+
+func (g heldGate) WaitUnpaused(ctx context.Context) bool {
+	select {
+	case <-g.open:
+		return true
+	case <-ctx.Done():
+		return false
+	}
+}
+
+// pendingPull is pullConflict's setup with the apply left to the caller.
+func pendingPull(t *testing.T, store provider.Store, ps *patchStore, c *Conflicts) (dir string, d *Downloader, apply func() error) {
+	t.Helper()
+	dir = t.TempDir()
+	st := newState(t)
+	ps.seed("a.txt", []byte("theirs"))
+	writeFile(t, dir, "a.txt", "ours")
+	setMtime(t, dir, "a.txt", time.Now().Add(-time.Hour))
+	_ = st.SetEcho("a.txt", state.Echo{Hash: md5hex("base"), Version: "1", At: time.Now()})
+	d = NewDownloader(nil, store, dir, st, DefaultCadence).Conflicts(c)
+	remote := &provider.RemoteFile{Path: "a.txt", Hash: md5hex("theirs"), Version: "2", Modified: time.Now()}
+	return dir, d, func() error {
+		return d.apply(context.Background(), provider.RemoteChange{Path: "a.txt", File: remote})
+	}
+}
+
+// The pull loop does not wait for a conflict copy's upload: the apply returns
+// with the loser safe locally while the upload is still running. Before
+// 2026-10-18 the upload ran inside the apply, so one large loser held up every
+// inbound change behind it.
+func TestThePullDoesNotWaitForAConflictCopysUpload(t *testing.T) {
+	ts := newTrashingStore()
+	bs := blockingPutStore{ts, make(chan string, 1), make(chan struct{})}
+	dir, d, apply := pendingPull(t, bs, ts.patchStore, &Conflicts{})
+	defer d.sending.Wait()
+	defer close(bs.release)
+
+	applied := make(chan error, 1)
+	go func() { applied <- apply() }()
+	select {
+	case <-bs.started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the copy's upload never started")
+	}
+	select {
+	case err := <-applied:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the apply waited for the conflict copy's upload")
+	}
+	if got, _ := readBacking(t, dir, "a.txt"); got != "theirs" {
+		t.Errorf("a.txt = %q; the newer remote should already be in place", got)
+	}
+	if got := onlyValue(localCopies(t, dir)); got != "ours" {
+		t.Errorf("local copy = %q; the loser should be safe here before its upload", got)
+	}
+}
+
+// A pause holds a conflict copy's upload, as it holds every other transfer,
+// and the upload goes once the pause ends.
+func TestAPauseHoldsAConflictCopysUpload(t *testing.T) {
+	ts := newTrashingStore()
+	g := heldGate{make(chan struct{})}
+	_, d, apply := pendingPull(t, ts, ts.patchStore, &Conflicts{})
+	d.PausedBy(g)
+	if err := apply(); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(50 * time.Millisecond)
+	if got := remoteCopies(ts.patchStore); len(got) != 0 {
+		t.Errorf("remote copies = %v while paused; want none yet", got)
+	}
+	close(g.open)
+	d.sending.Wait()
+	if got := onlyValue(remoteCopies(ts.patchStore)); got != "ours" {
+		t.Errorf("remote copy = %q after the pause; want the local edit", got)
 	}
 }

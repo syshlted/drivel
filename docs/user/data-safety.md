@@ -81,9 +81,12 @@ A few things follow from those choices:
 - **Moving a copy out of the folder restores it.** It becomes an ordinary file
   at its new path and uploads as one. Moving a file *into* a folder that is not
   synced removes it from the remote, as deleting it would.
+- **A copy is safe on this machine before anything is uploaded.** The upload
+  happens in the background, so changes arriving from the remote do not wait
+  for it, and `drivel pause` holds it like any other transfer.
 - **If uploading a copy fails, it is kept locally.** With the folder on both
-  sides, the next sweep uploads it. With it on the remote only, it stays where it
-  is and the log says so.
+  sides, the next sweep uploads it. Otherwise, including under `remote-trash`,
+  it stays in the local `.drivel-conflicts` folder and the log says so.
 - **A loser that cannot be kept anywhere is not overwritten.** If the remote's
   version cannot be downloaded, or a trash cannot be written, the upload or
   download that would replace it fails and is retried.
