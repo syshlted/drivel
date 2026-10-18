@@ -2409,8 +2409,13 @@ reports `fuse.drivel` (rule 1, from the other side), `systemctl stop` unmounts
 cleanly — and **the daemon is in the unit's cgroup**, which is what this note
 feared and could not check: `CGroup: /system.slice/mnt-<x>.mount └─ /sbin/
 mount.fuse.drivel …`. Reached directly from a shell it lands in `/init.scope`
-instead. **One thing is still unrun**, so don't widen this to "M16 is done": mounting
-at boot (the run used `noauto`, so `local-fs.target` ordering is untested).
+instead. **Mounting at boot ran on 2026-10-18** (same host, `wsl --shutdown`
+then a cold start, a line *without* `noauto`, `_netdev,x-systemd.requires=` a
+systemd-run sshd): the unit came up on its own, `Before=remote-fs.target`,
+`After=` the sshd unit, and synced both ways. The sshd unit was `Type=simple`,
+so it counted as started before it listened — the first enumeration met
+`connection refused` and the sweep's retry recovered 30s later, while the mount
+itself never waited, which is §2.1 holding at boot.
 
 **The drain-on-stop question was answered on 2026-10-17, and the premise was
 wrong**: systemd does *not* kill the cgroup on `stop`. A mount unit's stop is

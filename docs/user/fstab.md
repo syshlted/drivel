@@ -249,8 +249,11 @@ WantedBy=multi-user.target
 Measured on the same host: a 40 MiB upload in flight, `systemctl stop` returned
 after 20 seconds with the remote copy complete and no process left behind.
 
-Mounting **at boot** is still untested — the checks used `noauto` — so if a boot
-mount misbehaves, `nofail` and `x-systemd.automount` above are the first things to
+Mounting **at boot** has been checked too: a line without `noauto`, ordered after
+the SSH server with `x-systemd.requires=`, came up on its own after a cold start
+and synced both ways. If the server is not answering yet when the mount starts,
+the mount still comes up and Drivel keeps retrying the server. If a boot mount
+misbehaves, `nofail` and `x-systemd.automount` above are the first things to
 reach for. Please report what you see.
 
 ## When it does not come up
