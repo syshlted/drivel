@@ -26,11 +26,15 @@ func setMtime(t *testing.T, dir, rel string, when time.Time) {
 	}
 }
 
-// findConflictCopy returns the content of the single "(conflict …)" file under
-// dir, or ok=false if there is none.
+// findConflictCopy returns the content of the single "(conflict …)" file in
+// dir's conflicts folder, or ok=false if there is none.
 func findConflictCopy(t *testing.T, dir string) (name, content string, ok bool) {
 	t.Helper()
+	dir = filepath.Join(dir, ConflictDirName)
 	entries, err := os.ReadDir(dir)
+	if os.IsNotExist(err) {
+		return "", "", false
+	}
 	if err != nil {
 		t.Fatal(err)
 	}

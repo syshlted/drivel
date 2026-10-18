@@ -44,10 +44,13 @@ its method set already allows.
 
 ### conflict copy
 
-The losing side of a two-sided edit, preserved as a sibling file named
-`NAME (conflict 2026-09-07 14-22-08).ext`. **Local-only by policy** and never
-uploaded — publishing them would broadcast the losing side of every conflict to
-every device. The sweep's local walk skips them for the same reason.
+The losing side of a two-sided edit, named `NAME (conflict 2026-09-07
+14-22-08).ext` for the loser's modification time. Since 2026-10-18 it goes where
+the mount's `conflicts` policy says: by default the directory's
+`.drivel-conflicts` folder, synced on both sides, or that folder kept local or
+remote-only, a trash, or nowhere (DESIGN.md §6). Copies made earlier sit beside
+their file and stay **local-only**; the walk recognises and skips them, because
+publishing them would broadcast the losing side of every old conflict.
 
 ### coalescer
 

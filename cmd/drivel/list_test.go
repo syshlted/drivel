@@ -347,7 +347,7 @@ func TestPrintMountListColumns(t *testing.T) {
 	if err := printMountList(&full, ls, true); err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"DATA", "STATE", "MODE", "SWEEP", "MAX-DELETES", "state.db", "lazy", "5m0s", "100"} {
+	for _, want := range []string{"DATA", "STATE", "MODE", "SWEEP", "MAX-DELETES", "CONFLICTS", "state.db", "lazy", "5m0s", "100", "dir (both)"} {
 		if !strings.Contains(full.String(), want) {
 			t.Errorf("full listing lacks %q:\n%s", want, full.String())
 		}
@@ -368,7 +368,7 @@ func TestPrintMountListSpellsOutTheAbsentValues(t *testing.T) {
 		SweepInterval: 24 * time.Hour, MaxDeletes: 100,
 	}}
 	row := mountRow(logOnly, true)
-	want := []string{"scratch", "-", "-", "/home/u/scratch", "/home/u/scratch-data", "-", "log-only", "-", "-"}
+	want := []string{"scratch", "-", "-", "/home/u/scratch", "/home/u/scratch-data", "-", "log-only", "-", "-", "-"}
 	if len(row) != len(want) {
 		t.Fatalf("row has %d cells; want %d", len(row), len(want))
 	}
@@ -384,7 +384,7 @@ func TestPrintMountListSpellsOutTheAbsentValues(t *testing.T) {
 		StateDB: "/s.db", SweepInterval: 0, MaxDeletes: 0,
 	}}
 	row = mountRow(inPlace, true)
-	for i, want := range map[int]string{4: "(in place)", 6: "eager", 7: "off", 8: "unlimited"} {
+	for i, want := range map[int]string{4: "(in place)", 6: "eager", 7: "off", 8: "unlimited", 9: "dir (both)"} {
 		if row[i] != want {
 			t.Errorf("%s: cell %d is %q; want %q", fullColumns[i], i, row[i], want)
 		}

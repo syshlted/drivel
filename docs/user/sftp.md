@@ -144,6 +144,11 @@ does not invent one** — a hidden directory of deleted files would sit inside t
 tree being synced, where the next sweep would enumerate it and pull every deleted
 file back down.
 
+The same goes for conflict copies: `conflicts = "remote-trash"` is refused on an
+SFTP mount, because there is nowhere to put them. The default, a
+`.drivel-conflicts` folder, works here, as do the local trash and the folder
+kept on one side; see [where the loser goes](data-safety.md#where-the-loser-goes).
+
 So `rm` is `rm`. That matters most for the deletions you did *not* type: a sweep
 can *infer* one, from a wrong premise like a mount pointed at the wrong `root` or
 a backing directory that was emptied. The guard is

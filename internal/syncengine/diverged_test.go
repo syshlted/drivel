@@ -53,11 +53,15 @@ func divergedFixture(t *testing.T, base, theirs, ours string) (dir string, store
 	}
 }
 
-// conflictCopies lists the §6 copies of a.txt in dir.
+// conflictCopies lists the §6 copies of a.txt in dir's conflicts folder.
 func conflictCopies(t *testing.T, dir string) map[string]string {
 	t.Helper()
 	out := map[string]string{}
+	dir = filepath.Join(dir, ConflictDirName)
 	ents, err := os.ReadDir(dir)
+	if os.IsNotExist(err) {
+		return out
+	}
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -173,7 +177,10 @@ func TestARemoteThatCannotBeKeptIsNotOverwritten(t *testing.T) {
 func TestACopyThePullAlreadyMadeIsNotMadeAgain(t *testing.T) {
 	dir, store, _, engine := divergedFixture(t, "base", "theirs", "ours")
 	when := time.Date(2026, 10, 17, 9, 30, 0, 0, time.UTC)
-	pulled := filepath.Join(dir, filepath.FromSlash(conflictName("a.txt", when)))
+	pulled := filepath.Join(dir, filepath.FromSlash(copyPath("a.txt", when)))
+	if err := os.MkdirAll(filepath.Dir(pulled), 0o755); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.WriteFile(pulled, []byte("theirs, as the pull saved it"), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -221,10 +228,10 @@ func TestAFirstPushOverAnUnknownRemoteKeepsIt(t *testing.T) {
 		t.Error("the local file should still win the path")
 	}
 	var copies []string
-	ents, _ := os.ReadDir(dir)
+	ents, _ := os.ReadDir(filepath.Join(dir, ConflictDirName))
 	for _, ent := range ents {
 		if strings.HasPrefix(ent.Name(), "a (conflict ") {
-			b, _ := os.ReadFile(filepath.Join(dir, ent.Name()))
+			b, _ := os.ReadFile(filepath.Join(dir, ConflictDirName, ent.Name()))
 			if len(b) == 0 || b[0] != 't' {
 				t.Errorf("%s does not hold the remote's bytes", ent.Name())
 			}

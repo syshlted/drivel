@@ -13,6 +13,25 @@ from source with `make build`.
 
 ## Unreleased
 
+### You choose where conflict copies go — 2026-10-18
+
+The losing side of a conflict now goes into a `.drivel-conflicts` folder in the
+same directory, instead of a copy beside the file. **By default that folder
+syncs like any other, so conflict copies now reach the remote and your other
+machines.** Before, they stayed on the one machine where the conflict happened.
+Two new settings, `conflicts` and `conflicts-dir`, choose otherwise:
+
+- the folder kept on this machine only, or on the remote only;
+- your desktop trash;
+- the backend's trash (Google Drive);
+- or nowhere.
+
+Also, a file's first upload now checks for a file already at that path whatever
+its size, and keeps it. Before, only files of 4 MiB or more were checked. On
+Google Drive and SFTP the check costs no extra request. `conflicts = "overwrite"`
+turns it off. Copies made before this release stay where they are. See
+[where the loser goes](docs/user/data-safety.md#where-the-loser-goes).
+
 ### SFTP no longer overwrites an edit that has not uploaded yet — 2026-10-18
 
 On SFTP, a change arriving from the server replaced the local file even when it

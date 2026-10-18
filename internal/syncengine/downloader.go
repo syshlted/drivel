@@ -11,6 +11,7 @@ import (
 	"crypto/md5" //nolint:gosec // G501: Drive addresses content by MD5; see fileMD5
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"os"
@@ -119,6 +120,10 @@ type Downloader struct {
 	// and one modified before it is not. See repushDiverged.
 	openedAt time.Time
 
+	// conflicts is the mount's conflict policy, shared with its engine; never nil
+	// (NewDownloader installs the default, and Conflicts replaces it).
+	conflicts *Conflicts
+
 	// M14. mon is written to and never read (see Monitor); hold is what a pause
 	// makes this loop wait at, between polls and between sweep pages.
 	mon  *Monitor
@@ -203,7 +208,23 @@ func NewDownloader(src provider.ChangeSource, store provider.Store, dataDir stri
 	return &Downloader{
 		src: src, store: store, dataDir: dataDir, state: st, cad: cad,
 		repairBase: repairDelay, refetchBase: refetchDelay, openedAt: time.Now(),
+		conflicts: &Conflicts{},
 	}
+}
+
+// Conflicts sets the mount's conflict policy — the same value its engine is
+// given, so the pull and the push agree on where a loser goes and on which
+// versions have already been kept. Nil keeps the default.
+func (d *Downloader) Conflicts(c *Conflicts) *Downloader {
+	if c != nil {
+		d.conflicts = c
+	}
+	return d
+}
+
+// conflictEnv is what the shared conflict policy needs from the pull loop.
+func (d *Downloader) conflictEnv() conflictEnv {
+	return conflictEnv{store: d.store, state: d.state, dataDir: d.dataDir, logf: d.logf, observe: d.mon.observe}
 }
 
 // Run polls until ctx is cancelled. It resumes from the persisted cursor, or
@@ -484,6 +505,16 @@ func (d *Downloader) applyTo(ctx context.Context, ch provider.RemoteChange, forg
 		// mount's to materialise, and its removal is not this mount's to apply.
 		d.logf("[pull] skip    %s (the name of a drivel claim marker; never synced)", ch.Path)
 		return nil
+	}
+	if !d.conflicts.Syncs(ch.Path) {
+		// A conflicts folder this mount does not sync, in either direction: not
+		// applied, not recorded, and its removal is not this mount's to apply.
+		return nil
+	}
+	if ch.MovedFrom != "" && !d.conflicts.Syncs(ch.MovedFrom) {
+		// Moved out of one: there is no local source to rename, so it arrives
+		// as what it now is, a new object at its new path.
+		ch.MovedFrom = ""
 	}
 	dst := filepath.Join(d.dataDir, filepath.FromSlash(ch.Path))
 
@@ -775,8 +806,9 @@ func (d *Downloader) suppressDeleted(rel string, f *provider.RemoteFile) (bool, 
 
 // resolveConflict applies the §6 policy when a remote edit collides with a
 // divergent local edit at rel (backing path dst): last-writer-wins by mtime, and
-// the losing side is preserved as a sibling conflict copy. Conflict copies are
-// local-only in v1 — they are not synced back up.
+// the losing side goes where the mount's conflict policy sends it (conflicts.go).
+// A loser that cannot be kept fails the apply, which the refetch pass retries;
+// it is never replaced unkept.
 func (d *Downloader) resolveConflict(ctx context.Context, rel, dst string, f *provider.RemoteFile) error {
 	info, err := os.Stat(dst)
 	if err != nil {
@@ -785,41 +817,40 @@ func (d *Downloader) resolveConflict(ctx context.Context, rel, dst string, f *pr
 	localMtime := info.ModTime()
 
 	if f.Modified.After(localMtime) {
-		// Remote is newer: it wins the real path; the local edit becomes the copy.
-		copyRel := conflictName(rel, localMtime)
-		copyDst := filepath.Join(d.dataDir, filepath.FromSlash(copyRel))
-		if err := os.Rename(dst, copyDst); err != nil {
-			return err
+		// Remote is newer: it wins the real path, and the local edit is kept.
+		where, err := d.conflicts.keepLocal(ctx, d.conflictEnv(), rel, localMtime)
+		if err != nil {
+			return fmt.Errorf("keeping the local edit before applying a newer remote: %w", err)
 		}
 		// rel still exists remotely, so the winner may be a placeholder; the copy
-		// keeps the real local bytes it was renamed from.
+		// keeps the real local bytes it was moved from.
 		if err := d.materialize(ctx, rel, dst, f); err != nil {
 			return err
 		}
-		d.logf("[pull] conflict %s: remote newer, local kept as %s", rel, copyRel)
-		d.conflicted(rel, copyRel)
+		d.logf("[pull] conflict %s: remote newer, local edit kept in %s", rel, where)
+		d.conflicted(rel)
 		return d.rememberApplied(rel, dst, f)
 	}
 
-	// Local is newer (or same mtime): it keeps the real path; the remote version is
-	// saved alongside as the copy. Leave dst and its echo untouched — the uploader
-	// still holds the local edit to push. The copy is downloaded in full even in
-	// lazy mode: copyRel exists only locally, so it could never be hydrated later.
-	copyRel := conflictName(rel, f.Modified)
-	copyDst := filepath.Join(d.dataDir, filepath.FromSlash(copyRel))
-	if err := d.download(ctx, rel, copyDst, f.Modified); err != nil {
-		return err
+	// Local is newer (or same mtime): it keeps the real path, and the remote
+	// version is kept. Leave dst and its echo untouched — the uploader still holds
+	// the local edit to push. The copy is downloaded in full even in lazy mode: it
+	// could never be hydrated later.
+	where, err := d.conflicts.keepRemote(ctx, d.conflictEnv(), rel, *f)
+	if err != nil {
+		return fmt.Errorf("keeping the remote version: %w", err)
 	}
-	d.logf("[pull] conflict %s: local newer, remote saved as %s", rel, copyRel)
-	d.conflicted(rel, copyRel)
+	if where != "" {
+		d.logf("[pull] conflict %s: local newer, remote version kept in %s", rel, where)
+		d.conflicted(rel)
+	}
 	return nil
 }
 
 // conflicted reports a §6 resolution to the monitor.
-func (d *Downloader) conflicted(rel, copyRel string) {
+func (d *Downloader) conflicted(rel string) {
 	d.mon.count(cConflicts, 1)
 	d.mon.applied(rel, StatusConflict)
-	d.mon.applied(copyRel, StatusLocalOnly)
 }
 
 // download streams the object at path into dst atomically (temp file + rename in

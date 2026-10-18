@@ -42,6 +42,8 @@ func (m *Mount) statusReader() syncengine.StatusReader {
 		State:   m.state,
 		DataDir: m.backing.Path,
 		Holes:   holesOf(m.hyd),
+
+		Conflicts: m.conflicts,
 	}
 }
 

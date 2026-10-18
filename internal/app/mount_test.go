@@ -512,3 +512,45 @@ func TestOpenRefusesLazyWithoutXattrs(t *testing.T) {
 	}
 	m.Close() //nolint:errcheck // nothing to assert about a clean close here
 }
+
+// Two conflict settings are refused at open because the mount could not keep
+// their promise: remote-trash on a backend with no trash (it would be a
+// permanent deletion called a trash), and local-trash where the trash is inside
+// what the mount syncs (the losing versions would sync themselves). The store is
+// released on the way out, as for any failed Open.
+func TestOpenRefusesAConflictPolicyItCannotHonour(t *testing.T) {
+	t.Run("remote-trash without a trash", func(t *testing.T) {
+		spec := baseSpec(t)
+		spec.Provider = "fake"
+		spec.Conflicts = syncengine.ConflictsRemoteTrash
+		store := newFakeStore()
+		_, err := Open(t.Context(), spec, registryWith(t, "fake", store))
+		if err == nil || !strings.Contains(err.Error(), "needs a backend with a trash") {
+			t.Fatalf("err = %v; want the remote-trash refusal", err)
+		}
+		if got := store.closeCount(); got != 1 {
+			t.Errorf("store closed %d times; want 1", got)
+		}
+	})
+	t.Run("local-trash inside the backing tree", func(t *testing.T) {
+		spec := baseSpec(t)
+		spec.Provider = "fake"
+		spec.Conflicts = syncengine.ConflictsLocalTrash
+		t.Setenv("XDG_DATA_HOME", filepath.Join(spec.DataDir, "share"))
+		_, err := Open(t.Context(), spec, registryWith(t, "fake", newFakeStore()))
+		if err == nil || !strings.Contains(err.Error(), "which this mount syncs") {
+			t.Fatalf("err = %v; want the trash-inside-the-tree refusal", err)
+		}
+	})
+	t.Run("local-trash elsewhere", func(t *testing.T) {
+		spec := baseSpec(t)
+		spec.Provider = "fake"
+		spec.Conflicts = syncengine.ConflictsLocalTrash
+		t.Setenv("XDG_DATA_HOME", t.TempDir())
+		m, err := Open(t.Context(), spec, registryWith(t, "fake", newFakeStore()))
+		if err != nil {
+			t.Fatalf("Open: %v", err)
+		}
+		_ = m.Close()
+	})
+}

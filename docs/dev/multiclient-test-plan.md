@@ -11,10 +11,12 @@ that only exist when several independent state machines share one remote:
 - **N-way convergence.** §4 echo suppression is *per client*. A push by A is an
   echo to A and a genuine remote change to B and C. Nothing in the single-client
   tests exercises "B applies a change that A originated and does not push it back".
-- **Divergence is designed in.** §6 conflict copies are local-only and never
-  synced. After any real conflict the three trees are *supposed* to differ. An
-  integrity oracle that demands three identical trees will report every conflict
-  test as a failure.
+- **Divergence depends on the conflict policy.** Since 2026-10-18 a conflict copy
+  goes to a `.drivel-conflicts` folder that syncs on both sides by default, so
+  after a conflict the three trees agree, copy included. Under `conflicts-dir =
+  "local"`, the trash settings, or for a sibling copy made before that date, the
+  copy stays on one machine and the trees are *supposed* to differ. An oracle
+  that demands identical trees has to know which policy the run used.
 - **Drive allows what POSIX cannot represent.** Two clients creating the same path
   concurrently produce two same-name siblings in one folder;
   `gdrive.lookupChildLocked` then picks the most recently modified and logs that
@@ -486,10 +488,10 @@ roughly in descending order of how likely they are to change a decision:
    sweep's local walk, so a stalled client cannot resurrect the tree for the fleet.
 4. **The periodic sweep (MC-53).** Every other sweep trigger fires at startup and
    gets tested constantly. The 24h one fires when nobody is watching.
-5. **Conflict copies are local-only and permanent divergence is by design.**
-   Decide now whether that is the intended long-term policy for a fleet: after a
-   week of ordinary conflicts, the three machines hold three different sets of
-   copies and no client can see the others'.
+5. **Conflict copies were local-only and permanent divergence was by design.**
+   **Decided 2026-10-18**: the user chooses (`conflicts`, `conflicts-dir`), and
+   the default syncs the copies, so after a week of ordinary conflicts every
+   machine holds the same set. `conflicts-dir = "local"` keeps the old shape.
 6. **Shared quota, not shared bandwidth.** The fleet contends for one per-user
    request budget. Idle polling alone consumes a measurable share of it, and it
    scales with N before any user does any work.

@@ -80,6 +80,10 @@ drivel \- cloud-backed FUSE interceptor filesystem
 .IR n ]
 .RB [ -hydrate-workers
 .IR n ]
+.RB [ -conflicts
+.IR action ]
+.RB [ -conflicts-dir
+.IR place ]
 .RB [ -debug ]
 .RB [ -pprof
 .IR addr ]
@@ -311,10 +315,10 @@ caps the listing, default 1000). The statuses are
 failed to apply here, which is retried),
 .BR placeholder ,
 .B conflict
-(a conflict copy sits beside it),
+(a conflict copy of it was kept),
 .B local-only
-(a conflict copy, a special file, or a drivel temporary: deliberately not
-synced), and
+(a conflict copy kept on this machine, a special file, or a drivel temporary:
+deliberately not synced), and
 .BR unknown ,
 which means no record vouches for the file and is
 .B not
@@ -812,6 +816,37 @@ link's downlink is several times its uplink, and because it sits on the read pat
 a caller is blocked on every fetch it governs, so
 .B 1
 turns a parallel read into a queue.
+.TP
+.BI -conflicts " action"
+Where the losing side of a conflict goes:
+.B dir
+(the default) keeps it in a
+.B .drivel-conflicts
+folder in the same directory;
+.B local-trash
+puts it in the desktop trash under
+.IR $XDG_DATA_HOME/Trash ;
+.B remote-trash
+puts it in the backend's trash, and is refused on a backend without one, such as
+SFTP;
+.B overwrite
+keeps nothing, and also skips the check a first upload makes for a remote file at
+the same path. See
+.BR CONFLICTS .
+.TP
+.BI -conflicts-dir " place"
+With
+.BR "-conflicts dir" ,
+where the
+.B .drivel-conflicts
+folders live:
+.B both
+(the default) syncs them like any other folder,
+.B local
+keeps them on the machine where the conflict happened, and
+.B remote
+keeps them on the remote only. Refused beside any other
+.BR -conflicts .
 .IP
 Both counts are per mount. A limit shared between mounts would let either one
 starve the other and let each infer, from how long it waited, when the other was
@@ -1027,7 +1062,7 @@ watching, and
 .B drive-delete=permanent
 is how such a mount reclaims space rather than filling the trash.
 .TP
-.BR lazy ", " xattr ", " resync ", " materialize ", " "max-deletes=" ", " "sweep-interval=" ", " "push-delay=" ", " "upload-workers=" ", " "hydrate-workers="
+.BR lazy ", " xattr ", " resync ", " materialize ", " "max-deletes=" ", " "sweep-interval=" ", " "push-delay=" ", " "upload-workers=" ", " "hydrate-workers=" ", " "conflicts=" ", " "conflicts-dir="
 As the corresponding
 .B mount
 flags.
@@ -1166,9 +1201,11 @@ Mount keys mirror the flags:
 .IR max-deletes ,
 .IR sweep-interval ,
 .IR push-delay ,
-.I upload-workers
+.IR upload-workers ,
+.IR hydrate-workers ,
+.I conflicts
 and
-.IR hydrate-workers .
+.IR conflicts-dir .
 An unrecognised key is an error rather than a silent no-op. Relative paths resolve
 against the config file's own directory, so a config directory can be moved or
 kept in a dotfiles repository. Within a
@@ -1289,22 +1326,37 @@ directory.
 .SH CONFLICTS
 When a remote change arrives for a file that has also changed locally since the
 last sync, the newer modification time wins the path and the other version is
-kept beside it as
-.IR "name (conflict YYYY-MM-DD HH-MM-SS).ext" .
-Conflict copies are local-only and are never uploaded. On a backend that reports
-no checksums, such as SFTP, a local change is recognised by the size and
-modification time recorded at the last sync, or for a file never synced by
-comparing its bytes with the remote's.
+kept. By default it goes to a
+.B .drivel-conflicts
+folder in the same directory, as
+.IR "name (conflict YYYY-MM-DD HH-MM-SS).ext" ,
+named for the losing version's modification time, and the folder syncs like any
+other.
+.B -conflicts
+and
+.B -conflicts-dir
+choose another place: a folder kept on this machine or on the remote only, the
+desktop trash, the backend's trash, or nowhere. A folder that is not set to sync
+is left out in both directions, and moving a copy out of it restores the copy as
+an ordinary file. A loser that cannot be kept is never overwritten: the operation
+that would replace it fails and is retried. Copies made before 18 October 2026 are
+beside their file and stay local-only.
+.PP
+On a backend that reports no checksums, such as SFTP, a local change is
+recognised by the size and modification time recorded at the last sync, or for a
+file never synced by comparing its bytes with the remote's.
 .PP
 The same check runs before an upload. Before replacing a file it has synced
 before,
 .B drivel
 asks whether the remote still holds what it last synced; if another machine has
-changed it, that version is saved as a conflict copy first and the local file is
-then uploaded. A local file unchanged since the last sync is not uploaded over a
-newer remote at all. Two uploads that start at practically the same moment can
-still pass each other. A file with no sync history is checked only when it is
-4 MiB or larger; a smaller one replaces whatever the remote holds at its path.
+changed it, that version is kept first and the local file is then uploaded. A
+local file unchanged since the last sync is not uploaded over a newer remote at
+all. A file with no sync history is checked too, as part of the upload itself on
+Google Drive and SFTP, and anything already at its path is kept.
+.B "-conflicts overwrite"
+skips that check. Two uploads that start at practically the same moment can still
+pass each other.
 .SH ABANDONED UPLOADS
 Every push is retried with a growing delay between attempts \(em five attempts
 over roughly seven seconds \(em and an error the backend reports as permanent is

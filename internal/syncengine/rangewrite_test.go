@@ -615,39 +615,69 @@ func TestNoRemoteObjectStillUploads(t *testing.T) {
 
 // A small file is not worth a round-trip for the M6 gates — they would spend a
 // request to save a request — so they are skipped. What is left is the one Stat
-// the divergence check needs (diverged.go), and only for a path with a baseline:
-// a rewrite of a synced file costs that Stat, because it is what keeps a
-// concurrent edit from being overwritten unseen, while a create still costs
-// nothing beyond its Put, because there is no baseline to have diverged from.
+// the divergence check needs (diverged.go). A rewrite of a synced file costs
+// that Stat, because it is what keeps a concurrent edit from being overwritten
+// unseen. A create asks the same question of a remote file this mount has no
+// record of, and through provider.Creator it costs nothing beyond the upload,
+// because the upload is the question; a store without Creator pays one Stat.
 func TestSmallFileChecksTheRemoteOnlyWhenItHasABaseline(t *testing.T) {
-	dir := t.TempDir()
-	st := newState(t)
-	store := newPatchStore()
-
-	body := []byte("small enough not to bother")
-	for _, p := range []string{"a.txt", "new.txt"} {
-		if err := os.WriteFile(filepath.Join(dir, p), body, 0o644); err != nil {
-			t.Fatal(err)
+	for _, withCreator := range []bool{true, false} {
+		name := "without-creator"
+		if withCreator {
+			name = "with-creator"
 		}
-	}
-	syncedAt(t, st, store, "a.txt", body) // identical content, but too small to gate
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			st := newState(t)
+			ps := newPatchStore()
+			var store provider.Store = ps
+			wantCreateStats := 1
+			if withCreator {
+				store = creatingStore{ps}
+				wantCreateStats = 0
+			}
 
-	e := New(Config{Store: store, DataDir: dir, State: st})
-	if err := e.pushContent(context.Background(), "new.txt", nil); err != nil {
-		t.Fatal(err)
+			body := []byte("small enough not to bother")
+			for _, p := range []string{"a.txt", "new.txt"} {
+				if err := os.WriteFile(filepath.Join(dir, p), body, 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			syncedAt(t, st, ps, "a.txt", body) // identical content, but too small to gate
+
+			e := New(Config{Store: store, DataDir: dir, State: st})
+			if err := e.pushContent(context.Background(), "new.txt", nil); err != nil {
+				t.Fatal(err)
+			}
+			if got := ps.statCount(); got != wantCreateStats {
+				t.Errorf("a small create cost %d Stat call(s); want %d", got, wantCreateStats)
+			}
+			if err := e.pushContent(context.Background(), "a.txt", nil); err != nil {
+				t.Fatal(err)
+			}
+			if got := ps.statCount(); got != wantCreateStats+1 {
+				t.Errorf("a small rewrite cost %d Stat call(s); want the divergence check's 1", got-wantCreateStats)
+			}
+			if got := ps.ops(); len(got) != 2 {
+				t.Fatalf("ops = %v; want two plain uploads", got)
+			}
+		})
 	}
-	if got := store.statCount(); got != 0 {
-		t.Errorf("a small create cost %d Stat call(s); want 0", got)
+}
+
+// creatingStore gives a store provider.Creator, refusing a path its Stat finds
+// occupied. Its Stat does not count toward the wrapped store's statCount: the
+// refusal is the backend's own business, which is the point of Creator.
+type creatingStore struct{ *patchStore }
+
+func (c creatingStore) Create(ctx context.Context, p string, r io.Reader) (provider.RemoteFile, error) {
+	c.mu.Lock()
+	_, taken := c.content[p]
+	c.mu.Unlock()
+	if taken {
+		return provider.RemoteFile{}, fmt.Errorf("%q: %w", p, provider.ErrExist)
 	}
-	if err := e.pushContent(context.Background(), "a.txt", nil); err != nil {
-		t.Fatal(err)
-	}
-	if got := store.statCount(); got != 1 {
-		t.Errorf("a small rewrite cost %d Stat call(s); want the divergence check's 1", got)
-	}
-	if got := store.ops(); len(got) != 2 {
-		t.Fatalf("ops = %v; want two plain Puts", got)
-	}
+	return c.Put(ctx, p, r)
 }
 
 // A push that ends in a whole-file Put must have rewound the file first — the

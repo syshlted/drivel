@@ -212,6 +212,8 @@ type helperOptions struct {
 	// what would make that impossible to tell apart.
 	uploadWorkers  *int
 	hydrateWorkers *int
+	conflicts      string
+	conflictsDir   string
 
 	runAs        string
 	foreground   bool
@@ -362,6 +364,10 @@ func (h *helperArgs) resolve() (*helperOptions, error) {
 			if n, err = intValue(o); err == nil {
 				c.hydrateWorkers = &n
 			}
+		case "conflicts":
+			c.conflicts, err = stringValue(o)
+		case "conflicts-dir":
+			c.conflictsDir, err = stringValue(o)
 
 		// --- process ----------------------------------------------------------
 		case "run-as":
@@ -627,6 +633,9 @@ func helperOptionSpec(h *helperArgs, c *helperOptions) (app.MountSpec, error) {
 
 		UploadWorkers:  syncengine.DefaultWorkers,
 		HydrateWorkers: hydrate.DefaultWorkers,
+	}
+	if spec.Conflicts, spec.ConflictsDir, err = syncengine.ResolveConflicts(c.conflicts, c.conflictsDir); err != nil {
+		return zero, err
 	}
 	if c.maxDeletes != nil {
 		spec.MaxDeletes = *c.maxDeletes

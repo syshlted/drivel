@@ -156,9 +156,13 @@ The short form:
 - The sweep is the **only** correct place to prune a baseline. No cheaper prune
   pass — "absent locally" cannot distinguish *already gone on both sides* from
   *deleted locally while we were down*.
-- The local walk must keep skipping conflict copies (uploading them publishes the
-  losing side of every conflict) and placeholders (pushing one is the data-loss
-  case above).
+- The local walk must keep skipping placeholders (pushing one is the data-loss
+  case above), the sibling conflict copies made before 2026-10-18, and any
+  `.drivel-conflicts` folder the mount's policy does not sync. Every pass asks
+  one question for that last one, `Conflicts.Syncs`: the push, the pull, the
+  sweep's remote pass, its delete pass and its walk. A folder synced by one of
+  them and not another is a copy uploaded and then inferred deleted, or the
+  reverse.
 - The walk's **second** row re-sends a baseline whose *local* copy diverged — a
   push lost to a crash rather than abandoned by the engine (M27 part 4). Its four
   bounds are not optional: only a local mtime predating this mount's open (newer

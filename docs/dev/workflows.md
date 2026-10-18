@@ -202,7 +202,7 @@ sequenceDiagram
 
     Note over dl,eng: 3. LOCAL WALK
     dl->>dl: walk the backing tree
-    Note over dl: skip conflict copies, placeholders,<br/>non-regular files, .drivel-*
+    Note over dl: skip placeholders, non-regular files, .drivel-*,<br/>sibling conflict copies, unsynced conflict folders
     dl->>eng: Push(OpWrite) for anything with<br/>no baseline and no seen mark
     dl->>eng: Push(OpWrite) for a baseline whose LOCAL copy<br/>diverged before this mount opened (M27 part 4)
 
@@ -381,8 +381,8 @@ different question. No marker means no placeholder record at all, immediately,
 which is why `-lazy` is unsafe on a backing filesystem without user extended
 attributes rather than merely fragile.
 
-Conflict copies are always downloaded **in full**, because their paths exist only
-locally and could never be hydrated later.
+Conflict copies are always downloaded **in full**, because the copy is made by
+drivel rather than materialised from a listing, so nothing would ever hydrate it.
 
 ## 6. Launching a backend, and surviving one that dies
 

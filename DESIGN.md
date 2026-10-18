@@ -1382,6 +1382,35 @@ are both lossy and racy.
   guarded on the same terms only when the gates already paid for the `Stat` —
   files of a block or more — since a small create would otherwise buy a round
   trip it never paid, and on Drive a second name query per create.
+  **Superseded 2026-10-18**: a first push now goes through `provider.Creator`
+  when the store offers it, a `Put` that refuses an occupied path. Drive's `Put`
+  already resolves the path, so the refusal costs nothing there. SFTP links the
+  temporary into place, which also makes the refusal atomic. A store without
+  `Creator` pays one `Stat`. So files of every size are guarded.
+- **Where the loser goes is configurable (2026-10-18)**, and who wins is not.
+  `syncengine.Conflicts` is one value per mount, shared by the engine, the pull
+  loop and the status reader, and every resolution calls its `keepLocal` (the
+  loser is the local file) or `keepRemote` (the loser is the remote object).
+  `conflicts` picks the destination: `dir` (default), `local-trash` (the
+  freedesktop.org home trash, `internal/trash`), `remote-trash`
+  (`provider.Trasher`, refused at open without it) or `overwrite`, which also
+  skips the first-push check. For `dir`, `conflicts-dir` places the
+  per-directory `.drivel-conflicts` folder on `both` sides (default), `local` or
+  `remote`. Three things carry it. **The folder is recognised by its name**, and
+  `Conflicts.Syncs` is the single answer to "does this mount sync this path?",
+  asked by the push, the pull, the sweep's remote pass, its delete pass and its
+  walk. One pass disagreeing would upload a copy and then infer it deleted.
+  **A loser that cannot be kept fails the operation that would replace it**
+  (pull: the refetch pass retries; push: the engine retries), except that a copy
+  already safe in the local folder whose *upload* fails is logged and left there.
+  **One conflict is usually met twice**, by the pull ("local newer") and then by
+  the push of that edit, so `Conflicts` remembers the remote version it kept, per
+  path, in memory. A copy in the local folder is found by name anyway, and a
+  restart costs at most one duplicate in a trash. Default `both` reverses the
+  "local-only by policy" rule above: that rule existed so the walk would not
+  upload sibling copies by accident, and those still stay local. A copy in the
+  folder is uploaded on purpose, by `keepRemote`/`keepLocal` itself, with its
+  baseline recorded.
 
 ---
 

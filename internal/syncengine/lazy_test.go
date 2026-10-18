@@ -224,7 +224,7 @@ func TestConflictCopyIsAlwaysDownloadedInFull(t *testing.T) {
 		t.Errorf("a.txt = %q (exists=%t); want the local edit preserved", got, ok)
 	}
 	// ...and the remote version lands beside it with real content, not a hole.
-	entries, err := os.ReadDir(dir)
+	entries, err := os.ReadDir(filepath.Join(dir, ConflictDirName))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -237,7 +237,7 @@ func TestConflictCopyIsAlwaysDownloadedInFull(t *testing.T) {
 	if copyName == "" {
 		t.Fatal("no conflict copy was created")
 	}
-	b, err := os.ReadFile(filepath.Join(dir, copyName))
+	b, err := os.ReadFile(filepath.Join(dir, ConflictDirName, copyName))
 	if err != nil {
 		t.Fatal(err)
 	}

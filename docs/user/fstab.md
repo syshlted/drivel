@@ -109,6 +109,7 @@ would leave a mount nothing can address.
 | `push-delay=D` | `-push-delay` | A Go duration. Defaults to `300ms`. `0` is refused, not read as "the default". |
 | `upload-workers=N` | `-upload-workers` | Defaults to 4. `0` is refused, not read as "the default". |
 | `hydrate-workers=N` | `-hydrate-workers` | Defaults to 8. Only matters with `lazy`. |
+| `conflicts=A`, `conflicts-dir=P` | `-conflicts`, `-conflicts-dir` | Where the losing side of a conflict goes. See [data safety](data-safety.md#where-the-loser-goes). `local-trash` needs a home directory for the `run-as=` account. |
 
 Every flag that describes a mount has an option here; a test enforces that, so a
 flag that grows on the command line cannot go missing from fstab. `-pprof` and

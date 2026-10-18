@@ -668,6 +668,12 @@ func (d *Downloader) applyPage(ctx context.Context, sw state.Sweep, files []prov
 
 	for i := range files {
 		f := files[i]
+		if !d.conflicts.Syncs(f.Path) {
+			// Marked seen above and otherwise left alone: a conflicts folder
+			// this mount keeps out of its sync is neither materialised nor
+			// counted.
+			continue
+		}
 		if !d.standsForPath(f, st) {
 			continue
 		}
@@ -842,8 +848,8 @@ func (d *Downloader) pushOwedRepairs(ctx context.Context, st *sweepStats, noRepu
 // tree is the authority on what that path is now, not what it was when the push
 // was abandoned.
 func (d *Downloader) repairEvent(rel string) (fsevent.Event, bool) {
-	if skipLocal(path.Base(rel)) {
-		return fsevent.Event{}, false // §6 conflict copies stay local, as in the walk
+	if d.skipLocal(rel) {
+		return fsevent.Event{}, false // what the walk would not push, the repair does not either
 	}
 	fi, err := os.Lstat(filepath.Join(d.dataDir, filepath.FromSlash(rel)))
 	switch {
@@ -900,7 +906,7 @@ func (d *Downloader) pushLocalOnly(ctx context.Context, sw state.Sweep, st *swee
 			return nil //nolint:nilerr // see above
 		}
 		rel = filepath.ToSlash(rel)
-		if skipLocal(filepath.Base(p)) {
+		if d.skipLocal(rel) {
 			if e.IsDir() {
 				return filepath.SkipDir
 			}
@@ -1069,6 +1075,11 @@ func (d *Downloader) applyDeletes(ctx context.Context, sw state.Sweep, st *sweep
 		// create pushed while we swept — and it is absent from the seen-set for that
 		// reason alone. Deleting it would destroy a file the user just made.
 		if !e.At.Before(sw.Started) {
+			return nil
+		}
+		if !d.conflicts.Syncs(p) {
+			// A baseline left by an earlier conflicts-dir = both. Neither side of
+			// it is this mount's to delete any more.
 			return nil
 		}
 		total++
@@ -1276,11 +1287,13 @@ func fingerprintDiverged(fi os.FileInfo, e state.Echo) bool {
 	return fi.Size() != e.LocalSize || !fi.ModTime().Equal(e.LocalMTime)
 }
 
-// conflictRe matches the names conflictName generates. Conflict copies are
-// local-only by §6 policy, so the local walk must not discover them and "helpfully"
-// upload them — which would publish the losing side of every conflict drivel has
-// ever resolved.
-var conflictRe = regexp.MustCompile(` \(conflict \d{4}-\d{2}-\d{2} \d{2}-\d{2}-\d{2}\)(\.[^./]*)?$`)
+// conflictRe matches the names conflictName generates, with the counter
+// uniqueCopy adds when two copies would share one. Outside a conflicts folder it
+// is the only way to recognise a copy — the sibling copies drivel made before
+// 2026-10-18 — and those stay local-only: the walk must not discover them and
+// "helpfully" upload them, which would publish the losing side of every conflict
+// drivel ever resolved there.
+var conflictRe = regexp.MustCompile(` \(conflict \d{4}-\d{2}-\d{2} \d{2}-\d{2}-\d{2}\)(?: \d+)?(\.[^./]*)?$`)
 
 // reservedPath reports a path that names a mount's claim marker, at any depth.
 // The marker is a per-process lock on this machine (internal/claim), never
@@ -1293,8 +1306,20 @@ func reservedPath(p string) bool {
 	return path.Base(p) == claim.Name
 }
 
-// skipLocal reports names the local walk must not treat as user content: drivel's
-// own temporary files and probes, and §6 conflict copies.
-func skipLocal(base string) bool {
-	return strings.HasPrefix(base, ".drivel-") || conflictRe.MatchString(base)
+// skipLocal reports paths the local walk must not treat as user content:
+// drivel's own temporary files and probes, conflict copies made beside their
+// file, and a conflicts folder this mount does not sync. A folder it does sync
+// is content, and so is every copy in it.
+func (d *Downloader) skipLocal(rel string) bool {
+	if !d.conflicts.Syncs(rel) {
+		return true
+	}
+	base := path.Base(rel)
+	if base == ConflictDirName {
+		return false
+	}
+	if strings.HasPrefix(base, ".drivel-") {
+		return true
+	}
+	return !inConflictDir(rel) && conflictRe.MatchString(base)
 }

@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/syshlted/drivel/internal/config"
+	"github.com/syshlted/drivel/internal/syncengine"
 )
 
 // The columns, split where -full splits them.
@@ -24,18 +25,18 @@ import (
 // SFTP mount raises and never answers in its own text, since the kind is written
 // once in an [account.*] table some other block refers to by name.
 //
-// -full adds the five that are decisions rather than tuning: where the files
+// -full adds the six that are decisions rather than tuning: where the files
 // really live, where the sync state lives (derived from the name, so it appears
 // nowhere in the file), whether content is resident or faulted in, how often the
 // tree is re-enumerated — which on a feedless provider like SFTP is the poll
-// interval and not a safety net — and the cap on how many deletions one reconcile
-// may infer. The tuning numbers are deliberately left out: past about nine columns
-// a table stops being readable, and unlike these five they change how fast a mount
-// works rather than what it does.
+// interval and not a safety net — the cap on how many deletions one reconcile
+// may infer, and where the losing side of a conflict goes. The tuning numbers are
+// deliberately left out: past about ten columns a table stops being readable, and
+// unlike these six they change how fast a mount works rather than what it does.
 var (
 	shortColumns = []string{"NAME", "ACCOUNT", "PROVIDER", "MOUNTPOINT"}
 	fullColumns  = append(append([]string{}, shortColumns...),
-		"DATA", "STATE", "MODE", "SWEEP", "MAX-DELETES")
+		"DATA", "STATE", "MODE", "SWEEP", "MAX-DELETES", "CONFLICTS")
 )
 
 // printMountList renders ls as a table.
@@ -70,8 +71,9 @@ func mountRow(l config.Listing, full bool) []string {
 	// shown as applied that is not — so they read as absent, the way its empty
 	// state DB already does.
 	sweep, deletes := sweepCell(s.SweepInterval), deletesCell(s.MaxDeletes)
+	conflicts := (&syncengine.Conflicts{Action: s.Conflicts, Place: s.ConflictsDir}).String()
 	if s.Provider == "" {
-		sweep, deletes = "-", "-"
+		sweep, deletes, conflicts = "-", "-", "-"
 	}
 	return append(row,
 		// Empty DataDir is in-place mode (the mount is its own backing store),
@@ -81,6 +83,7 @@ func mountRow(l config.Listing, full bool) []string {
 		mountMode(s.Provider, s.Lazy),
 		sweep,
 		deletes,
+		conflicts,
 	)
 }
 

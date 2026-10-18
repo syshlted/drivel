@@ -1099,14 +1099,57 @@ falls through to an overwrite. And **a local copy equal to its baseline is not
 pushed at all** over a newer remote — a touch used to push stale bytes over
 someone's edit — which needs the provider's digest, so hashless backends keep a
 copy instead. What remains: two pushes whose `Stat`s both precede either `Put`
-still lose one edit (no shipped backend has a conditional write), and a path
-with no baseline is guarded **only when the M6 gates already took the `Stat`**
-(one block, 4 MiB, or a range-write candidate) — a small first push would pay a
-round trip per create, which on Drive is a second name query and halves a bulk
-copy's rate, so that half is a cost decision left open, not an oversight. It costs one `Stat` per small-file rewrite, which
-`TestSmallFileChecksTheRemoteOnlyWhenItHasABaseline` pins; creates cost none.
-MC-31a (`TestFleetConcurrentEditsKeepTheOverwrittenEdit`) now asserts the copy,
-ordered with a pause because a race would decide nothing.
+still lose one edit (no shipped backend has a conditional write; SFTP's
+`Create` closes it for two *first* pushes only). It costs one `Stat` per
+small-file rewrite, which `TestSmallFileChecksTheRemoteOnlyWhenItHasABaseline`
+pins. **A path with no baseline is guarded at every size since 2026-10-18**,
+which was the cost decision this paragraph used to leave open: the first push
+goes through `provider.Creator`, whose refusal *is* the check, so on Drive (the
+`Put` already resolves the path) and SFTP it costs nothing, and a store without
+`Creator` pays one `Stat`. `conflicts = "overwrite"` skips it. MC-31a
+(`TestFleetConcurrentEditsKeepTheOverwrittenEdit`) asserts the copy, ordered
+with a pause because a race would decide nothing.
+
+## Conflict policy (where the loser goes)
+
+**Who wins a conflict is fixed; where the loser goes is the user's** (2026-10-18,
+DESIGN.md §6). `syncengine.Conflicts` is one value per mount, handed to the
+engine, the pull loop and the status reader, and every resolution — the pull's
+two branches, the push's divergence check, a refused first `Create` — goes
+through `keepLocal` or `keepRemote` on it. `conflicts` = `dir` (default) |
+`local-trash` | `remote-trash` | `overwrite`. `conflicts-dir` = `both`
+(default) | `local` | `remote`, for `dir` only, and refused beside anything
+else (M8 rule 6). `syncengine.ResolveConflicts` is the one parser all three
+boundaries call. Five things carry it.
+
+1. **`.drivel-conflicts` is a reserved component, and `Conflicts.Syncs` is the
+   only answer to "does this mount sync this path?".** The push, the pull, the
+   sweep's remote pass, its delete pass and its walk all ask it. One that
+   disagreed would upload a copy and then infer it deleted, or the reverse. A
+   rename across the edge of a private folder is the one event with meaning: out
+   is a restore (push the file), in is a removal (remove it remotely).
+2. **A loser that cannot be kept is never replaced.** keepLocal/keepRemote
+   return an error and the caller fails the apply or the push, so the retry
+   machinery decides. The one softening: a copy already in the local folder
+   whose *upload* fails (`both`, `remote`) is logged and left there, because it
+   is preserved; with `both` the walk uploads it later.
+3. **Default `both` reverses "conflict copies are local-only".** That rule
+   existed so the walk would not publish sibling copies by accident; those
+   (made before 2026-10-18) are still recognised by `conflictRe` and still
+   skipped. A folder copy is uploaded on purpose with its baseline recorded,
+   so the feed's echo of it is recognised and its later edits sync as content.
+4. **One conflict is met twice**: the pull ("local newer") and then the push of
+   that edit find the same remote version. `Conflicts.kept` (path → version, in
+   memory) stops the second copy. The local folder is also checked by name. A
+   restart costs at most one duplicate in a trash or on the remote.
+5. **`remote-trash` uploads the loser and trashes it; it does not move the
+   remote object.** Moving the original away would show every other client a
+   deletion followed by a create at the path. The cost is a download and an
+   upload of the loser. Drive's `files.copy` would avoid that and is not
+   plumbed. `local-trash` writes the freedesktop.org home trash
+   (`internal/trash`, `.trashinfo` naming the *mountpoint* path so Restore
+   writes through the mount) and is refused when the trash would be inside the
+   backing tree or mountpoint.
 
 ## Range writes (M6)
 

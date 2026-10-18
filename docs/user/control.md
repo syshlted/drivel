@@ -49,8 +49,7 @@ named after the mount — see [the fstab page](fstab.md#the-control-socket).
 synced       report.txt
 pending      draft.md
 unknown      notes.txt     no sync record: never pushed or pulled by this mount
-local-only   draft (conflict 2026-10-17 09-30-00).md   a conflict copy: kept locally and never uploaded
-conflict     draft.md      conflict copies: draft (conflict 2026-10-17 09-30-00).md
+conflict     draft.md      conflict copies: .drivel-conflicts/draft (conflict 2026-10-17 09-30-00).md
 ```
 
 | status | what it means |
@@ -61,8 +60,8 @@ conflict     draft.md      conflict copies: draft (conflict 2026-10-17 09-30-00)
 | `retrying` | the last attempt failed; another is scheduled |
 | `error` | A failure is recorded: either Drivel gave up uploading it and the next sweep re-sends it ([when an upload is abandoned](configuration.md#when-an-upload-is-abandoned)), or a remote change to it failed to apply here and is being retried ([when a download fails](configuration.md#when-a-download-fails)). The detail line says which |
 | `placeholder` | [lazy mode](lazy-mode.md): the file's content has not been fetched yet |
-| `conflict` | a conflict copy sits beside it — see [data safety](data-safety.md) |
-| `local-only` | deliberately not synced: a conflict copy, a pipe, socket or symlink, or one of Drivel's own temporary files |
+| `conflict` | a conflict copy of it was kept, in its directory's `.drivel-conflicts` folder or (from before 18 October 2026) beside it — see [where the loser goes](data-safety.md#where-the-loser-goes) |
+| `local-only` | deliberately not synced: a conflict copy kept on this machine, a pipe, socket or symlink, or one of Drivel's own temporary files |
 | `unknown` | **Drivel cannot vouch for it.** The note says why |
 
 `unknown` is the one to read carefully. It is **not** "probably fine": it means

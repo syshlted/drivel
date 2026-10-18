@@ -54,6 +54,8 @@ type mountEntry struct {
 	pushDelay      *string
 	uploadWorkers  *int
 	hydrateWorkers *int
+	conflicts      string
+	conflictsDir   string
 	provider       map[string]any
 }
 
@@ -92,9 +94,13 @@ type mountTOML struct {
 	// where `max-deletes = 0` means "no limit", silently reading it as "use the
 	// default" would be the M8 rule 6 failure: a setting that looks applied and
 	// is not.
-	UploadWorkers  *int           `toml:"upload-workers"`
-	HydrateWorkers *int           `toml:"hydrate-workers"`
-	Provider       map[string]any `toml:"provider"`
+	UploadWorkers  *int `toml:"upload-workers"`
+	HydrateWorkers *int `toml:"hydrate-workers"`
+	// Where the losing side of a conflict goes, and for "dir" where its folder
+	// lives. Empty is unmentioned; an unknown value is refused.
+	Conflicts    string         `toml:"conflicts"`
+	ConflictsDir string         `toml:"conflicts-dir"`
+	Provider     map[string]any `toml:"provider"`
 }
 
 // Load parses the config file at path.
@@ -155,6 +161,8 @@ func Load(path string) (*Config, error) {
 			pushDelay:      m.PushDelay,
 			uploadWorkers:  m.UploadWorkers,
 			hydrateWorkers: m.HydrateWorkers,
+			conflicts:      m.Conflicts,
+			conflictsDir:   m.ConflictsDir,
 			provider:       m.Provider,
 		})
 		if m.Path == "" {
@@ -277,6 +285,10 @@ func (c *Config) spec(m mountEntry) (app.MountSpec, error) {
 				*m.pushDelay, syncengine.DefaultPushDelay)
 		}
 		spec.PushDelay = d
+	}
+
+	if spec.Conflicts, spec.ConflictsDir, err = syncengine.ResolveConflicts(m.conflicts, m.conflictsDir); err != nil {
+		return spec, err
 	}
 
 	spec.UploadWorkers = syncengine.DefaultWorkers

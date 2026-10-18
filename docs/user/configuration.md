@@ -109,6 +109,8 @@ Every key mirrors a flag. Both are listed together below; `drivel mount -h` and
 | `-push-delay D` | `push-delay` | `300ms` | How long a file must go unchanged before it is uploaded. See [When a change is pushed](#when-a-change-is-pushed). |
 | `-upload-workers N` | `upload-workers` | `4` | How many files this mount uploads at once. See [Transfer concurrency](#transfer-concurrency). |
 | `-hydrate-workers N` | `hydrate-workers` | `8` | How many placeholders this mount fetches at once under `-lazy`. See [Transfer concurrency](#transfer-concurrency). |
+| `-conflicts A` | `conflicts` | `dir` | Where the losing side of a conflict goes: `dir`, `local-trash`, `remote-trash` or `overwrite`. See [Where the loser goes](data-safety.md#where-the-loser-goes). |
+| `-conflicts-dir P` | `conflicts-dir` | `both` | With `conflicts = "dir"`, where the `.drivel-conflicts` folders live: `both`, `local` or `remote`. Refused beside any other `conflicts`. |
 | `-debug` | `debug` | off | FUSE-level tracing. Very verbose. |
 | `-pprof ADDR` | — | off | Serve Go profiling endpoints on a loopback address. A bare port means `127.0.0.1`. Process-wide. See [Profiling](#profiling). |
 | `-pprof-allow-remote` | — | off | Let `-pprof` bind something other than loopback. See [Profiling](#profiling). |

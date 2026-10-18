@@ -200,12 +200,20 @@ type Engine struct {
 	// change whether dispatch happens; gate is what the workers, the pull loop and
 	// the sweep wait at. stopped is closed when Run returns, so a request sent to
 	// an engine that is no longer running fails instead of waiting forever.
+	// conflicts is the mount's conflict policy, shared with its pull loop.
+	conflicts *Conflicts
+
 	mon      *Monitor
 	ctl      chan ctlReq
 	gate     gate
 	pauseCap int
 	stopped  chan struct{}
 	stopOnce sync.Once
+}
+
+// conflictEnv is what the shared conflict policy needs from the engine.
+func (e *Engine) conflictEnv() conflictEnv {
+	return conflictEnv{store: e.store, state: e.state, dataDir: e.dataDir, logf: e.logf, observe: e.mon.observe}
 }
 
 // logf writes one line for this engine.
@@ -247,6 +255,10 @@ type Config struct {
 	// PauseCap is how many paths and operations a pause may hold before it ends
 	// on its own; zero selects DefaultPauseCap.
 	PauseCap int
+
+	// Conflicts is where the losing side of a conflict goes (conflicts.go). Give
+	// the pull loop the same value. Nil selects the default policy.
+	Conflicts *Conflicts
 }
 
 // New constructs an Engine, applying defaults for any unset tuning fields.
@@ -269,6 +281,10 @@ func New(cfg Config) *Engine {
 		stopped:      make(chan struct{}),
 		abort:        make(chan struct{}),
 		abandonGrace: defaultAbandonGrace,
+		conflicts:    cfg.Conflicts,
+	}
+	if e.conflicts == nil {
+		e.conflicts = &Conflicts{}
 	}
 	if e.pauseCap <= 0 {
 		e.pauseCap = DefaultPauseCap
@@ -1028,6 +1044,9 @@ func (e *Engine) push(ctx context.Context, ev fsevent.Event) error {
 		e.logf("[sync] skip     %s (a drivel claim marker; never synced)", name)
 		return nil
 	}
+	if done, err := e.pushAcrossConflictsFolder(ctx, ev); done {
+		return err
+	}
 	switch ev.Op {
 	case fsevent.OpMkdir:
 		rf, err := e.store.Mkdir(ctx, ev.Path)
@@ -1088,6 +1107,51 @@ func (e *Engine) push(ctx context.Context, ev fsevent.Event) error {
 	return nil
 }
 
+// pushAcrossConflictsFolder settles an event touching a conflicts folder this
+// mount does not sync (Conflicts.Syncs), reporting done when it did.
+//
+// Inside such a folder nothing is sent: a reviewed copy deleted, edited or
+// renamed there stays this mount's business. A rename across its edge is the
+// one shape that is not, because it moves a file into or out of what syncs —
+// moved out, a copy restored to its directory is new content and is uploaded;
+// moved in, a file has left the synced tree, which is a removal on the remote
+// exactly as a delete would be.
+func (e *Engine) pushAcrossConflictsFolder(ctx context.Context, ev fsevent.Event) (bool, error) {
+	from := e.conflicts.Syncs(ev.Path)
+	if ev.Op != fsevent.OpRename {
+		if from {
+			return false, nil
+		}
+		e.logf("[sync] skip     %s (in a conflicts folder this mount keeps to itself)", ev.Path)
+		return true, nil
+	}
+	to := e.conflicts.Syncs(ev.NewPath)
+	switch {
+	case from && to:
+		return false, nil
+	case !from && !to:
+		e.logf("[sync] skip     %s -> %s (in a conflicts folder this mount keeps to itself)", ev.Path, ev.NewPath)
+		return true, nil
+	case !from:
+		fi, err := os.Lstat(filepath.Join(e.dataDir, filepath.FromSlash(ev.NewPath)))
+		if err != nil || !fi.Mode().IsRegular() {
+			// A directory, or gone already: the sweep's walk finds whatever of it
+			// is content, which is safer than inventing a tree of pushes here.
+			return true, nil //nolint:nilerr // nothing to push is not a failure
+		}
+		e.logf("[sync] restore  %s -> %s (out of a conflicts folder)", ev.Path, ev.NewPath)
+		return true, e.pushContent(ctx, ev.NewPath, nil)
+	}
+	base := e.baselineOf(ev.Path)
+	if err := e.store.Remove(ctx, ev.Path); err != nil {
+		return true, err
+	}
+	e.entombPath(ev.Path, base)
+	e.mon.count(cDeletes, 1)
+	e.logf("[sync] delete   %s (moved into a conflicts folder this mount keeps to itself)", ev.Path)
+	return true, nil
+}
+
 // hashSkipMinSize is the size below which the unchanged-content gate is not worth
 // running. Both gates below cost a Stat round-trip, and for a small file that is
 // the same order as just uploading it — the gate would spend a request to save a
@@ -1142,13 +1206,20 @@ func (e *Engine) pushContent(ctx context.Context, p string, dirty *ranges.Set) e
 	if done {
 		return nil
 	}
-	if proceed, err := e.preserveDivergedRemote(ctx, p, f, seen); err != nil || !proceed {
+	proceed, create, err := e.preserveDivergedRemote(ctx, p, f, seen)
+	if err != nil || !proceed {
 		return err
 	}
 
 	// Whole file. Rewind: the gates above may have read from f.
 	if _, err := f.Seek(0, io.SeekStart); err != nil {
 		return err
+	}
+	if create {
+		done, err := e.createFirst(ctx, p, f)
+		if err != nil || done {
+			return err
+		}
 	}
 	// Counted rather than taken from the Stat above, because the two disagree
 	// exactly when the number matters. A file still being written grows during its
@@ -1162,14 +1233,49 @@ func (e *Engine) pushContent(ctx context.Context, p string, dirty *ranges.Set) e
 	if err != nil {
 		return err
 	}
+	e.uploaded(p, rf, f, counted.n)
+	return nil
+}
+
+// createFirst is a first push through provider.Creator, reporting done when the
+// file is uploaded. A refusal means the remote holds a file this mount has no
+// record of, which goes through the same divergence check a Stat would have
+// fed — kept as a conflict copy, or recognised as these very bytes — and the
+// caller then uploads with Put as it would have anyway. f is rewound for it.
+func (e *Engine) createFirst(ctx context.Context, p string, f *os.File) (bool, error) {
+	c, _ := provider.AsCreator(e.store)
+	counted := &countingReader{r: f}
+	rf, err := c.Create(ctx, p, counted)
+	if err == nil {
+		e.uploaded(p, rf, f, counted.n)
+		return true, nil
+	}
+	if !errors.Is(err, provider.ErrExist) {
+		return true, err
+	}
+	remote, exists, err := e.store.Stat(ctx, p)
+	if err != nil {
+		return true, err
+	}
+	proceed, _, err := e.preserveDivergedRemote(ctx, p, f, remoteView{statted: true, exists: exists, rf: remote})
+	if err != nil || !proceed {
+		return true, err
+	}
+	if _, err := f.Seek(0, io.SeekStart); err != nil {
+		return true, err
+	}
+	return false, nil
+}
+
+// uploaded records a whole-file upload of p that sent n bytes.
+func (e *Engine) uploaded(p string, rf provider.RemoteFile, f *os.File, n int64) {
 	e.recordEchoOf(rf, statOf(f))
 	// Only here, never on the routes above: a range write and both skips log their
 	// own lines, and counting this one as well would report an upload that did not
 	// happen — which is exactly what MC-21 (a touch must cost nothing) asserts.
 	e.mon.count(cUploads, 1)
-	e.mon.count(cUploadBytes, counted.n)
-	e.logf("[sync] upload   %s (%d B)", p, counted.n)
-	return nil
+	e.mon.count(cUploadBytes, n)
+	e.logf("[sync] upload   %s (%d B)", p, n)
 }
 
 // countingReader reports how many bytes a store actually read out of a file. It

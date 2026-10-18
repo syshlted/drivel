@@ -65,7 +65,7 @@ type PathStatus struct {
 	NextAttempt time.Time
 	Error       string
 	SyncedAt    time.Time // when the baseline was recorded
-	Conflicts   []string  // names of conflict copies beside it
+	Conflicts   []string  // conflict copies of it: beside it, or in its directory's conflicts folder
 }
 
 // ErrNoSuchPath is returned for a path that neither exists locally nor has
@@ -82,6 +82,10 @@ type StatusReader struct {
 	State   *state.Store // nil for a log-only mount
 	DataDir string
 	Holes   Placeholders // nil in eager mode
+	// Conflicts is the mount's conflict policy, which decides whether a
+	// conflicts folder is synced content or this machine's alone. Nil is the
+	// default policy.
+	Conflicts *Conflicts
 }
 
 // MaxChildren bounds a directory listing. The load pattern is a file manager
@@ -145,6 +149,9 @@ func (r StatusReader) Children(rel, after string, limit int) (out []PathStatus, 
 		names = append(names, de.Name())
 	}
 	copies := conflictCopiesIn(names)
+	for orig, inFolder := range r.folderCopies(rel) {
+		copies[orig] = append(copies[orig], inFolder...)
+	}
 	var es []entry
 	for _, de := range des {
 		if de.Name() <= after {
@@ -258,10 +265,15 @@ func (r StatusReader) one(e entry, t Transient, rec state.Record) (PathStatus, e
 	case !mode.IsRegular() && !mode.IsDir():
 		ps.Status, ps.Detail = StatusLocalOnly, kindOf(mode)+": not synced (no byte stream to send)"
 		return ps, nil
+	case inConflictDir(e.rel) && !r.Conflicts.Syncs(e.rel):
+		ps.Status, ps.Detail = StatusLocalOnly, "a conflicts folder this mount keeps to itself (conflicts-dir)"
+		return ps, nil
+	case base == ConflictDirName:
+		// Synced: falls through to the ordinary answer for a directory.
 	case strings.HasPrefix(base, ".drivel-"):
 		ps.Status, ps.Detail = StatusLocalOnly, "one of drivel's own temporary files"
 		return ps, nil
-	case conflictRe.MatchString(base):
+	case !inConflictDir(e.rel) && conflictRe.MatchString(base):
 		ps.Status, ps.Detail = StatusLocalOnly, "a conflict copy: kept locally and never uploaded"
 		return ps, nil
 	}
@@ -296,7 +308,7 @@ func (r StatusReader) one(e entry, t Transient, rec state.Record) (PathStatus, e
 	if len(e.conflicts) > 0 && mode.IsRegular() {
 		ps.Conflicts = e.conflicts
 		if ps.Status == StatusSynced || ps.Status == StatusUnknown {
-			ps.Status, ps.Detail = StatusConflict, "a conflict copy sits beside it"
+			ps.Status, ps.Detail = StatusConflict, "a conflict copy of it was kept (conflicts names it)"
 		}
 	}
 	return ps, nil
@@ -326,7 +338,32 @@ func (r StatusReader) conflictCopiesOf(rel string) []string {
 	for _, de := range des {
 		names = append(names, de.Name())
 	}
-	return conflictCopiesIn(names)[path.Base(rel)]
+	out := conflictCopiesIn(names)[path.Base(rel)]
+	return append(out, r.folderCopies(path.Dir(rel))[path.Base(rel)]...)
+}
+
+// folderCopies maps each original name in directory dir to the copies of it in
+// dir's conflicts folder, as paths relative to dir.
+func (r StatusReader) folderCopies(dir string) map[string][]string {
+	if dir == "." {
+		dir = ""
+	}
+	des, err := os.ReadDir(r.abs(path.Join(dir, ConflictDirName)))
+	if err != nil {
+		return nil
+	}
+	names := make([]string, 0, len(des))
+	for _, de := range des {
+		names = append(names, de.Name())
+	}
+	out := conflictCopiesIn(names)
+	for orig, cs := range out {
+		for i := range cs {
+			cs[i] = path.Join(ConflictDirName, cs[i])
+		}
+		out[orig] = cs
+	}
+	return out
 }
 
 // conflictCopiesIn maps each original name to the conflict copies of it among

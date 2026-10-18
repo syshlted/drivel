@@ -18,20 +18,19 @@ lose your credentials — the backing directory is still a directory of files.
 Drivel syncs both ways, so the same file can change on two machines between polls.
 When a remote change arrives for a file that also changed locally since the last
 successful sync, Drivel resolves it **last-writer-wins by modification time and
-keeps the loser as a conflict copy** beside it:
+keeps the loser**. By default the loser goes into a `.drivel-conflicts` folder
+in the same directory:
 
 ```
 report.txt
-report (conflict 2026-09-07 14-22-08).txt
+.drivel-conflicts/report (conflict 2026-09-07 14-22-08).txt
 ```
 
-Nothing is discarded. The copy is yours to inspect, merge, or delete.
+The time in the name is the losing version's own modification time. Nothing is
+discarded unless you ask for that (see [Where the loser goes](#where-the-loser-goes)).
+The copy is yours to inspect, merge, or delete.
 
-Conflict copies are **local-only by policy** and are never uploaded — uploading
-them would publish the losing side of every conflict you have ever had, to every
-device you sync. The enumeration sweep skips them for the same reason.
-
-A conflict copy is only created when both sides genuinely diverged from the last
+A conflict is only recorded when both sides genuinely diverged from the last
 synced state. A remote change to a file you have not touched is simply applied,
 and a local change that has not yet uploaded is simply uploaded.
 
@@ -41,33 +40,98 @@ synced it compares the bytes. Before 18 October 2026 it did not check on SFTP at
 all: a local edit that had not uploaded yet was overwritten by the next remote
 change, with no conflict copy.
 
+### Where the loser goes
+
+Two settings, per mount. `conflicts` says where the losing version goes:
+
+| `conflicts` | The loser goes to |
+|---|---|
+| `dir` (default) | The directory's `.drivel-conflicts` folder. |
+| `local-trash` | Your desktop trash (`~/.local/share/Trash`), where the file manager can restore it to where it was. |
+| `remote-trash` | The backend's trash: on Google Drive, the Drive trash, kept for 30 days. Refused on SFTP, which has no trash. |
+| `overwrite` | Nowhere. The winner replaces it. |
+
+With `conflicts = "dir"`, `conflicts-dir` says where the folders live:
+
+| `conflicts-dir` | The `.drivel-conflicts` folders are |
+|---|---|
+| `both` (default) | Synced like any other folder: on the remote and on every machine that also syncs them. |
+| `local` | Kept on the machine where the conflict happened, and never uploaded. |
+| `remote` | Kept on the remote only. Drivel uploads the copy there and keeps no local one, and no machine downloads it. |
+
+```toml
+[[mount]]
+account       = "personal"
+path          = "~/drive"
+conflicts     = "dir"
+conflicts-dir = "local"
+```
+
+The flags are `-conflicts` and `-conflicts-dir`, and in `/etc/fstab` the options
+of the same names. Naming `conflicts-dir` beside anything but `conflicts = "dir"`
+is refused, because it would have no effect.
+
+A few things follow from those choices:
+
+- **A folder that is not synced stays out of every direction.** Under
+  `conflicts-dir = "local"` or `"remote"`, and under the two trash settings,
+  nothing inside a `.drivel-conflicts` folder is uploaded from this machine, and
+  nothing in one on the remote is downloaded to it. Deleting a reviewed copy
+  there does nothing to the remote either.
+- **Moving a copy out of the folder restores it.** It becomes an ordinary file
+  at its new path and uploads as one. Moving a file *into* a folder that is not
+  synced removes it from the remote, as deleting it would.
+- **If uploading a copy fails, it is kept locally.** With the folder on both
+  sides, the next sweep uploads it. With it on the remote only, it stays where it
+  is and the log says so.
+- **A loser that cannot be kept anywhere is not overwritten.** If the remote's
+  version cannot be downloaded, or a trash cannot be written, the upload or
+  download that would replace it fails and is retried.
+- **`overwrite` also skips the first-upload check** described below. Use it for
+  a mount nothing else writes to, such as a one-way backup.
+- **`remote-trash` downloads the losing remote version and uploads it again** to
+  trash it, so a large file costs its size twice. On Drive, trashing on its own
+  would have needed no transfer, but the file then has to move away from its
+  path, which every other machine would see as a deletion followed by a new file.
+
+Copies made before 18 October 2026 are beside their file instead, as
+`report (conflict 2026-09-07 14-22-08).txt`, and stay local-only. Drivel still
+recognises them.
+
 ### When both machines upload
 
 The case above is a remote change arriving *before* your edit is sent. The
 other order is common too: two machines edit the same file within seconds, and
 both send their copy before hearing about the other's. Before uploading over a
 file it has synced before, Drivel checks whether the remote still holds what it
-last synced. If not, someone else's edit is there, so Drivel saves it as a
-conflict copy first and then uploads yours:
+last synced. If not, someone else's edit is there, so Drivel keeps it first and
+then uploads yours:
 
 ```
-[sync] conflict report.txt: the remote changed since the last sync; saved it as report (conflict 2026-10-17 09-30-00).txt before uploading the local copy
+[sync] conflict report.txt: the remote changed since the last sync; kept it in .drivel-conflicts/report (conflict 2026-10-17 09-30-00).txt (here and on the remote) before uploading the local copy
 ```
 
-Your edit is the one at the real path everywhere; the other one is in the copy,
-on the machine that uploaded second. If your local file is *unchanged* since the
-last sync (you only touched it, or saved the same bytes) Drivel does not upload
-it at all, and the newer remote version arrives as an ordinary change.
+Your edit is the one at the real path everywhere. If your local file is
+*unchanged* since the last sync (you only touched it, or saved the same bytes)
+Drivel does not upload it at all, and the newer remote version arrives as an
+ordinary change.
 
-Two limits. **The check and the upload are two steps**, so two uploads that start
-within the same instant can still pass each other, and then the first one's edit
-is lost; on Google Drive it survives in the file's revision history. And a file
-Drivel has never synced before has no last-synced version to compare against.
-If one of 4 MiB or more already exists remotely at that path, Drivel keeps it as
-a conflict copy too (`the remote holds a file this mount has no record of`);
-a smaller one is replaced as it always has been, because checking would cost an
-extra request for every new file. Before 17 October 2026 neither machine checked, and the edit that uploaded first was lost
-every time.
+**A file Drivel has never synced is checked too.** If something already exists
+remotely at that path, it is kept as a conflict copy before your file replaces
+it (`the remote holds a file this mount has no record of`). Your machine might
+simply not have known about it yet: the remote file was created moments ago
+elsewhere, or (on an eager mount without `-materialize`) it predates the mount
+and was never downloaded. On Google Drive and SFTP the check is part of the
+upload itself, so it costs nothing extra. Before 18 October 2026 only files of
+4 MiB or more were checked, and a smaller one was replaced without a trace.
+
+**One limit remains: the check and the upload are not one step on every
+backend.** Two machines uploading the same path within the same instant can
+still pass each other, and then the first one's edit is lost. On an OpenSSH
+server a new file is placed with a hard link, which refuses an existing name,
+so two first uploads cannot both win there. On Google Drive the edit that lost survives in the
+file's revision history. Before 17 October 2026 neither machine checked, and the
+edit that uploaded first was lost every time.
 
 ## Deletion
 
@@ -157,7 +221,9 @@ than a thousand files gone, and still not what you asked for.
 - **Hard links are refused** with `Operation not permitted` — see below.
 - **Extended attributes** are never synced, in either direction, whatever `-xattr`
   is set to.
-- **Conflict copies** and Drivel's own temporary files (`.drivel-*`).
+- **Conflict copies**, when their folder is not set to sync (see
+  [Where the loser goes](#where-the-loser-goes)), and Drivel's own temporary
+  files (`.drivel-*`).
 
 ## Metadata Drivel does not preserve
 
@@ -278,6 +344,7 @@ already in use by another Drivel process is never touched.
 - Splice partial changes into a remote file that has diverged from what it last
   synced — it falls back to a whole-file upload, or a conflict copy.
 - Delete anything on the first run.
-- Publish a conflict copy.
+- Discard the losing side of a conflict, unless you set `conflicts = "overwrite"`.
+- Publish a conflict copy you told it to keep local.
 - Create a hard link, or let one become two diverging remote files.
 - Re-serialize your config file, discarding comments.

@@ -255,5 +255,7 @@ Two things to know before you walk away:
 - **In-place mode has no separate directory** — the mounted directory *is* the
   backing store, and the files simply stay in it when Drivel exits.
 
-Conflict copies (files named `NAME (conflict 2026-09-07 12-34-56).ext`) are
-local-only by design and were never uploaded. They are yours to keep or delete.
+Conflict copies (`NAME (conflict 2026-09-07 12-34-56).ext`, in a
+`.drivel-conflicts` folder or, from before 18 October 2026, beside their file)
+are yours to keep or delete. Unless you kept them on the remote, there is a
+local copy of each; see [where the loser goes](data-safety.md#where-the-loser-goes).

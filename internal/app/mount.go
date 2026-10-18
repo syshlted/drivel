@@ -34,6 +34,7 @@ import (
 	"github.com/syshlted/drivel/internal/mount"
 	"github.com/syshlted/drivel/internal/state"
 	"github.com/syshlted/drivel/internal/syncengine"
+	"github.com/syshlted/drivel/internal/trash"
 	"github.com/syshlted/drivel/internal/vfs"
 	"github.com/syshlted/drivel/provider"
 )
@@ -122,6 +123,13 @@ type MountSpec struct {
 	UploadWorkers  int // size of the outbound path-hashed pool (syncengine)
 	HydrateWorkers int // concurrent lazy fetches (hydrate); ignored unless Lazy
 
+	// Conflicts is where the losing side of a conflict goes, and ConflictsDir
+	// where its .drivel-conflicts folder lives when that is ConflictsDir. Zero
+	// values are the defaults (dir, both); syncengine.ResolveConflicts is how
+	// every boundary fills them.
+	Conflicts    syncengine.ConflictAction
+	ConflictsDir syncengine.ConflictPlace
+
 	// FsName is the device name the mount reports to the kernel — the source
 	// column in findmnt(8) and /proc/self/mountinfo. Empty means "drivel", which
 	// is what every mount said before there was a reason to differ.
@@ -194,6 +202,8 @@ type Mount struct {
 	down    *syncengine.Downloader
 	events  chan fsevent.Event
 	writing *fsevent.Writing // new files still open, shared by the mount and the sweep
+
+	conflicts *syncengine.Conflicts // shared by the engine, the pull loop and status
 
 	// mon is this mount's observation surface (M14): the engine, the pull loop
 	// and the sweep write to it, and the control API reads it. Built for every
@@ -370,6 +380,16 @@ func Open(ctx context.Context, spec MountSpec, reg *provider.Registry) (*Mount, 
 		m.hyd.ReportOutcomes(m.mon.Observe)
 	}
 
+	conflicts, err := conflictPolicy(spec, m.store, backing.Path)
+	if err != nil {
+		return nil, err
+	}
+	if m.store != nil && (spec.Conflicts != "" && spec.Conflicts != syncengine.ConflictsDir ||
+		spec.ConflictsDir != "" && spec.ConflictsDir != syncengine.ConflictsBoth) {
+		m.logf("conflicts: the losing side of a conflict goes to %s", conflictsWhere(conflicts))
+	}
+	m.conflicts = conflicts
+
 	m.engine = syncengine.New(syncengine.Config{
 		Store:    m.store,
 		DataDir:  backing.Path,
@@ -379,6 +399,8 @@ func Open(ctx context.Context, spec MountSpec, reg *provider.Registry) (*Mount, 
 		Workers:  spec.UploadWorkers,
 		Debounce: spec.PushDelay,
 		Monitor:  m.mon,
+
+		Conflicts: conflicts,
 
 		DrainTimeout: engineDrainTimeout,
 	})
@@ -409,7 +431,7 @@ func Open(ctx context.Context, spec MountSpec, reg *provider.Registry) (*Mount, 
 		// start token before the sweep, poll from it only after — is a statement
 		// about the cursor. It runs off the FUSE path, so the mount comes up and
 		// stays usable while a large remote is swept.
-		m.down = dl.Logger(m.lg).Monitor(m.mon).PausedBy(m.engine).Reconcile(syncengine.ReconcileOptions{
+		m.down = dl.Logger(m.lg).Monitor(m.mon).PausedBy(m.engine).Conflicts(conflicts).Reconcile(syncengine.ReconcileOptions{
 			Push:       m.engine,
 			Fetch:      spec.Materialize,
 			Force:      spec.Resync,
@@ -667,4 +689,78 @@ func (m *Mount) claimBacking(spec MountSpec, backing *mount.Backing) error {
 	}
 	m.claim = c
 	return nil
+}
+
+// conflictPolicy builds the mount's conflict policy and refuses the settings it
+// cannot honour, before anything is served: remote-trash on a backend with no
+// trash, which would otherwise be a permanent deletion called a trash, and
+// local-trash where there is no home trash, or where the trash would be inside
+// what this mount syncs.
+func conflictPolicy(spec MountSpec, store provider.Store, backing string) (*syncengine.Conflicts, error) {
+	c := &syncengine.Conflicts{Action: spec.Conflicts, Place: spec.ConflictsDir, MountPath: spec.Mountpoint}
+	action := spec.Conflicts
+	if action == "" {
+		action = syncengine.ConflictsDir
+	}
+	if spec.ConflictsDir != "" && action != syncengine.ConflictsDir {
+		return nil, fmt.Errorf("conflicts-dir = %s applies only to conflicts = %s, not %s",
+			spec.ConflictsDir, syncengine.ConflictsDir, action)
+	}
+	if store == nil {
+		return c, nil // log-only: nothing ever conflicts
+	}
+	switch action {
+	case syncengine.ConflictsRemoteTrash:
+		if _, ok := provider.AsTrasher(store); !ok {
+			return nil, fmt.Errorf("conflicts = %s needs a backend with a trash, and %s has none "+
+				"(choose dir, local-trash or overwrite)", action, spec.Provider)
+		}
+	case syncengine.ConflictsLocalTrash:
+		dir, err := trash.Dir()
+		if err != nil {
+			return nil, fmt.Errorf("conflicts = %s: %w", action, err)
+		}
+		for _, synced := range []string{backing, spec.Mountpoint} {
+			if synced != "" && withinResolved(dir, synced) {
+				return nil, fmt.Errorf("conflicts = %s: the trash %s is inside %s, which this mount syncs", action, dir, synced)
+			}
+		}
+		t, err := trash.Open(dir)
+		if err != nil {
+			return nil, fmt.Errorf("conflicts = %s: %w", action, err)
+		}
+		c.Trash = t
+	}
+	return c, nil
+}
+
+// conflictsWhere describes a policy for the startup line.
+func conflictsWhere(c *syncengine.Conflicts) string {
+	switch {
+	case c.Trash != nil:
+		return "the trash at " + c.Trash.Root()
+	case c.Action == syncengine.ConflictsRemoteTrash:
+		return "the backend's trash"
+	case c.Action == syncengine.ConflictsOverwrite:
+		return "nowhere: the winner overwrites it, and a first upload does not check for a remote file"
+	}
+	return "each directory's " + syncengine.ConflictDirName + " folder, kept " + map[syncengine.ConflictPlace]string{
+		"": "here and on the remote", syncengine.ConflictsBoth: "here and on the remote",
+		syncengine.ConflictsLocal: "on this machine only", syncengine.ConflictsRemote: "on the remote only",
+	}[c.Place]
+}
+
+// withinResolved is within for paths that may be relative or reach their
+// target through a symlink — the in-place backing path is /proc/self/fd/N.
+func withinResolved(p, root string) bool {
+	clean := func(s string) string {
+		if abs, err := filepath.Abs(s); err == nil {
+			s = abs
+		}
+		if r, err := filepath.EvalSymlinks(s); err == nil {
+			s = r
+		}
+		return filepath.Clean(s)
+	}
+	return within(clean(p), clean(root))
 }

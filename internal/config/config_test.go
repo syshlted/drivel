@@ -517,3 +517,38 @@ func TestDataDirCannotCollideWithThePluginPath(t *testing.T) {
 		t.Errorf("DataDir(%q) = %q, which is the plugin search path", "plugins", d)
 	}
 }
+
+// The conflict settings reach the spec, unmentioned is the default, and the
+// two shapes that would silently do something else are refused: an unknown
+// value (a misspelt "dir" is not "overwrite") and a folder placement beside an
+// action that makes no folder.
+func TestConflictSettings(t *testing.T) {
+	for _, tc := range []struct {
+		body   string
+		action syncengine.ConflictAction
+		place  syncengine.ConflictPlace
+		err    string
+	}{
+		{"", syncengine.ConflictsDir, syncengine.ConflictsBoth, ""},
+		{"conflicts = \"local-trash\"\n", syncengine.ConflictsLocalTrash, syncengine.ConflictsBoth, ""},
+		{"conflicts-dir = \"remote\"\n", syncengine.ConflictsDir, syncengine.ConflictsRemote, ""},
+		{"conflicts = \"dirr\"\n", "", "", "unknown conflicts setting"},
+		{"conflicts-dir = \"elsewhere\"\n", "", "", "unknown conflicts-dir setting"},
+		{"conflicts = \"overwrite\"\nconflicts-dir = \"local\"\n", "", "", "applies only to conflicts = dir"},
+	} {
+		c := load(t, "[[mount]]\npath = \"./a\"\n"+tc.body)
+		specs, err := c.Specs()
+		if tc.err != "" {
+			if err == nil || !strings.Contains(err.Error(), tc.err) {
+				t.Errorf("%q: error = %v; want one containing %q", tc.body, err, tc.err)
+			}
+			continue
+		}
+		if err != nil {
+			t.Fatalf("%q: %v", tc.body, err)
+		}
+		if specs[0].Conflicts != tc.action || specs[0].ConflictsDir != tc.place {
+			t.Errorf("%q: conflicts = %q/%q; want %q/%q", tc.body, specs[0].Conflicts, specs[0].ConflictsDir, tc.action, tc.place)
+		}
+	}
+}

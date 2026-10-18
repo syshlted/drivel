@@ -57,22 +57,44 @@ type remoteView struct {
 // the push has been settled without uploading; an error fails the push, so the
 // engine's retry decides what happens next — which is the point of failing it:
 // a remote that could not be preserved must not be overwritten.
-func (e *Engine) preserveDivergedRemote(ctx context.Context, p string, f *os.File, seen remoteView) (bool, error) {
+//
+// create asks the caller to upload with provider.Creator instead of Put: the
+// path has no baseline and nothing has looked at the remote yet, and a Create
+// that refuses is how the check is made without a round trip of its own.
+// pushContent comes back here with the Stat a refusal calls for.
+func (e *Engine) preserveDivergedRemote(ctx context.Context, p string, f *os.File, seen remoteView) (proceed, create bool, err error) {
 	if e.state == nil {
-		return true, nil
+		return true, false, nil
 	}
 	echo, ok, err := e.state.GetEcho(p)
 	if err != nil {
 		// The same read failing is no evidence either way; the push proceeds as it
 		// always did, and the error is said rather than swallowed.
 		e.logf("[sync] reading the baseline for %s: %v (uploading without checking for a newer remote)", p, err)
-		return true, nil //nolint:nilerr // reported above; failing the push would strand a local edit on a DB read
+		return true, false, nil //nolint:nilerr // reported above; failing the push would strand a local edit on a DB read
 	}
 	if !ok {
-		// No baseline. Guarded only on a Stat already taken (see above); a
-		// directory at the path is not ours to copy, and the Put will say so.
-		if !seen.statted || !seen.exists || seen.rf.IsDir {
-			return true, nil
+		// No baseline: a first push. Whatever stands at the path is content this
+		// mount has never seen, so it is kept like any other loser — unless the
+		// mount said to overwrite, which is the one setting that skips the check.
+		if !seen.statted {
+			if e.conflicts.action() == ConflictsOverwrite {
+				return true, false, nil
+			}
+			if _, can := provider.AsCreator(e.store); can {
+				return true, true, nil
+			}
+			// No Creator: one Stat buys the same answer.
+			remote, exists, err := e.store.Stat(ctx, p)
+			if err != nil {
+				e.logf("[sync] stat %s: %v (uploading without checking for a remote file)", p, err)
+				return true, false, nil
+			}
+			seen = remoteView{statted: true, exists: exists, rf: remote}
+		}
+		// A directory at the path is not ours to copy, and the Put will say so.
+		if !seen.exists || seen.rf.IsDir {
+			return true, false, nil
 		}
 	} else if !seen.statted {
 		remote, exists, err := e.store.Stat(ctx, p)
@@ -80,13 +102,13 @@ func (e *Engine) preserveDivergedRemote(ctx context.Context, p string, f *os.Fil
 			// The Put this precedes needs the same remote and will meet the same
 			// failure; checking first is not worth inventing a new way to fail.
 			e.logf("[sync] stat %s: %v (uploading without checking for a newer remote)", p, err)
-			return true, nil
+			return true, false, nil
 		}
 		seen = remoteView{statted: true, exists: exists, rf: remote}
 	}
 	if ok && (!seen.exists || echo.Matches(seen.rf.Hash, seen.rf.Version)) {
 		// Gone remotely (a re-create, which the deletion side owns) or still ours.
-		return true, nil
+		return true, false, nil
 	}
 
 	// The remote moved. Two outcomes need no copy, and both need a digest of the
@@ -97,7 +119,7 @@ func (e *Engine) preserveDivergedRemote(ctx context.Context, p string, f *os.Fil
 			e.recordEchoOf(seen.rf, statOf(f))
 			e.logf("[sync] skip %s: the remote changed and already holds these bytes", p)
 			e.mon.count(cUnchangedSkips, 1)
-			return false, nil
+			return false, false, nil
 		}
 		if echo.Hash != "" && local == echo.Hash {
 			// Our copy is what we last synced, so this push carries no edit — a
@@ -105,33 +127,26 @@ func (e *Engine) preserveDivergedRemote(ctx context.Context, p string, f *os.Fil
 			// other side's newer content with older content. Leave the path to
 			// the pull, which applies the remote's version as an ordinary change.
 			e.logf("[sync] skip %s: unchanged here since the last sync, and the remote has a newer version (the pull will apply it)", p)
-			return false, nil
+			return false, false, nil
 		}
 	}
 
-	modified := seen.rf.Modified
-	if modified.IsZero() {
-		modified = time.Now()
+	where, err := e.conflicts.keepRemote(ctx, e.conflictEnv(), p, seen.rf)
+	if err != nil {
+		return false, false, fmt.Errorf("keeping the remote version of %s before overwriting it: %w", p, err)
 	}
-	copyRel := conflictName(p, modified)
-	copyDst := filepath.Join(e.dataDir, filepath.FromSlash(copyRel))
-	if _, err := os.Lstat(copyDst); err == nil {
-		// The pull met this same remote version first and resolved it "local
-		// newer": the copy it made is this one, by name, and it left the local
-		// edit for us to push. Making a second would be the same bytes again.
-		return true, nil
-	}
-	if _, err := fetchTo(ctx, e.store, p, copyDst, modified, e.mon.observe); err != nil {
-		return false, fmt.Errorf("keeping the newer remote copy of %s before overwriting it: %w", p, err)
+	if where == "" {
+		// Kept already: the pull met this same remote version first and resolved
+		// it "local newer", leaving the local edit for us to push.
+		return true, false, nil
 	}
 	why := "the remote changed since the last sync"
 	if !ok {
 		why = "the remote holds a file this mount has no record of"
 	}
-	e.logf("[sync] conflict %s: %s; saved it as %s before uploading the local copy", p, why, copyRel)
+	e.logf("[sync] conflict %s: %s; kept it in %s before uploading the local copy", p, why, where)
 	e.mon.count(cConflicts, 1)
-	e.mon.applied(copyRel, StatusLocalOnly)
-	return true, nil
+	return true, false, nil
 }
 
 // localDigest hashes f with the provider's own algorithm, reporting ok=false when

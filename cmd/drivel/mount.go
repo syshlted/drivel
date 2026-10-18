@@ -68,7 +68,7 @@ var mountShapingFlags = []string{
 	"mount", "data", "credentials", "token", "state", "index",
 	"drive-root", "drive-sweep-mode", "drive-delete", "lazy", "xattr", "resync",
 	"materialize", "max-deletes", "sweep-interval", "push-delay",
-	"upload-workers", "hydrate-workers",
+	"upload-workers", "hydrate-workers", "conflicts", "conflicts-dir",
 }
 
 // mountSelectorFlags narrow a config file to some of the mounts it describes.
@@ -148,6 +148,8 @@ func mountFlagSet(c *mountCLI) *flag.FlagSet {
 	fset.DurationVar(&c.pushDelay, "push-delay", syncengine.DefaultPushDelay, "how long a file must go unchanged before it is uploaded; a longer window coalesces repeated saves into one request and drains the outbound queue on a calmer cycle, at the cost of how soon a change reaches the remote. It cannot hold a file indefinitely, and it has no effect on one that is never closed")
 	fset.IntVar(&c.uploadWorkers, "upload-workers", syncengine.DefaultWorkers, "how many files this mount uploads at once; same-path writes stay ordered whatever this is. Each in-flight upload can hold a provider-sized chunk buffer (16 MiB on Drive), and past the point the provider throttles, more workers cost quota rather than throughput")
 	fset.IntVar(&c.hydrateWorkers, "hydrate-workers", hydrate.DefaultWorkers, "how many placeholders this mount fetches at once under -lazy; bounds a recursive read over a lazy tree, which would otherwise fault every file simultaneously")
+	fset.StringVar(&c.conflicts, "conflicts", "", "where the losing side of a conflict goes: \"dir\" (default) keeps it in the directory's .drivel-conflicts folder; \"local-trash\" puts it in your desktop trash; \"remote-trash\" in the backend's trash, on a backend that has one; \"overwrite\" keeps nothing, and also skips checking the remote before a file's first upload")
+	fset.StringVar(&c.conflictsDir, "conflicts-dir", "", "with -conflicts dir, where the .drivel-conflicts folders live: \"both\" (default) syncs them like other files, \"local\" keeps them on this machine, \"remote\" keeps them on the remote only")
 	fset.BoolVar(&c.debug, "debug", false, "enable FUSE debug logging")
 	fset.StringVar(&c.pprofAddr, "pprof", "", "serve net/http/pprof on this address for goroutine and heap profiling; a bare port means loopback, and a non-loopback address needs -pprof-allow-remote; empty disables it")
 	fset.BoolVar(&c.pprofRemote, "pprof-allow-remote", false, "permit -pprof to bind an address other than loopback, publishing this process's heap — and so the paths and some contents of synced files — to whoever can reach it")
@@ -261,6 +263,9 @@ type specFlags struct {
 
 	uploadWorkers  int
 	hydrateWorkers int
+
+	conflicts    string
+	conflictsDir string
 }
 
 // checkSelectorFlags refuses the two ways a selector can be self-defeating. An
@@ -467,6 +472,10 @@ func mountSpecs(fset *flag.FlagSet, given map[string]bool, f specFlags) ([]app.M
 	if f.pushDelay <= 0 {
 		return nil, fmt.Errorf("-push-delay %s is not a coalescing window (omit the flag for the default of %s)", f.pushDelay, syncengine.DefaultPushDelay)
 	}
+	conflicts, conflictsDir, err := syncengine.ResolveConflicts(f.conflicts, f.conflictsDir)
+	if err != nil {
+		return nil, err
+	}
 	if f.lazy && f.credentials == "" {
 		// A placeholder is a promise that the bytes can be fetched later; without a
 		// provider there is nothing to redeem it against. Checked here as well as in
@@ -489,6 +498,9 @@ func mountSpecs(fset *flag.FlagSet, given map[string]bool, f specFlags) ([]app.M
 
 		UploadWorkers:  f.uploadWorkers,
 		HydrateWorkers: f.hydrateWorkers,
+
+		Conflicts:    conflicts,
+		ConflictsDir: conflictsDir,
 	}
 	// Credentials are what turn cloud sync on; without them the mount runs
 	// log-only (M1 behaviour) and never reaches a provider.

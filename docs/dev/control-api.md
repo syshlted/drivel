@@ -212,7 +212,7 @@ One path.
 | `detail` | a sentence, where the bare value would mislead — which kind of `unknown`, why `local-only` |
 | `attempt`, `next_attempt`, `error` | while `retrying`, and the last error for `error` |
 | `synced_at` | when the sync record for this path was written |
-| `conflicts` | names of conflict copies beside this file |
+| `conflicts` | the conflict copies of this file, relative to its directory: `.drivel-conflicts/NAME` for one in the directory's conflicts folder, a bare name for one made beside it before 2026-10-18. Additive: the field's type and meaning are unchanged, and only its values can now contain a slash |
 
 #### Status values
 
@@ -224,8 +224,8 @@ One path.
 | `retrying` | the last attempt failed and another is scheduled |
 | `error` | a failure is recorded for the path: an upload drivel gave up on, which the next sweep re-sends, or a remote change that failed to apply here, which the pull loop retries. `detail` says which |
 | `placeholder` | lazy mode: the file exists with its size and no content, which is fetched on first read |
-| `conflict` | a conflict copy sits beside it (`conflicts` names them) |
-| `local-only` | exists here and is deliberately not synced: a conflict copy, a special file (pipe, socket, device, symlink), or one of drivel's own temporary files |
+| `conflict` | a conflict copy of it was kept here (`conflicts` names them) |
+| `local-only` | exists here and is deliberately not synced: a conflict copy the mount keeps to itself, a special file (pipe, socket, device, symlink), or one of drivel's own temporary files. A `.drivel-conflicts` folder synced on both sides is ordinary content and reports as such |
 | `unknown` | **nothing vouches for it.** Never synced by this mount, a mount with no provider, a record too old to carry a fingerprint, or a local copy that differs from the last synced version with nothing queued (changed outside the mount). `detail` says which |
 
 `unknown` is not an error state and not "probably fine". It is the honest answer

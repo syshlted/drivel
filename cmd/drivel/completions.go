@@ -37,6 +37,7 @@ import (
 
 	"github.com/syshlted/drivel/internal/completion"
 	"github.com/syshlted/drivel/internal/provider/gdrive/gdconf"
+	"github.com/syshlted/drivel/internal/syncengine"
 )
 
 // hint is the half of a flag's completion that its definition cannot supply: the
@@ -87,6 +88,8 @@ var completionHints = map[string]hint{
 	"mount/push-delay":         {"how long a file must go unchanged before it is uploaded", completion.Opaque, nil, "duration"},
 	"mount/upload-workers":     {"how many files this mount uploads at once", completion.Opaque, nil, "count"},
 	"mount/hydrate-workers":    {"how many placeholders this mount fetches at once under -lazy", completion.Opaque, nil, "count"},
+	"mount/conflicts":          {"where the losing side of a conflict goes", completion.Enum, conflictActions, "action"},
+	"mount/conflicts-dir":      {"with -conflicts dir, where the .drivel-conflicts folders live", completion.Enum, conflictPlaces, "place"},
 	"mount/debug":              {"enable FUSE debug logging", completion.None, nil, ""},
 	"mount/pprof":              {"serve net/http/pprof on this address, e.g. localhost:6060", completion.Opaque, nil, "address"},
 	"mount/pprof-allow-remote": {"let -pprof bind a non-loopback address, publishing this process's heap", completion.None, nil, ""},
@@ -125,6 +128,9 @@ var completionHints = map[string]hint{
 var (
 	sweepModes  = modeStrings(gdconf.SweepModes)
 	deleteModes = modeStrings(gdconf.DeleteModes)
+
+	conflictActions = modeStrings(syncengine.ConflictActions)
+	conflictPlaces  = modeStrings(syncengine.ConflictPlaces)
 )
 
 // modeStrings renders a provider's list of accepted values for a menu. Taking

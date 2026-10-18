@@ -12,6 +12,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -20,6 +21,7 @@ import (
 	"time"
 
 	"github.com/syshlted/drivel/internal/state"
+	"github.com/syshlted/drivel/internal/syncengine"
 	"github.com/syshlted/drivel/internal/testenv"
 	"github.com/syshlted/drivel/provider"
 )
@@ -365,12 +367,16 @@ func (p *peer) manifest() map[string]string {
 			return nil
 		}
 		base := e.Name()
-		if strings.HasPrefix(base, ".drivel-") || isConflictCopy(base) {
-			return nil
-		}
 		rel, err := filepath.Rel(p.spec.DataDir, path)
 		if err != nil {
 			return err
+		}
+		// A copy in a conflicts folder synced on both sides is content like any
+		// other, and the fleet must agree on it; a sibling copy and drivel's own
+		// temporaries are never synced, and nor is a folder kept to one side.
+		if strings.HasPrefix(base, ".drivel-") || !p.syncsConflicts() && isConflictCopy(base) ||
+			!inConflictsFolder(rel) && isConflictCopy(base) {
+			return nil
 		}
 		b, err := os.ReadFile(path)
 		if err != nil {
@@ -421,6 +427,16 @@ func (p *peer) conflicts() []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+// inConflictsFolder reports a backing-relative path inside a .drivel-conflicts folder.
+func inConflictsFolder(rel string) bool {
+	return slices.Contains(strings.Split(filepath.ToSlash(rel), "/"), syncengine.ConflictDirName)
+}
+
+// syncsConflicts reports whether this peer's conflicts folders sync both ways.
+func (p *peer) syncsConflicts() bool {
+	return (&syncengine.Conflicts{Action: p.spec.Conflicts, Place: p.spec.ConflictsDir}).Syncs(syncengine.ConflictDirName)
 }
 
 // isConflictCopy matches what syncengine.conflictName produces. Kept as a
@@ -663,15 +679,28 @@ func TestFleetConcurrentEditsKeepTheOverwrittenEdit(t *testing.T) {
 	if !held["edited on c1"] {
 		t.Errorf("no conflict copy holds c1's overwritten edit; it has been lost (%d copies in the fleet)", total)
 	}
-	if total != 1 {
-		t.Errorf("%d conflict copies in the fleet; want exactly the one", total)
+	// One copy, synced: the folder lives on both sides by default, so every
+	// peer holds the same one, and so does the remote.
+	if total != len(f.peers) || len(f.peers[0].conflicts()) != 1 {
+		t.Errorf("%d conflict copies in the fleet; want the one, on each of the %d peers", total, len(f.peers))
+	}
+	for _, c := range f.peers[0].conflicts() {
+		if _, ok := f.store.content(c); !ok {
+			t.Errorf("the conflict copy %s is not on the remote", c)
+		}
 	}
 }
 
 // --- MC-31b: an edit that never got pushed is preserved, not overwritten ------
 
 func TestFleetKeepsAnUnpushedLocalEditAsAConflictCopy(t *testing.T) {
-	f := newFleet(t, 3)
+	for _, place := range []syncengine.ConflictPlace{syncengine.ConflictsBoth, syncengine.ConflictsLocal} {
+		t.Run(string(place), func(t *testing.T) { testUnpushedLocalEdit(t, place) })
+	}
+}
+
+func testUnpushedLocalEdit(t *testing.T, place syncengine.ConflictPlace) {
+	f := newFleet(t, 3, func(s *MountSpec) { s.ConflictsDir = place })
 	c1, c2 := f.peers[0], f.peers[1]
 
 	c1.write("shared.txt", "the common ancestor")
@@ -730,12 +759,15 @@ func TestFleetKeepsAnUnpushedLocalEditAsAConflictCopy(t *testing.T) {
 		}
 	}
 
-	// And the copy stays local: uploading it would publish the losing side of every
-	// conflict the fleet has ever had, to every other peer.
+	// Where the copy goes is the folder's policy: on the remote, and from there
+	// on every peer, with it on both sides; nowhere but c2 with it kept local.
 	settle(quietWait)
 	for _, c := range copies {
-		if _, ok := f.store.content(c); ok {
-			t.Errorf("the conflict copy %s was pushed to the remote", c)
+		_, onRemote := f.store.content(c)
+		_, onC1 := c1.read(c)
+		if want := place == syncengine.ConflictsBoth; onRemote != want || onC1 != want {
+			t.Errorf("the conflict copy %s: on the remote %v, on c1 %v; want %v (conflicts-dir = %s)",
+				c, onRemote, onC1, want, place)
 		}
 	}
 }
@@ -781,18 +813,11 @@ func TestFleetReachesAFixedPoint(t *testing.T) {
 	// remote version before its own push lands has no baseline to compare against,
 	// and §6 keeps both sides rather than picking one. What must not happen is that
 	// they keep arriving — a fleet that manufactures a copy per poll fills the disk
-	// with the same collision — or that any of them is uploaded, which would
-	// publish the losing side of every conflict to every other peer.
+	// with the same collision. The copies sync (the folder is on both sides by
+	// default), so convergence above already says every peer holds every one.
 	if after := f.conflictCount(); after != beforeCopies {
 		t.Errorf("conflict copies went from %d to %d during a quiet %s; the fleet is still resolving a collision that is over",
 			beforeCopies, after, quietWait)
-	}
-	for _, p := range f.peers {
-		for _, c := range p.conflicts() {
-			if _, ok := f.store.content(c); ok {
-				t.Errorf("%s pushed its conflict copy %s to the remote", p.name, c)
-			}
-		}
 	}
 }
 

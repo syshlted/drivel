@@ -45,7 +45,10 @@ func syncedHashless(t *testing.T, st *state.Store, dir, rel string) {
 
 func copiesOf(t *testing.T, dir, stem string) []string {
 	t.Helper()
-	ents, err := os.ReadDir(dir)
+	ents, err := os.ReadDir(filepath.Join(dir, ConflictDirName))
+	if os.IsNotExist(err) {
+		return nil
+	}
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -81,7 +84,7 @@ func TestAHashlessRemoteChangeDoesNotOverwriteALocalEdit(t *testing.T) {
 	if len(copies) != 1 {
 		t.Fatalf("conflict copies = %v; want the remote's version kept", copies)
 	}
-	if got, _ := readBacking(t, dir, copies[0]); got != "edited there" {
+	if got, _ := readBacking(t, dir, ConflictDirName+"/"+copies[0]); got != "edited there" {
 		t.Errorf("conflict copy = %q; want the remote's bytes", got)
 	}
 }

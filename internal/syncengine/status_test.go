@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -197,6 +198,42 @@ func TestPlaceholdersConflictsAndLocalOnly(t *testing.T) {
 	for p, s := range want {
 		if got[p] != s {
 			t.Errorf("listing: %s reads %q; want %q", p, got[p], s)
+		}
+	}
+}
+
+// A copy in the directory's conflicts folder is named by its file's status as
+// a sibling copy is, and the folder's own status follows the mount's policy:
+// synced content on both sides, this machine's alone otherwise.
+func TestConflictsFolderCopiesAndTheirStatus(t *testing.T) {
+	for _, tc := range []struct {
+		c          *Conflicts
+		folderWant string
+	}{
+		{&Conflicts{}, StatusUnknown}, // synced content, never synced yet here
+		{&Conflicts{Place: ConflictsLocal}, StatusLocalOnly},
+	} {
+		f := newStatusFixture(t)
+		f.r.Conflicts = tc.c
+		f.synced(t, "sub/doc.txt", "mine")
+		copyRel := copyPath("sub/doc.txt", time.Date(2026, 10, 1, 9, 30, 0, 0, time.UTC))
+		writeFile(t, f.dir, copyRel, "theirs")
+		want := ConflictDirName + "/" + path.Base(copyRel)
+
+		if ps := f.status(t, "sub/doc.txt"); ps.Status != StatusConflict || len(ps.Conflicts) != 1 || ps.Conflicts[0] != want {
+			t.Errorf("%s: a file with a copy in its folder reads %+v", tc.c, ps)
+		}
+		es, _, err := f.r.Children("sub", "", 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, e := range es {
+			if e.Path == "sub/doc.txt" && (len(e.Conflicts) != 1 || e.Conflicts[0] != want) {
+				t.Errorf("%s: listing names copies %v; want [%s]", tc.c, e.Conflicts, want)
+			}
+		}
+		if s := f.status(t, copyRel).Status; s != tc.folderWant {
+			t.Errorf("%s: the copy reads %q; want %q", tc.c, s, tc.folderWant)
 		}
 	}
 }
