@@ -554,3 +554,42 @@ func TestOpenRefusesAConflictPolicyItCannotHonour(t *testing.T) {
 		_ = m.Close()
 	})
 }
+
+// Every value the shared parser accepts must be one Open accepts: the parser
+// once filled in the folder's default place for actions that make no folder,
+// and Open then refused every trash and overwrite setting from a config file,
+// a flag or an fstab line alike. Found by the live SFTP run, not a unit test.
+func TestEveryParsedConflictSettingOpens(t *testing.T) {
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	for _, a := range syncengine.ConflictActions {
+		places := []string{""}
+		if a == syncengine.ConflictsDir {
+			places = append(places, "both", "local", "remote")
+		}
+		for _, p := range places {
+			action, place, err := syncengine.ResolveConflicts(string(a), p)
+			if err != nil {
+				t.Fatalf("%s/%s: %v", a, p, err)
+			}
+			spec := baseSpec(t)
+			spec.Provider = "fake"
+			spec.Conflicts, spec.ConflictsDir = action, place
+			store := newFakeStore()
+			var reg = registryWith(t, "fake", store)
+			if a == syncengine.ConflictsRemoteTrash {
+				reg = registryWith(t, "fake", trashingFake{store})
+			}
+			m, err := Open(t.Context(), spec, reg)
+			if err != nil {
+				t.Errorf("conflicts = %s, conflicts-dir = %q: Open refused it: %v", a, p, err)
+				continue
+			}
+			_ = m.Close()
+		}
+	}
+}
+
+// trashingFake is the app tests' fake store with a trash.
+type trashingFake struct{ *fakeStore }
+
+func (trashingFake) Trash(context.Context, string) error { return nil }

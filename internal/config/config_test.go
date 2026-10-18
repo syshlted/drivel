@@ -530,7 +530,7 @@ func TestConflictSettings(t *testing.T) {
 		err    string
 	}{
 		{"", syncengine.ConflictsDir, syncengine.ConflictsBoth, ""},
-		{"conflicts = \"local-trash\"\n", syncengine.ConflictsLocalTrash, syncengine.ConflictsBoth, ""},
+		{"conflicts = \"local-trash\"\n", syncengine.ConflictsLocalTrash, "", ""},
 		{"conflicts-dir = \"remote\"\n", syncengine.ConflictsDir, syncengine.ConflictsRemote, ""},
 		{"conflicts = \"dirr\"\n", "", "", "unknown conflicts setting"},
 		{"conflicts-dir = \"elsewhere\"\n", "", "", "unknown conflicts-dir setting"},

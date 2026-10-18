@@ -98,7 +98,8 @@ func ParseConflictPlace(s string) (ConflictPlace, error) {
 // unmentioned, and is what every boundary — flags, config file, fstab options —
 // calls, so the three agree. conflicts-dir describes a folder only "dir" makes,
 // so naming it beside any other action is refused rather than ignored: a
-// setting that looks applied and is not.
+// setting that looks applied and is not. For any action but "dir" the place
+// comes back empty, which is what every later check reads as "unmentioned".
 func ResolveConflicts(action, dir string) (ConflictAction, ConflictPlace, error) {
 	a, p := ConflictsDir, ConflictsBoth
 	var err error
@@ -114,6 +115,9 @@ func ResolveConflicts(action, dir string) (ConflictAction, ConflictPlace, error)
 		if a != ConflictsDir {
 			return "", "", fmt.Errorf("conflicts-dir = %s applies only to conflicts = %s, not %s", dir, ConflictsDir, a)
 		}
+	}
+	if a != ConflictsDir {
+		p = ""
 	}
 	return a, p, nil
 }
