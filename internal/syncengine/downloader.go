@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log"
 	"os"
 	"path"
@@ -20,6 +21,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/syshlted/drivel/internal/fsevent"
 	"github.com/syshlted/drivel/internal/state"
 	"github.com/syshlted/drivel/provider"
 )
@@ -526,15 +528,11 @@ func (d *Downloader) applyTo(ctx context.Context, ch provider.RemoteChange, forg
 	d.moveLocally(ch)
 
 	if ch.Removed || ch.File == nil {
-		// Idempotent: if we (or a prior run) already removed it, RemoveAll is a
-		// no-op. Covers our own delete echo without a dedicated record.
-		if err := os.RemoveAll(dst); err != nil {
+		if err := d.applyRemoval(ctx, ch.Path, dst, forget); err != nil {
 			return err
 		}
-		d.logf("[pull] delete  %s", ch.Path)
 		d.mon.count(cRemoteDeletes, 1)
 		d.mon.applied(ch.Path, StatusDeleted)
-		forget[ch.Path] = struct{}{}
 		return nil
 	}
 
@@ -1000,4 +998,126 @@ func fileMD5(path string) (string, error) {
 		return "", err
 	}
 	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+// applyRemoval applies a remote deletion of rel to the local tree, and is the
+// feed's counterpart of the sweep's deleteGone: only what still matches its
+// baseline is deleted. A file changed here since the last sync, or one never
+// synced at all, is the only copy of that work, and a deletion made somewhere
+// else knows nothing about it. It is kept, its stale baseline is dropped, and it
+// is pushed back, so an edit beats a deletion it never saw. A directory goes the
+// same way, child by child, and survives if anything in it was kept.
+//
+// Until 2026-10-18 this was one os.RemoveAll, which destroyed an unpushed edit
+// to a file deleted remotely, and every never-synced file under a directory
+// deleted remotely, with nothing in the log to say so.
+func (d *Downloader) applyRemoval(ctx context.Context, rel, dst string, forget map[string]struct{}) error {
+	info, err := os.Lstat(dst)
+	if errors.Is(err, os.ErrNotExist) {
+		// Already gone: our own deletion coming back, or a prior run's.
+		forget[rel] = struct{}{}
+		d.logf("[pull] delete  %s", rel)
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if !info.IsDir() {
+		if d.removeIfSynced(ctx, rel, dst, info, forget) {
+			d.logf("[pull] delete  %s", rel)
+		}
+		return nil
+	}
+
+	// Children first, deepest first, so a directory is removed only once
+	// everything in it has been decided.
+	var paths []string
+	err = filepath.WalkDir(dst, func(p string, _ fs.DirEntry, err error) error {
+		if err != nil {
+			return nil //nolint:nilerr // unreadable: left where it is, which is the safe direction
+		}
+		paths = append(paths, p)
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	kept := 0
+	for i := len(paths) - 1; i >= 0; i-- {
+		p := paths[i]
+		r, rErr := filepath.Rel(d.dataDir, p)
+		if rErr != nil {
+			continue
+		}
+		r = filepath.ToSlash(r)
+		fi, err := os.Lstat(p)
+		if err != nil {
+			continue
+		}
+		if fi.IsDir() {
+			if os.Remove(p) == nil {
+				forget[r] = struct{}{}
+			}
+			continue
+		}
+		if !d.removeIfSynced(ctx, r, p, fi, forget) {
+			kept++
+		}
+	}
+	if kept > 0 {
+		d.logf("[pull] delete  %s (kept %d file(s) changed here or never synced)", rel, kept)
+		return nil
+	}
+	d.logf("[pull] delete  %s", rel)
+	return nil
+}
+
+// removeIfSynced deletes the local file at rel if it still holds what was last
+// synced there, and reports whether it did. Otherwise it is kept and re-pushed.
+func (d *Downloader) removeIfSynced(ctx context.Context, rel, abs string, fi os.FileInfo, forget map[string]struct{}) bool {
+	if d.mat != nil && d.mat.IsPlaceholder(rel) {
+		// Remote-born and holding nothing local: there is no work here to keep.
+		if err := os.Remove(abs); err != nil {
+			d.logf("[pull] removing %s: %v", rel, err)
+			return false
+		}
+		forget[rel] = struct{}{}
+		return true
+	}
+	why := ""
+	switch e, ok, err := d.state.GetEcho(rel); {
+	case err != nil:
+		why = "its sync record could not be read"
+	case !fi.Mode().IsRegular():
+		why = "it is a " + kindOf(fi.Mode()) + ", which never syncs"
+	case !ok:
+		why = "it was never synced from here"
+	default:
+		var same bool
+		same, why = d.matchesBaseline(rel, abs, e)
+		if same {
+			if err := os.Remove(abs); err != nil {
+				d.logf("[pull] removing %s: %v", rel, err)
+				return false
+			}
+			forget[rel] = struct{}{}
+			return true
+		}
+	}
+	d.logf("[pull] keep    %s (deleted remotely, but %s)", rel, why)
+	if !fi.Mode().IsRegular() || !d.conflicts.Syncs(rel) {
+		return false
+	}
+	// Dropped inline, as the sweep does: the push below writes a fresh echo for
+	// this path, and a batched forget flushed after it would erase it.
+	delete(forget, rel)
+	if err := d.state.DeleteEcho(rel); err != nil {
+		d.logf("[pull] clearing the baseline for %s: %v", rel, err)
+	}
+	// A new file still open through the mount is pushed by its own close; sent
+	// now it would go part-written (fsevent.Writing).
+	if d.rec.Push != nil && !d.rec.Writing.Has(rel) {
+		d.rec.Push.Push(ctx, fsevent.Event{Op: fsevent.OpWrite, Path: rel})
+	}
+	return false
 }

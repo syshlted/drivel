@@ -13,6 +13,14 @@ from source with `make build`.
 
 ## Unreleased
 
+### A deletion on another machine no longer takes your unsaved work — 2026-10-18
+
+When a file was deleted on another machine, Drivel removed the local copy even
+if it had been edited here and not uploaded yet. A deleted folder took every
+file in it that had never been synced. Now only files that still match what was
+last synced are removed; the rest are kept and uploaded again. See
+[deletion](docs/user/data-safety.md#deletion).
+
 ### You choose where conflict copies go — 2026-10-18
 
 The losing side of a conflict now goes into a `.drivel-conflicts` folder in the

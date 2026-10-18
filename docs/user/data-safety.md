@@ -140,6 +140,20 @@ This is the half of syncing that can lose data, so it is guarded hard.
 **A deletion made while Drivel is running** is unambiguous — it saw the operation
 — and propagates like any other change.
 
+**A deletion made on another machine** removes the local copy only if it still
+holds what was last synced. A file you changed here and have not uploaded yet,
+or one that was never synced, is kept and uploaded again, so an edit wins over a
+deletion that was made without knowing about it. A deleted folder goes the same
+way, file by file, and stays if anything in it was kept:
+
+```
+[pull] keep    notes/draft.txt (deleted remotely, but it was modified locally since)
+[pull] delete  notes (kept 1 file(s) changed here or never synced)
+```
+
+Before 18 October 2026 a remote deletion removed the local path outright, taking
+an unuploaded edit, or every unsynced file in a deleted folder, with it.
+
 For a short while afterwards, though, the backend may not agree that it happened.
 Google Drive moves a folder's contents to the trash along with the folder, but not
 instantly, so for a few seconds its list of recent changes still describes those

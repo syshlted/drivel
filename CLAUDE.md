@@ -1110,6 +1110,17 @@ goes through `provider.Creator`, whose refusal *is* the check, so on Drive (the
 (`TestFleetConcurrentEditsKeepTheOverwrittenEdit`) asserts the copy, ordered
 with a pause because a race would decide nothing.
 
+**A feed deletion deletes only what matches its baseline** (fixed 2026-10-18;
+`Downloader.applyRemoval`). It used to be one `os.RemoveAll`, which took an
+unpushed edit with a remotely deleted file and every never-synced file with a
+remotely deleted directory — the sweep's `deleteGone` had the guard all along and
+the feed did not. Now a file is removed only when `matchesBaseline` says it is
+unchanged (or it is a placeholder). Anything else is kept, its baseline dropped
+inline, and it is re-pushed unless it is still open (`fsevent.Writing`) or in a
+private conflicts folder. A directory goes child by child, deepest first, and
+survives if anything was kept. Edit beats delete, as in the sweep.
+`removal_test.go`, 5 mutation checks.
+
 ## Conflict policy (where the loser goes)
 
 **Who wins a conflict is fixed; where the loser goes is the user's** (2026-10-18,

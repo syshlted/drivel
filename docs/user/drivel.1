@@ -1357,6 +1357,11 @@ Google Drive and SFTP, and anything already at its path is kept.
 .B "-conflicts overwrite"
 skips that check. Two uploads that start at practically the same moment can still
 pass each other.
+.PP
+A deletion arriving from another machine removes a local file only if it still
+holds what was last synced. A file edited here and not yet uploaded, or one never
+synced, is kept and uploaded again; a deleted directory stays if anything in it
+was kept.
 .SH ABANDONED UPLOADS
 Every push is retried with a growing delay between attempts \(em five attempts
 over roughly seven seconds \(em and an error the backend reports as permanent is

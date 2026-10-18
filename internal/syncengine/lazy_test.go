@@ -255,6 +255,7 @@ func TestDeleteClearsHydrationRecord(t *testing.T) {
 	dir := t.TempDir()
 	st := newState(t)
 	writeFile(t, dir, "a.txt", "content")
+	_ = st.SetEcho("a.txt", state.Echo{Hash: md5hex("content"), Version: "1", At: time.Now()})
 	if err := st.SetHydration("a.txt", []byte(`{"block":4194304,"size":7}`)); err != nil {
 		t.Fatal(err)
 	}

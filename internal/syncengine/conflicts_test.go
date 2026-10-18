@@ -490,7 +490,9 @@ func TestThePullRespectsAPrivateConflictsFolder(t *testing.T) {
 		ps := newPatchStore()
 		ps.seed(".drivel-conflicts/a.txt", []byte("theirs"))
 		writeFile(t, dir, ".drivel-conflicts/mine.txt", "mine")
-		d := NewDownloader(nil, ps, dir, newState(t), DefaultCadence).Conflicts(tc.c)
+		st := newState(t)
+		_ = st.SetEcho(".drivel-conflicts/mine.txt", state.Echo{Hash: md5hex("mine"), Version: "1", At: time.Now()})
+		d := NewDownloader(nil, ps, dir, st, DefaultCadence).Conflicts(tc.c)
 		ctx := context.Background()
 		rf, _, _ := ps.Stat(ctx, ".drivel-conflicts/a.txt")
 		if err := d.apply(ctx, provider.RemoteChange{Path: rf.Path, File: &rf}); err != nil {
