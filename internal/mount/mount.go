@@ -46,6 +46,7 @@ type Options struct {
 	FsName     string               // display name for the mount
 	Debug      bool                 // backend-level tracing
 	Hydrator   Hydrator             // nil => eager mode (content always resident)
+	Writing    *fsevent.Writing     // new files still open; nil => not tracked
 
 	// Xattr enables extended-attribute passthrough to the backing store. The zero
 	// value — off — is what every mount gets unless it asks otherwise, and a

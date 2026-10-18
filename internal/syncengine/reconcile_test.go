@@ -979,3 +979,29 @@ func TestASweepAppliesOnlyTheNewestOfSameNameSiblings(t *testing.T) {
 		})
 	}
 }
+
+// A new file the mount still has open is not the walk's to push: its one event,
+// at close, sends it. Pushing it here uploaded it part-written and then again —
+// every slow copy, on a feedless backend that sweeps every few seconds. Once
+// closed it is an ordinary local-only file. Drop the Writing check and the
+// first sweep pushes it.
+func TestSweepLeavesANewFileStillOpenThroughTheMount(t *testing.T) {
+	writing := &fsevent.Writing{}
+	f := newSweepFixture(t, ReconcileOptions{Fetch: true, Writing: writing})
+	writeFile(t, f.dir, "copying.bin", "part of it")
+	writing.Open("copying.bin")
+
+	f.run(t)
+	if ops := f.push.ops(); len(ops) != 0 {
+		t.Fatalf("pushes = %v; a file still being written was pushed by the sweep", ops)
+	}
+
+	writing.Close("copying.bin")
+	f2 := newSweepFixture(t, ReconcileOptions{Fetch: true, Writing: writing})
+	f2.dir = f.dir
+	f2.dl = NewDownloader(f2.src, f2.store, f.dir, f2.st, DefaultCadence).Reconcile(f2.opts)
+	f2.run(t)
+	if got, want := f2.push.ops(), []string{"write copying.bin"}; !equal(got, want) {
+		t.Fatalf("pushes = %v; want %v once the file is closed", got, want)
+	}
+}

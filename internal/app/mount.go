@@ -193,6 +193,7 @@ type Mount struct {
 	engine  *syncengine.Engine
 	down    *syncengine.Downloader
 	events  chan fsevent.Event
+	writing *fsevent.Writing // new files still open, shared by the mount and the sweep
 
 	// mon is this mount's observation surface (M14): the engine, the pull loop
 	// and the sweep write to it, and the control API reads it. Built for every
@@ -250,7 +251,8 @@ func Open(ctx context.Context, spec MountSpec, reg *provider.Registry) (*Mount, 
 	}
 
 	m := &Mount{
-		spec: spec, lg: spec.Logger, events: make(chan fsevent.Event, eventBuffer),
+		writing: &fsevent.Writing{},
+		spec:    spec, lg: spec.Logger, events: make(chan fsevent.Event, eventBuffer),
 		mon: syncengine.NewMonitor(spec.controlName()),
 	}
 	// Anything acquired before a later failure has to be handed back, or a failed
@@ -414,6 +416,7 @@ func Open(ctx context.Context, spec MountSpec, reg *provider.Registry) (*Mount, 
 			MaxDeletes: spec.MaxDeletes,
 			Interval:   spec.SweepInterval,
 			Unclean:    unclean,
+			Writing:    m.writing,
 		})
 	}
 
@@ -508,6 +511,7 @@ func (m *Mount) Run(ctx context.Context) error {
 		BackendOptions: m.spec.BackendOptions,
 		Ready:          m.spec.Ready,
 		Hydrator:       hydratorOf(m.hyd),
+		Writing:        m.writing,
 		Logger:         m.lg,
 	})
 	if err != nil {

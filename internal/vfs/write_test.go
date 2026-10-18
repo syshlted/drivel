@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/syshlted/drivel/internal/fsevent"
+	"github.com/syshlted/drivel/internal/mount"
 )
 
 // A partial write through a handle the client opened write-only has to land, and
@@ -83,7 +84,8 @@ func TestPartialWriteThroughWriteOnlyHandle(t *testing.T) {
 // Create again and the first assertion fails.
 func TestANewFileIsOneEventAtClose(t *testing.T) {
 	backing := t.TempDir()
-	mnt, events := mountTest(t, backing, nil)
+	writing := &fsevent.Writing{}
+	mnt, events := mountTest(t, backing, nil, func(o *mount.Options) { o.Writing = writing })
 	drain(events)
 
 	f, err := os.Create(filepath.Join(mnt, "copy.bin"))
@@ -93,6 +95,8 @@ func TestANewFileIsOneEventAtClose(t *testing.T) {
 	if _, err := f.Write(bytes.Repeat([]byte{1}, 64<<10)); err != nil {
 		t.Fatal(err)
 	}
+	// The sweep's walk reads this set to leave the file alone meanwhile.
+	open := writing.Has("copy.bin")
 	var early *fsevent.Event
 	select {
 	case ev := <-events:
@@ -107,6 +111,9 @@ func TestANewFileIsOneEventAtClose(t *testing.T) {
 	if early != nil {
 		t.Fatalf("event %s %s while the new file was still open; want none until it is closed", early.Op, early.Path)
 	}
+	if !open {
+		t.Error("the new file was not in the mount's Writing set while open")
+	}
 	ev := waitEvent(t, events, fsevent.OpCreate, "copy.bin")
 	if ev.Dirty != nil {
 		t.Errorf("a new file's event carries extents %v; nothing remote exists to patch", ev.Dirty)
@@ -115,6 +122,9 @@ func TestANewFileIsOneEventAtClose(t *testing.T) {
 	case ev := <-events:
 		t.Errorf("a second event, %s %s, for one new file", ev.Op, ev.Path)
 	case <-time.After(300 * time.Millisecond):
+	}
+	if writing.Has("copy.bin") {
+		t.Error("the closed file is still in the Writing set; the walk would never send it")
 	}
 
 	// Created and never written is still a file to create remotely.

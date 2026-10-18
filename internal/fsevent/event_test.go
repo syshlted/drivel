@@ -103,3 +103,26 @@ func TestDirtyMustBeClonedBeforeItIsHandedOver(t *testing.T) {
 		t.Errorf("a cloned set grew with the original: %d extents, want 1", got)
 	}
 }
+
+func TestWritingCountsHandlesAndANilSetIsEmpty(t *testing.T) {
+	var none *Writing
+	none.Open("a")
+	none.Close("a")
+	if none.Has("a") {
+		t.Fatal("a nil set reports a path")
+	}
+	w := &Writing{}
+	w.Open("a")
+	w.Open("a")
+	w.Close("a")
+	if !w.Has("a") {
+		t.Fatal("one of two handles closed, and the path reads as no longer open")
+	}
+	w.Close("a")
+	w.Close("a") // an extra Close must not go negative and resurrect it
+	w.Open("a")
+	w.Close("a")
+	if w.Has("a") {
+		t.Fatal("every handle closed, and the path still reads as open")
+	}
+}

@@ -882,7 +882,10 @@ inside the debounce window — which is also the answer to the duplicate upload
 MC-11 recorded and the plan had sent to Tier A to be chased, and is **fixed
 2026-10-18** by emitting a new file's one event at close (`vfs` `fileHandle.created`,
 `TestANewFileIsOneEventAtClose`); a new file held open is now invisible until
-closed, which is push-on-close applied to creates too; and the permanent
+closed, which is push-on-close applied to creates too — **and to the sweep**: the
+walk's "new locally" row would otherwise find the open, unannounced file and push
+it part-written (the live SFTP run did exactly that at a 2s poll), so the mount
+publishes its open new files as `fsevent.Writing` and the walk skips them; and the permanent
 HTTP/3 downgrade in "Transport" below.
 
 **Groups II, III, IV and V are finished and Group VI is partly done** (ran

@@ -38,6 +38,8 @@ type node struct {
 	hyd    mount.Hydrator // nil => eager mode; content is always resident
 	xattr  bool           // false => xattr ops are refused, not proxied (see xattr.go)
 	lg     *log.Logger    // nil => the log package's default
+	// writing is the mount's set of new files still open (fsevent.Writing).
+	writing *fsevent.Writing
 }
 
 // logf writes one line for this mount.
@@ -87,7 +89,7 @@ func (n *node) WrapChild(_ context.Context, ops fs.InodeEmbedder) fs.InodeEmbedd
 		n.logf("vfs: unexpected child type %T; passing through uninstrumented", ops)
 		return ops
 	}
-	return &node{LoopbackNode: ln, events: n.events, hyd: n.hyd, xattr: n.xattr, lg: n.lg}
+	return &node{LoopbackNode: ln, events: n.events, hyd: n.hyd, xattr: n.xattr, lg: n.lg, writing: n.writing}
 }
 
 // NewRoot builds the root InodeEmbedder for a loopback mount backed by
@@ -118,6 +120,7 @@ func NewRoot(opts mount.Options) (fs.InodeEmbedder, error) {
 		hyd:          opts.Hydrator,
 		xattr:        opts.Xattr,
 		lg:           opts.Logger,
+		writing:      opts.Writing,
 	}
 	// Mirrors NewLoopbackRoot: relative-path computation prefers this over
 	// walking up to the FUSE mount root.
@@ -164,7 +167,8 @@ func (n *node) Create(ctx context.Context, name string, flags, mode uint32, out 
 		//
 		// The file was just created or truncated, so its content is resident by
 		// definition — mark the handle so no read on it tries to fault anything in.
-		h := &fileHandle{wrapped: fh, path: path, events: n.events, hyd: n.hyd, lg: n.lg, created: true}
+		n.writing.Open(path)
+		h := &fileHandle{wrapped: fh, path: path, events: n.events, hyd: n.hyd, lg: n.lg, created: true, writing: n.writing}
 		h.resident.Store(true)
 		fh = h
 	}

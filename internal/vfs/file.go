@@ -39,6 +39,7 @@ type fileHandle struct {
 	// one event, OpCreate, whether or not anything was written: an empty file is
 	// still a file to create remotely.
 	created bool
+	writing *fsevent.Writing // where a created handle is counted until Release
 }
 
 // dirtyTracker records which byte extents a handle wrote, so the uploader can
@@ -208,6 +209,11 @@ func (f *fileHandle) Release(ctx context.Context) syscall.Errno {
 		f.events <- fsevent.Event{Op: fsevent.OpCreate, Path: f.path}
 	case errno == 0 && written:
 		f.events <- fsevent.Event{Op: fsevent.OpWrite, Path: f.path, Dirty: extents}
+	}
+	// After the event, never before: in between, the walk would find a file
+	// that is neither open nor announced and push it as local-only.
+	if f.created {
+		f.writing.Close(f.path)
 	}
 	return errno
 }

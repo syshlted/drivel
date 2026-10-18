@@ -108,6 +108,11 @@ type ReconcileOptions struct {
 	// provider with a feed and a stored cursor no other trigger would run it until
 	// Interval comes due, which at 0 is never.
 	Unclean time.Time
+
+	// Writing is the mount's set of new files still open (fsevent.Writing). The
+	// walk leaves them alone: their one event, at close, pushes them, and pushing
+	// one now would upload it part-written and then again. Nil tracks nothing.
+	Writing *fsevent.Writing
 }
 
 // DefaultMaxDeletes is the out-of-the-box cap on reconcile-inferred deletions.
@@ -548,6 +553,7 @@ type sweepStats struct {
 	suppressed  int // listed objects that are this mount's own deletion, not yet propagated
 	tombExpired int // deletion records dropped because nothing can still report them
 	foreign     int // subtrees skipped: another drivel's backing store or mount (MC-47)
+	writing     int // new local files skipped: still open through the mount
 	siblings    int // paths more than one remote object claims (MC-30)
 
 	// listed is when each path this process has listed in this sweep was last
@@ -609,6 +615,9 @@ func (s sweepStats) String() string {
 	}
 	if s.siblings > 0 {
 		out += fmt.Sprintf(", %d path(s) shared by more than one remote object", s.siblings)
+	}
+	if s.writing > 0 {
+		out += fmt.Sprintf(", %d new file(s) still being written (sent when closed)", s.writing)
 	}
 	if s.foreign > 0 {
 		out += fmt.Sprintf(", %d directory(ies) skipped as another drivel mount's", s.foreign)
@@ -947,6 +956,10 @@ func (d *Downloader) pushLocalOnly(ctx context.Context, sw state.Sweep, st *swee
 		}
 		if seen, err := d.state.SeenPath(sw.Gen, rel); err != nil || seen {
 			return nil //nolint:nilerr // seen remotely (or the store is unreadable, which means the same here): apply already reconciled it
+		}
+		if d.rec.Writing.Has(rel) {
+			st.writing++
+			return nil
 		}
 		d.logf("[sweep] push    %s (local only)", rel)
 		d.rec.Push.Push(ctx, fsevent.Event{Op: fsevent.OpWrite, Path: rel})
