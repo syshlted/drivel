@@ -812,3 +812,45 @@ func TestARefusedBackendCopyFallsBackToAnUpload(t *testing.T) {
 		t.Errorf("remote copies = %v after %d upload(s); want the loser uploaded once", remoteCopies(ts.patchStore), uploadsOfCopies(ts.patchStore))
 	}
 }
+
+// swappingStore replaces the local file at swap the first time a Put of it
+// starts, the way the pull loop keeps a local loser: rename it away, write the
+// remote's version in its place. The upload reads on through its handle.
+type swappingStore struct {
+	*patchStore
+	dir, swap, winner string
+	once              *bool
+}
+
+func (s swappingStore) Put(ctx context.Context, p string, r io.Reader) (provider.RemoteFile, error) {
+	if p == s.swap && !*s.once {
+		*s.once = true
+		abs := filepath.Join(s.dir, p)
+		_ = os.MkdirAll(filepath.Join(s.dir, ConflictDirName), 0o755)
+		_ = os.Rename(abs, filepath.Join(s.dir, ConflictDirName, p))
+		_ = os.WriteFile(abs, []byte(s.winner), 0o644)
+	}
+	return s.patchStore.Put(ctx, p, r)
+}
+
+// A file replaced while it was being uploaded is pushed again from what is at
+// the path now, so the remote ends with what this machine holds, not with the
+// loser the handle was still reading.
+func TestAFileReplacedDuringItsUploadIsPushedAgain(t *testing.T) {
+	dir := t.TempDir()
+	ps := newPatchStore()
+	st := newState(t)
+	syncedAt(t, st, ps, "a.txt", []byte("base"))
+	writeFile(t, dir, "a.txt", "loser")
+	once := false
+	s := swappingStore{patchStore: ps, dir: dir, swap: "a.txt", winner: "winner", once: &once}
+	e := New(Config{Store: s, DataDir: dir, State: st})
+	e.retry = retryPolicy{max: 5, base: time.Microsecond, cap: 100 * time.Microsecond}
+	e.Push(context.Background(), fsevent.Event{Op: fsevent.OpWrite, Path: "a.txt"})
+	if got := string(ps.remoteBytes("a.txt")); got != "winner" {
+		t.Errorf("remote a.txt = %q; want what is at the path now", got)
+	}
+	if got := localCopies(t, dir); onlyValue(got) != "loser" {
+		t.Errorf("local copies = %v; the loser should still be kept", got)
+	}
+}

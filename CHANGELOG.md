@@ -13,6 +13,15 @@ from source with `make build`.
 
 ## Unreleased
 
+### Two machines editing one file now always agree on the result — 2026-10-18
+
+When a conflict was found while this machine was already uploading the same
+file, the upload could finish with the losing version, so the remote and your
+other machines ended up holding the loser while this machine held the winner.
+Both versions were kept, but the file itself never agreed again. Drivel now
+notices that the file changed under the upload and sends the right one. See
+[conflicts](docs/user/data-safety.md#conflicts).
+
 ### A deletion on another machine no longer takes your unsaved work — 2026-10-18
 
 When a file was deleted on another machine, Drivel removed the local copy even

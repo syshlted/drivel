@@ -1131,7 +1131,7 @@ through `keepLocal` or `keepRemote` on it. `conflicts` = `dir` (default) |
 `local-trash` | `remote-trash` | `overwrite`. `conflicts-dir` = `both`
 (default) | `local` | `remote`, for `dir` only, and refused beside anything
 else (M8 rule 6). `syncengine.ResolveConflicts` is the one parser all three
-boundaries call. Five things carry it.
+boundaries call. Six things carry it.
 
 1. **`.drivel-conflicts` is a reserved component, and `Conflicts.Syncs` is the
    only answer to "does this mount sync this path?".** The push, the pull, the
@@ -1178,6 +1178,14 @@ boundaries call. Five things carry it.
    (`internal/trash`, `.trashinfo` naming the *mountpoint* path so Restore
    writes through the mount) and is refused when the trash would be inside the
    backing tree or mountpoint.
+6. **An upload must still be reading the file at its path when it ends.**
+   keepLocal renames the local loser into the folder while the engine may be
+   mid-`Put` of that path through an open handle, which then sends the *loser*
+   to the path while the winner sits locally, and a fingerprint of the handle
+   would call them synced. `Engine.uploaded` compares the handle with
+   `os.Lstat(path)` (`os.SameFile`); on a mismatch it records the remote with
+   no local fingerprint and returns the retryable `errReplaced`, so the retry
+   pushes what is there. Found live over SFTP (pause, edit both, resume).
 
 ## Range writes (M6)
 

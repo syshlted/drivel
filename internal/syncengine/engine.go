@@ -1310,8 +1310,7 @@ func (e *Engine) pushContent(ctx context.Context, p string, dirty *ranges.Set) e
 	if err != nil {
 		return err
 	}
-	e.uploaded(p, rf, f, counted.n)
-	return nil
+	return e.uploaded(p, rf, f, counted.n)
 }
 
 // createFirst is a first push through provider.Creator, reporting done when the
@@ -1324,8 +1323,7 @@ func (e *Engine) createFirst(ctx context.Context, p string, f *os.File) (bool, e
 	counted := &countingReader{r: f}
 	rf, err := c.Create(ctx, p, counted)
 	if err == nil {
-		e.uploaded(p, rf, f, counted.n)
-		return true, nil
+		return true, e.uploaded(p, rf, f, counted.n)
 	}
 	if !errors.Is(err, provider.ErrExist) {
 		return true, err
@@ -1345,15 +1343,47 @@ func (e *Engine) createFirst(ctx context.Context, p string, f *os.File) (bool, e
 }
 
 // uploaded records a whole-file upload of p that sent n bytes.
-func (e *Engine) uploaded(p string, rf provider.RemoteFile, f *os.File, n int64) {
-	e.recordEchoOf(rf, statOf(f))
+//
+// It returns errReplaced when f stopped being the file at p while it was being
+// sent: the pull loop, keeping a local loser, renames it into a conflicts
+// folder and puts the remote's version in its place, and an upload already
+// reading it goes on sending the loser to p through its open handle. The
+// remote then holds the loser at p while this machine holds the winner, and a
+// baseline fingerprinting the handle would call them in sync — a fleet that
+// never converges, found live on 2026-10-18. So the remote's new state is
+// recorded with no local fingerprint, and the retry pushes what is at p now.
+func (e *Engine) uploaded(p string, rf provider.RemoteFile, f *os.File, n int64) error {
+	fi := statOf(f)
+	cur, err := os.Lstat(filepath.Join(e.dataDir, filepath.FromSlash(p)))
+	replaced := fi == nil || err != nil || !os.SameFile(fi, cur)
+	if replaced {
+		e.recordEcho(rf)
+	} else {
+		e.recordEchoOf(rf, fi)
+	}
 	// Only here, never on the routes above: a range write and both skips log their
 	// own lines, and counting this one as well would report an upload that did not
 	// happen — which is exactly what MC-21 (a touch must cost nothing) asserts.
 	e.mon.count(cUploads, 1)
 	e.mon.count(cUploadBytes, n)
 	e.logf("[sync] upload   %s (%d B)", p, n)
+	if replaced {
+		return errReplaced
+	}
+	return nil
 }
+
+// errReplaced is uploaded's report that the file it sent is no longer the one
+// at its path. Retryable, so the engine's own retry re-pushes the path, with
+// its usual bound.
+var errReplaced = replacedError{}
+
+type replacedError struct{}
+
+func (replacedError) Error() string {
+	return "the file was replaced during its upload; sending what is there now"
+}
+func (replacedError) Retryable() bool { return true }
 
 // countingReader reports how many bytes a store actually read out of a file. It
 // is not a progress meter: nothing reads n until the Put has returned.
