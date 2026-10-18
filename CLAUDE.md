@@ -1138,7 +1138,9 @@ boundaries call. Five things carry it.
    sweep's remote pass, its delete pass and its walk all ask it. One that
    disagreed would upload a copy and then infer it deleted, or the reverse. A
    rename across the edge of a private folder is the one event with meaning: out
-   is a restore (push the file), in is a removal (remove it remotely).
+   is a restore (push the file, or `pushTree` for a directory), in is a removal
+   (remove it remotely, and `forgetMovedSubtree` drops the children's records,
+   or the next sweep reads each as deleted here).
 2. **A loser that cannot be kept is never replaced.** keepLocal/keepRemote
    return an error and the caller fails the apply or the push, so the retry
    machinery decides. Every keep is a **local step then a remote one**: the

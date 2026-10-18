@@ -157,7 +157,12 @@ func (s *patchStore) Move(_ context.Context, _, newPath string) (provider.Remote
 func (s *patchStore) Remove(_ context.Context, p string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	delete(s.content, p)
+	// Recursive, as provider.Store.Remove documents.
+	for q := range s.content {
+		if q == p || strings.HasPrefix(q, p+"/") {
+			delete(s.content, q)
+		}
+	}
 	return nil
 }
 func (s *patchStore) Get(_ context.Context, p string) (io.ReadCloser, error) {

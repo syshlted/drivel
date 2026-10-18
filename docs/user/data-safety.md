@@ -79,7 +79,8 @@ A few things follow from those choices:
   nothing in one on the remote is downloaded to it. Deleting a reviewed copy
   there does nothing to the remote either.
 - **Moving a copy out of the folder restores it.** It becomes an ordinary file
-  at its new path and uploads as one. Moving a file *into* a folder that is not
+  at its new path and uploads as one. A folder moved out uploads with everything
+  in it. Moving a file *into* a folder that is not
   synced removes it from the remote, as deleting it would.
 - **A copy is safe on this machine before anything is uploaded.** The upload
   happens in the background, so changes arriving from the remote do not wait

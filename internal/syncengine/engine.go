@@ -28,9 +28,11 @@ import (
 	"fmt"
 	"hash/fnv"
 	"io"
+	"io/fs"
 	"log"
 	"math/rand"
 	"os"
+	"path"
 	"path/filepath"
 	"sync"
 	"sync/atomic"
@@ -1134,22 +1136,97 @@ func (e *Engine) pushAcrossConflictsFolder(ctx context.Context, ev fsevent.Event
 		return true, nil
 	case !from:
 		fi, err := os.Lstat(filepath.Join(e.dataDir, filepath.FromSlash(ev.NewPath)))
-		if err != nil || !fi.Mode().IsRegular() {
-			// A directory, or gone already: the sweep's walk finds whatever of it
-			// is content, which is safer than inventing a tree of pushes here.
-			return true, nil //nolint:nilerr // nothing to push is not a failure
+		if err != nil {
+			return true, nil //nolint:nilerr // gone already: nothing to push is not a failure
 		}
 		e.logf("[sync] restore  %s -> %s (out of a conflicts folder)", ev.Path, ev.NewPath)
+		if fi.IsDir() {
+			return true, e.pushTree(ctx, ev.NewPath)
+		}
+		if !fi.Mode().IsRegular() {
+			return true, nil
+		}
 		return true, e.pushContent(ctx, ev.NewPath, nil)
 	}
 	base := e.baselineOf(ev.Path)
 	if err := e.store.Remove(ctx, ev.Path); err != nil {
 		return true, err
 	}
+	e.forgetMovedSubtree(ev.Path, ev.NewPath)
 	e.entombPath(ev.Path, base)
 	e.mon.count(cDeletes, 1)
 	e.logf("[sync] delete   %s (moved into a conflicts folder this mount keeps to itself)", ev.Path)
 	return true, nil
+}
+
+// forgetMovedSubtree drops the records of everything that was under the
+// directory oldPath and is now under newPath, in one commit. A removal by
+// rename delivers one event for the whole subtree, and the children's
+// baselines left behind would each read to the next sweep as a file deleted
+// here, to be deleted remotely a second time. What is found by walking the new
+// location is what was moved; a plain file has no subtree and costs nothing.
+func (e *Engine) forgetMovedSubtree(oldPath, newPath string) {
+	if e.state == nil {
+		return
+	}
+	root := filepath.Join(e.dataDir, filepath.FromSlash(newPath))
+	var gone []string
+	_ = filepath.WalkDir(root, func(p string, _ fs.DirEntry, err error) error {
+		if err != nil || p == root {
+			return nil //nolint:nilerr // unreadable: its record stays, the safe direction
+		}
+		r, err := filepath.Rel(root, p)
+		if err == nil {
+			gone = append(gone, path.Join(oldPath, filepath.ToSlash(r)))
+		}
+		return nil
+	})
+	if len(gone) == 0 {
+		return
+	}
+	if err := e.state.ForgetMany(gone); err != nil {
+		e.logf("[sync] forget state under %s: %v", oldPath, err)
+	}
+}
+
+// pushTree uploads a directory that has just entered what this mount syncs,
+// with everything in it: the one event a rename delivers stands for the whole
+// subtree, and nothing below it was ever pushed. Directories are made before
+// their contents, regular files go through pushContent (so its placeholder
+// guard and gates apply), and a nested conflicts folder this mount keeps to
+// itself is skipped. The first failure stops it and the engine's retry runs it
+// again; what was already sent is re-sent, which costs bytes, never content.
+func (e *Engine) pushTree(ctx context.Context, rel string) error {
+	root := filepath.Join(e.dataDir, filepath.FromSlash(rel))
+	return filepath.WalkDir(root, func(p string, de fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		r, err := filepath.Rel(e.dataDir, p)
+		if err != nil {
+			return err
+		}
+		r = filepath.ToSlash(r)
+		if !e.conflicts.Syncs(r) || reservedPath(r) {
+			if de.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		switch {
+		case de.IsDir():
+			rf, err := e.store.Mkdir(ctx, r)
+			if err != nil {
+				return err
+			}
+			e.recordEcho(rf)
+			e.mon.count(cMkdirs, 1)
+			e.logf("[sync] mkdir    %s", r)
+		case de.Type().IsRegular():
+			return e.pushContent(ctx, r, nil)
+		}
+		return nil
+	})
 }
 
 // hashSkipMinSize is the size below which the unchanged-content gate is not worth

@@ -644,3 +644,49 @@ func TestAPauseHoldsAConflictCopysUpload(t *testing.T) {
 		t.Errorf("remote copy = %q after the pause; want the local edit", got)
 	}
 }
+
+// A directory crosses the edge of a private conflicts folder as one rename
+// event. Moved out, everything in it is uploaded; moved in, it is removed from
+// the remote and its children's records go with it, so no sweep later reads
+// them as files deleted here.
+func TestADirectoryCrossesAPrivateConflictsFolder(t *testing.T) {
+	dir := t.TempDir()
+	ps := newPatchStore()
+	st := newState(t)
+	e := New(Config{Store: ps, DataDir: dir, State: st, Conflicts: &Conflicts{Place: ConflictsLocal}})
+	ctx := context.Background()
+
+	writeFile(t, dir, "back/a.txt", "a")
+	writeFile(t, dir, "back/sub/b.txt", "b")
+	writeFile(t, dir, "back/"+ConflictDirName+"/c.txt", "private")
+	if err := e.push(ctx, fsevent.Event{Op: fsevent.OpRename, Path: ConflictDirName + "/back", NewPath: "back"}); err != nil {
+		t.Fatal(err)
+	}
+	for p, want := range map[string]string{"back/a.txt": "a", "back/sub/b.txt": "b"} {
+		if got := string(ps.remoteBytes(p)); got != want {
+			t.Errorf("%s on the remote = %q; want %q", p, got, want)
+		}
+	}
+	if got := remoteCopies(ps); len(got) != 0 {
+		t.Errorf("remote copies = %v; the nested private folder was uploaded", got)
+	}
+
+	// Now move it back in: the local tree is under the folder, as after rename(2).
+	if err := os.MkdirAll(filepath.Join(dir, ConflictDirName), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(filepath.Join(dir, "back"), filepath.Join(dir, ConflictDirName, "back")); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.push(ctx, fsevent.Event{Op: fsevent.OpRename, Path: "back", NewPath: ConflictDirName + "/back"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok, _ := ps.Stat(ctx, "back/a.txt"); ok {
+		t.Error("back/a.txt is still on the remote")
+	}
+	for _, p := range []string{"back/a.txt", "back/sub/b.txt", "back/sub"} {
+		if _, ok, _ := st.GetEcho(p); ok {
+			t.Errorf("the record for %s survived its directory's move into the folder", p)
+		}
+	}
+}
