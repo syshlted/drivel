@@ -361,7 +361,8 @@ refused at startup.
 The setting applies to every removal this mount makes — the ones you type and the
 ones a sweep infers alike. It does not affect deletions made *to* you: a file
 another client removes is deleted from your backing directory whichever mode you
-run.
+run, as long as it still holds what was last synced — an edit you have not
+uploaded yet is kept (see [data safety](data-safety.md#deletion)).
 
 ## SFTP options
 

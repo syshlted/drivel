@@ -20,11 +20,13 @@ drivel resume
 drivel stop                        # unmount and finish uploads, as Ctrl-C would
 ```
 
-Each command takes `-name NAME` to act on one mount of several, and `-socket
-PATH` if the mount was started with `-control-socket`. With `-name`, the
-commands also look for a socket of that mount's own, which is how an
-[fstab mount](fstab.md#the-control-socket) is reached. `drivel status -json`
-prints the raw answer.
+`status`, `pause` and `resume` take `-name NAME` to act on one mount of several;
+`stop` does not, because it ends the whole process. All four take `-socket PATH`
+if the mount was started with `-control-socket`. With `-name`, the first three
+also look for a socket of that mount's own, which is how an
+[fstab mount](fstab.md#the-control-socket) is reached — to stop one, pass its
+socket with `-socket`, or `umount` it. `drivel status -json` prints the raw
+answer.
 
 ## Why it is off by default
 

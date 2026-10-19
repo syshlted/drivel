@@ -44,9 +44,10 @@ file with `.corrupt` appended and started with an empty one, which is safe:
 **nothing is deleted**, because a deletion is only ever inferred from a record of
 what was previously synced and there are now none.
 
-Expect a full re-enumeration of the remote tree, and a conflict copy beside any
-file whose local and remote copies differ — with no history, keeping both is the
-only honest answer. Lazily hydrated files are unaffected. See
+Expect a full re-enumeration of the remote tree, and a conflict copy of any file
+whose local and remote copies differ, kept wherever your [conflict
+setting](data-safety.md#where-the-loser-goes) puts losers — with no history,
+keeping both is the only honest answer. Lazily hydrated files are unaffected. See
 [Data safety](data-safety.md#the-databases-are-caches).
 
 If this recurs, the disk is the suspect, not Drivel. The `.corrupt` file is kept
@@ -165,7 +166,7 @@ download the whole Drive unless you ask: add `-materialize`, or use
 [`-lazy`](lazy-mode.md), where the whole tree appears as placeholders for free.
 
 **`the configured Drive root "…" names nothing this account can see`.**
-[`-drive-root`](configuration.md#google-drive-settings) (`root` in a config file)
+[`-drive-root`](configuration.md#google-drive-options) (`root` in a config file)
 takes a Drive **folder ID**, not a folder path and not a folder name. The ID is
 the last part of the folder's address in the Drive web UI — open the folder and
 copy the segment after `/folders/` in `drive.google.com/drive/folders/ID`. The
@@ -219,23 +220,33 @@ an older build and have an empty folder you deleted, remove it again — and if 
 sweep has since pushed it back to Drive, remove it there too. See [what Drivel
 does about the race](data-safety.md#deletion).
 
-**A folder I renamed appears twice on my other machines.** Fixed on 16 October
-2026. Before that, a rename of a folder reached your other machines as an empty
-new folder beside the full old one; a sweep repaired it for small folders, and for
-anything over about a hundred files the repair hit `-max-deletes` and refused
-itself, leaving the folder duplicated for good. On a current build you should see
-one `[pull] move` line per rename and no downloads.
+**A folder I renamed appears twice on my other machines.** On Google Drive this
+was fixed on 16 October 2026: a rename reaches your other machines as a rename,
+and you should see one `[pull] move` line per rename and no downloads. Before
+that, a renamed folder reached them as an empty new folder beside the full old
+one; a sweep repaired it for small folders, and for anything over about a hundred
+files the repair hit `-max-deletes` and refused itself, leaving the folder
+duplicated for good.
 
-If you are on an older build and have a doubled folder, delete the stale copy
-through the mount — it is the one whose files are no longer on the remote — then
-re-run with `-resync` and a `-max-deletes` above the number of files involved
-(or `0`), which is the same recipe as the refusal below.
+Two cases still take that old route. On [SFTP](sftp.md#what-it-costs-and-one-thing-to-know),
+which has no way to report a rename at all. And on Drive, when the machine
+receiving the rename has restarted since it last dealt with that folder — no
+sweep since it started, and nothing in the folder synced in either direction —
+because it then has no record of where the folder used to be. Either way that
+machine keeps the old folder until its next sweep, which downloads the new one in
+full and deletes the old one, unless the old one holds more files than
+`-max-deletes`: then the delete is refused and the folder stays doubled.
+
+To repair a doubled folder, delete the stale copy through the mount — it is the
+one whose files are no longer on the remote — then re-run with `-resync` and a
+`-max-deletes` above the number of files involved (or `0`), which is the same
+recipe as the refusal below.
 
 **`[sweep] REFUSING to delete: … over the -max-deletes limit`.** Drivel inferred more
 deletions than the cap allows and abandoned the entire pass rather than performing
 part of it. Check first that the mount is pointed where you think it is — a wrong
-`-drive-root`, or an empty `-data`, produces exactly this. A folder renamed by an
-older build is the other common cause, and the entry above has the recipe. If the
+`-drive-root`, or an empty `-data`, produces exactly this. A renamed folder that
+took the old route is the other common cause, and the entry above has the recipe. If the
 deletions are genuine, re-run with **both** `-resync` and a higher
 `-max-deletes`; the cap alone changes nothing until the next scheduled sweep.
 
@@ -310,8 +321,9 @@ permitting one produced two files that silently diverged. Symlinks work; see
 will. Those have no content to upload and no representation on Drive, so they stay
 in the backing directory on the machine that made them. Drivel logs a
 `skip … no remote representation, stays local` line for each one, from the mount
-and from the sweep. On FreeBSD, creating one on the mount fails outright with
-`EINVAL` — see [platforms](platforms.md#what-changes-off-linux).
+and from the sweep. On FreeBSD, creating a FIFO on the mount fails outright with
+`EINVAL`, while symlinks work normally — see
+[platforms](platforms.md#what-changes-off-linux).
 
 **A file was deleted and you want it back.** Deletions go to the Drive trash, so
 look in [drive.google.com](https://drive.google.com/drive/trash) and restore it

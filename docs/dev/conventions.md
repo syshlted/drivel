@@ -138,11 +138,14 @@ query. **Only the third is a source of truth.**
    wipes it.** Binding is lazy — at first use, not at `Open` — because mounting
    must not require the network.
 
-Two traps: **a rename must be reported inbound as remove-old + add-new**, because
-`provider.RemoteChange` carries no identity and Drive's feed never mentions a path
-an object has left. And **a file's `parents` carry the concrete root ID, never the
-`root` alias** — comparing against the alias made the parent walk climb past the
-mount root and drop every inbound change to a top-level file.
+Two traps: **a rename must be reported inbound**, because Drive's feed never
+mentions a path an object has left — a file as remove-old + add-new, a directory
+as `provider.RemoteChange.MovedFrom` on the change at its new path, and the old
+path derived from the in-memory map, never the persistent index (see
+[new-provider.md](new-provider.md#3-optional-implement-changesource-for-inbound-sync)
+for why the two shapes differ). And **a file's `parents` carry the concrete root
+ID, never the `root` alias** — comparing against the alias made the parent walk
+climb past the mount root and drop every inbound change to a top-level file.
 
 ## Enumeration & reconcile
 

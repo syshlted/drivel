@@ -180,6 +180,17 @@ lands in the same second as drivel's own last write to it is indistinguishable
 from drivel's own echo, and is not pulled until something else touches the file.
 It takes deliberate effort to hit; it is listed because it is real.
 
+**A renamed folder is downloaded again by your other machines.** Drivel finds
+remote changes here by listing the tree, and a listing cannot tell a rename from a
+new folder plus a deleted one — whether the rename was made through another drivel
+mount or directly on the server. So each other machine's next sweep downloads the
+folder in full under its new name and deletes the old copy. Those deletions count
+against [`-max-deletes`](configuration.md#mount-options) like any other a sweep
+infers, so a folder holding more files than the limit has the whole delete pass
+refused and stays doubled until you [repair it](troubleshooting.md#syncing). A
+machine that made the rename through its own mount is unaffected. On Google Drive
+a rename is reported as one, so this mostly does not arise there.
+
 **Symbolic links, sockets, devices and named pipes are skipped**, in both
 directions, and drivel says how many it stepped over at the end of a sweep. There
 is no honest way to carry them through a byte-stream interface, and following a

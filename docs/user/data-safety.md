@@ -127,7 +127,9 @@ same moment, and the version that won was then also kept as a loser.
 If your local file is
 *unchanged* since the last sync (you only touched it, or saved the same bytes)
 Drivel does not upload it at all, and the newer remote version arrives as an
-ordinary change.
+ordinary change. Telling the two apart takes a checksum from the backend, so on
+[SFTP](sftp.md), which reports none, Drivel keeps the newer remote version as a
+conflict copy and uploads yours instead — nothing is lost, but you get a copy.
 
 **A file Drivel has never synced is checked too.** If something already exists
 remotely at that path, it is kept as a conflict copy before your file replaces

@@ -906,9 +906,11 @@ is itself
 .BR 0600 ,
 and a connection from another uid is refused where the platform reports one. A
 socket left by a crashed drivel is replaced; one a live drivel is answering on
-is not, and the second process refuses to start. Not available to the
-.BR mount (8)
-helper.
+is not, and the second process refuses to start. An fstab line asks for it with
+the
+.B control
+helper option instead, which gives each line a socket of its own; see
+.BR "MOUNT HELPER" .
 .TP
 .BI -control-socket " path"
 Where
@@ -1509,10 +1511,10 @@ them.
 .B drivel
 logs one line naming each one, from the mount when it is created and from the
 enumeration sweep when the local walk steps over it, so a file that is not syncing
-says so rather than merely being absent elsewhere. On FreeBSD such a file cannot be
-created through the mount at all: the attempt fails with
+says so rather than merely being absent elsewhere. On FreeBSD a FIFO or a device
+node cannot be created through the mount at all: the attempt fails with
 .B EINVAL
-and creates nothing.
+and creates nothing. Symlinks work normally there.
 .PP
 .B Permissions, modification times and the holes in a sparse file are not synced.
 A downloaded file is created by the atomic write that protects a reader from a
@@ -1686,7 +1688,8 @@ over exFAT they are not. Prefer the Linux filesystem inside WSL regardless, sinc
 NTFS is case-insensitive and two names differing only in case collide into one
 local path.
 .B drivel
-warns at startup, naming the directory: the fix is eager mode or a different
+refuses to start a lazy mount there, naming the directory: the fix is eager mode
+or a different
 .IR -data ,
 not preserving any database.
 .TP

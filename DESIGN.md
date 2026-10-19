@@ -378,7 +378,7 @@ and **only the in-memory mapping is consulted, never the persistent index**:
 acting on it here means moving or deleting local files, and M7's first rule is
 that a persisted entry is a hint to be verified before it is believed. A move the
 in-memory map cannot account for falls back to the sweep, which is slower and
-never wrong.
+never destructive — though for a directory MC-27 showed it can be stuck, below.
 
 **What the seam says about it is two shapes, and which one a provider uses depends
 on what moved.** A *file* is reported as a removal of the old path followed by an
@@ -434,6 +434,22 @@ reported as a move. Five things about it.
   under a path that no longer existed and proposed exactly the same 1101
   deletions. `Engine.renameRecords` re-keys instead of dropping, at the same
   commit count.
+
+**Confirmed against real Drive on 2026-10-17** (`scripts/multiclient/
+mc27-dirmove.sh`, three eager clients, 150 files — the smallest size whose repair
+exceeds the default `-max-deletes`): one `[pull] move` per peer and no downloads,
+applied 2s and 5s after the push, and a forced `-resync` on all three afterwards
+refused nothing — including on the renaming client, which is the sending-side
+half. **Two routes still reach the pre-fix behaviour, and neither is a bug in
+the fix.** A provider with no feed sets `MovedFrom` nowhere, so on SFTP a folder
+renamed by one client is a new folder plus a vanished one to every other, and
+above `-max-deletes` that is MC-27's stuck state unchanged (`docs/user/sftp.md`
+discloses it). And on Drive the old path comes from the in-memory map only, so a
+rename of a folder this process has not touched since it started — no sweep
+since the start, nothing under it synced — reaches the host without
+`MovedFrom`, as a bare folder at the new path (checked with a probe against the
+fake, 2026-10-19). That one is the price of M7's rule 1 — a persisted entry is
+a hint, and this one would drive a subtree rename — rather than an oversight.
 
 ### 2.6 Transport — HTTP/3 (QUIC) with HTTP/2 fallback
 All Drive API traffic goes over **HTTP/3**. Rationale: QUIC's connection reuse and
@@ -827,7 +843,8 @@ a user discovers.
    answer "is this a placeholder". Earlier drafts of this section said losing
    `drivel-state.db` was what triggered the data loss — that was never true, and the
    correct advice is not "keep the DB" but **do not run `-lazy` on a backing store
-   without user extended attributes**. `app.Mount` says so at startup. Eager mode is
+   without user extended attributes**. `app.Open` refuses `-lazy` there (it only
+   warned until 2026-10-17). Eager mode is
    unaffected throughout.
 
    The macOS-specific trap is that a successful `setxattr` proves less there than on
@@ -1153,6 +1170,12 @@ where before the orphan lived long enough to remove it. It is invisible
 (`Enumerate` skips the prefix, M18 rule 7) and costs quota; reclaiming old
 temporaries is the open follow-up, and its age threshold has to exceed the longest
 plausible upload, because a young temporary may be another client's.
+**Reclaimed since 2026-10-17**, and the threshold argument turned out to be
+wrong: `Enumerate` removes a temporary whose mtime is older than `staleTempAge`
+(24h), and the clock that matters is time since the last *write*, not upload
+duration — SSH_FXP_WRITE moves the server's mtime, so a live upload of any length
+stays young and only a dead one ages. The threshold need only comfortably exceed
+clock skew between client and server.
 
 **What it costs.** One process per mount, and a local RPC hop on every byte of every
 transfer. Against a network backend the hop is noise; against the local backend M11
@@ -2489,9 +2512,9 @@ are both lossy and racy.
    a port — it is closing the two gaps that make a build that *runs* differ from a
    build that *works*. Ordered by ratio of user value to effort:
 
-   **Status: both xattr implementations are written and neither has been run on its
-   own platform.** What remains is a live run per platform and the two FUSE-T
-   questions below, so M10 is not closed. Writing them also settled a question this
+   **Status: both xattr implementations are written; the FreeBSD one has been run
+   on its own OS (2026-09-06, below) and the macOS one has not.** What remains is
+   the macOS run and the two FUSE-T questions below, so M10 is not closed. Writing them also settled a question this
    entry had been asking the wrong way round: the danger was never "off Linux", it
    was "a backing filesystem that cannot hold the marker", which includes exFAT/FAT
    and a tmpfs `/tmp` on FreeBSD, on kernels that are otherwise fine — but *not*
@@ -2502,7 +2525,8 @@ are both lossy and racy.
    cache present ranges and no code has ever consulted them for this. Without the
    attribute there is no placeholder record at all, immediately, and `app.Mount`'s
    warning now says that instead of advising the user to keep a database that was
-   never protecting them.
+   never protecting them. (Since 2026-10-17 it is a refusal in `app.Open`, not a
+   warning: a mount that is unsafe should not come up at all.)
 
    - **macOS native xattrs. ✅ Written, not yet verified on a macOS host.** The
      `ENOTSUP` stubs no longer compile there: `hydrate/xattr_unix.go` implements
@@ -3482,6 +3506,26 @@ are both lossy and racy.
     with a wedged mount underneath it would not, and that is a lost write rather
     than a slow shutdown.
 
+    **Both have been answered since.** The drain question first (2026-10-17), and
+    its premise was wrong: systemd does *not* kill the cgroup on `stop`. A mount
+    unit's stop is `umount`, which returns in ~0.2s; the unit goes inactive and the
+    journal reports both the host and the backend as `remains running after unit
+    stopped`, so the drain runs outside the unit's lifetime and completes (40 MiB
+    over a throttled SFTP loopback, remote byte-identical). What does signal every
+    leftover is system shutdown's kill-all, and there the backend used to die on
+    SIGTERM while the host was still draining through it, because go-plugin traps
+    SIGINT only; the backend now ignores SIGTERM once its liveness pipe (§2.10) is
+    confirmed, and a shutdown that still cuts a drain short leaves M27's
+    unclean-shutdown mark, so the next start sweeps. Then mounting at boot
+    (2026-10-18, the same WSL2 host, `wsl --shutdown` and a cold start, a line
+    without `noauto`, `_netdev,x-systemd.requires=` on a systemd-run sshd): the unit
+    came up unaided, ordered `Before=remote-fs.target` and after the sshd unit, and
+    synced both ways. That sshd was `Type=simple`, so it counted as started before
+    it listened; the first enumeration met `connection refused` and the sweep's
+    retry recovered 30s later while the mount itself never waited — §2.1 holding at
+    boot. Anyone who needs `stop` to *wait* for the drain should use a service unit
+    with `TimeoutStopSec`; `docs/user/fstab.md` carries one.
+
     Linux only, and by mechanism rather than by omission: the helper protocol, the
     `/sbin/mount.<type>` lookup, the privilege drop and the re-exec handshake are all
     how Linux specifically brings a filesystem up unattended. macOS and FreeBSD have
@@ -3744,6 +3788,8 @@ this whole group walks through, so it is a precondition rather than a note.
       255-byte filename limit on its own. The cost is that a stranded temporary is
       no longer reclaimed by the next `Put` of that path, which the plugin
       liveness fix in §2.10 makes a likelier outcome rather than a rarer one.
+      Since 2026-10-17 a sweep reclaims one that has gone unwritten for
+      `staleTempAge` (24h); §2.10 has why that threshold is enough.
     - *`Remove` has no recoverable form.* This is where the question first came
       up and it was settled for the whole group rather than for SFTP — see the
       preamble's deletion bullet. `-max-deletes` is the only guard, and the user
@@ -5157,6 +5203,12 @@ this whole group walks through, so it is a precondition rather than a note.
     That bounds everything but a provider call ignoring its own cancellation,
     which is the part a per-attempt deadline would still be for. It also needed
     `vfs.Serve` to retry an unmount that failed EBUSY, which it had tried once.
+    **That last part closed the same day, still without the deadline**: once the
+    drain deadline has cancelled the workers, `Run` waits `abandonGrace` (5s)
+    more and then returns with them still running, the stop reported unclean so
+    the next start sweeps; a plugin backend's call is then ended when `Close`
+    kills the backend.
+    `TestADrainDoesNotWaitForeverOnACallThatIgnoresCancellation` is the assertion.
 
     Unsettled: whether an abandoned push is also a per-path status through M14,
     where `unknown` as a first-class status already points. (M14 settled it:
@@ -5209,9 +5261,13 @@ this whole group walks through, so it is a precondition rather than a note.
     `inbound.apply_failures` against `inbound.refetched`.
     `internal/syncengine/refetch_test.go` carries it; removing the record call
     in the pull loop and removing the discharge in `SetEcho` were each checked
-    to fail the test that names them. **Not run live**: the in-tree fault
-    injection fails the read side, and real ENOSPC on the write side is still
-    MC-46's Tier B half.
+    to fail the test that names them. **Run live over SFTP on 2026-10-18**
+    (MC-46's Tier B half: a 1 MiB tmpfs backing store and a 3 MiB file on the
+    server): every attempt failed `no space left on device`, the refetch was
+    recorded, and once the tmpfs was grown the file arrived byte-identical within
+    a poll. But on a feedless backend the sweep retried before the refetch's
+    minute was up, so the *feed* path's real-disk half — the one this part exists
+    for — is still unrun, and needs Drive.
 
 
 

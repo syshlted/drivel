@@ -64,7 +64,8 @@ drivel mount
 ```
 
 `~/drive-personal` is now your Drive. Edit files with anything; changes upload in
-the background, and changes made elsewhere appear within seconds. Ctrl-C unmounts.
+the background, and changes made elsewhere usually appear within seconds — up to
+half a minute after a quiet spell. Ctrl-C unmounts.
 
 ## Without a config file
 
@@ -83,9 +84,9 @@ what it does before you point it at real data.
 
 ## What just happened
 
-`~/drive` is a FUSE mount. Every operation on it is proxied to the backing
-directory (`~/.local/share/drivel/mounts/personal`), which holds the real files
-and is the source of truth. Mutations become events on a queue that a sync
+`~/drive-personal` is a FUSE mount. Every operation on it is proxied to the
+backing directory (`~/.local/share/drivel/mounts/personal`), which holds the real
+files and is the source of truth. Mutations become events on a queue that a sync
 engine drains in the background, so no filesystem operation ever waits on the
 network. In the other direction a poll loop follows Drive's change feed and
 applies remote edits to the backing directory.

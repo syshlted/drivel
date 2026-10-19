@@ -182,8 +182,9 @@ named after the mount — the same name its state lives under:
   `XDG_RUNTIME_DIR` unset, the mount refuses to start until you set
   `control-socket=`.
 
-`drivel status -name NAME` looks in both places, so you rarely need the path.
-`drivel stop` and `drivel resume` without `-name` do not, so give them `-socket
+`drivel status -name NAME` looks in both places, so you rarely need the path, and
+`pause` and `resume` do the same with `-name`. `drivel stop` takes no `-name`,
+because it ends the whole process rather than one mount, so give it `-socket
 /run/drivel/UID/NAME.sock` — or simply `umount` the mount.
 
 Two lines with the same name cannot both have a socket: the second one finds the

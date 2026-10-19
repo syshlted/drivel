@@ -81,10 +81,9 @@ bidirectional sync — don't regress it.
   `gdrive/gdconf` is a leaf holding `Config` and the two enumerated types, split
   out in M9 so `cmd/drivel` can build a Drive settings table and generate its
   completions without linking the Drive SDK; `gdrive` re-exports them as aliases.
-- `internal/provider/sftp` — SFTP impl (M18). Host key verification fails closed.
 - `internal/provider/sftp` — SFTP impl (M18): the first path-addressed backend, so
   it carries no path index and no `ChangeSource`, and it is the first `RangePutter`
-  in the tree. See "SFTP" below.
+  in the tree. Host key verification fails closed. See "SFTP" below.
 - `internal/gauth` — Google OAuth: credentials.json/token.json I/O and the
   interactive login flow (loopback redirect + manual paste, rclone-style).
 - `internal/transport` — HTTP/3 (QUIC) client with HTTP/2 fallback, injected into the
@@ -154,9 +153,9 @@ links to it — platform support is `docs/user/platforms.md`, flags are
 mermaid diagrams are validated by parsing them, not by eye.
 
 The fourth is newer and the easiest to lose: **copy that says what drivel *is*
-stays backend-neutral.** Drive is the backend that ships, not the product — the
-reference docs already had this right (`drivel.1` says "the first and currently
-only provider", the flags are namespaced `-drive-*`) while the README and
+stays backend-neutral.** Drive was the backend that shipped first, not the product
+— the reference docs already had this right (`drivel.1` called it "the first and
+currently only provider" until SFTP shipped, the flags are namespaced `-drive-*`) while the README and
 marketing copy had collapsed the program into a Drive client. Naming the shipping
 backend is honest; implying it is the only conceivable one is not, and neither is
 implying the others exist yet. Anything true of one provider only — its
@@ -869,7 +868,8 @@ same rig** and produced three product fixes — a plugin child that outlived its
 host (M9 rule 10), an SFTP temp name two writers shared (SFTP rule 7), and an
 upload byte count taken before the transfer — plus the finding that **a crash was
 not an outage**: M27 repaired an abandoned push and not a lost one, which is what
-M27 part 4 then closed (2026-10-16, Tier A only — the live re-run is owed).
+M27 part 4 then closed (2026-10-16; re-run live the same day on both backends —
+see M27 item 4).
 **MC-44 ran the same day and completed**: its
 transport half found that a transient UDP block downgraded the transport
 permanently and fixed it, and its throughput half then measured the two protocols
@@ -924,8 +924,9 @@ directory of more than ~100 files doubled that subtree on every other client and
 did not heal**, because a folder move was left to the sweep and the sweep's repair
 then exceeded `-max-deletes` and refused the whole pass — the only case on record
 where two correct guards compose into a stuck state. **Fixed 2026-10-16** by the
-seam change in "Directory moves" below; the live re-run is owed. **Three findings from those groups outrank the rest and are below in their
-own sections**: §6's conflict copy protects *unsynced local work* and not content
+seam change in "Directory moves" below, and confirmed against real Drive on
+2026-10-17. **Three findings from those groups outrank the rest and are below in
+their own sections**: §6's conflict copy protects *unsynced local work* and not content
 (MC-31, MC-60), inbound sync stalls while a client drains an outbound backlog
 (MC-36, MC-50), and §12's ~36 KB per commit is now confirmed in the field. One
 thing about the remaining order is worth keeping: Group VI's constraint
@@ -1619,6 +1620,16 @@ existed and refused its whole delete pass. `[pull] move` is the line that tells 
 fix from a coincidence; `logcount.sh` counts it. One residue left alone on
 purpose: a peer still logs `[pull] mkdir` after the move, because the ordinary
 apply runs afterwards and a no-op `MkdirAll` still reports itself.
+
+**Two routes still reach MC-27's stuck state, and both are disclosed rather than
+fixed.** SFTP sets `MovedFrom` nowhere (rule 3), so a folder renamed on one
+client is a new folder plus a vanished one to every other, and above
+`-max-deletes` the sweep refuses the delete half — `docs/user/sftp.md` says so.
+And on Drive the old path comes from the in-memory map only, so a folder this
+process has not touched since it started (no sweep since the start, nothing under
+it synced) arrives as a bare folder at the new path with no `MovedFrom` —
+confirmed with a probe against the fake on 2026-10-19, and the price of M7 rule 1
+rather than an oversight. `docs/user/troubleshooting.md` carries both.
 
 ## Deletions and §4 (the tombstone)
 
