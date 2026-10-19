@@ -1193,6 +1193,12 @@ boundaries call. Six things carry it.
    `os.Lstat(path)` (`os.SameFile`); on a mismatch it records the remote with
    no local fingerprint and returns the retryable `errReplaced`, so the retry
    pushes what is there. Found live over SFTP (pause, edit both, resume).
+   `Engine.stillAt` is the one test, and every route that records a handle's
+   reading as a baseline asks it: the whole-file `Put`, M6's range write, gate
+   3's unchanged skip and the divergence check. **The retry after
+   `errReplaced` drops the event's extents** — they describe the replaced
+   file's writes, and splicing them from the new one made a remote that
+   existed nowhere (4 of 16 MiB, in `TestARangeWriteReplacedUnderItIsPushedWhole`).
 
 ## Range writes (M6)
 

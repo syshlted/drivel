@@ -70,7 +70,7 @@ func (e *Engine) preserveDivergedRemote(ctx context.Context, p string, f *os.Fil
 	// the first did (Conflicts.resolving). If the pull went first and replaced
 	// the file, f is the loser it moved away, and nothing about it may be sent.
 	defer e.conflicts.lockPath(p)()
-	if fi, cur := statOf(f), lstatOrNil(filepath.Join(e.dataDir, filepath.FromSlash(p))); fi == nil || cur == nil || !os.SameFile(fi, cur) {
+	if !e.stillAt(p, statOf(f)) {
 		return false, false, errReplaced
 	}
 	echo, ok, err := e.state.GetEcho(p)
@@ -154,15 +154,6 @@ func (e *Engine) preserveDivergedRemote(ctx context.Context, p string, f *os.Fil
 	e.logf("[sync] conflict %s: %s; kept it in %s before uploading the local copy", p, why, where)
 	e.mon.count(cConflicts, 1)
 	return true, false, nil
-}
-
-// lstatOrNil is os.Lstat without the error: nil when there is nothing there.
-func lstatOrNil(p string) os.FileInfo {
-	fi, err := os.Lstat(p)
-	if err != nil {
-		return nil
-	}
-	return fi
 }
 
 // localDigest hashes f with the provider's own algorithm, reporting ok=false when

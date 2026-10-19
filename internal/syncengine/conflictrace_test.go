@@ -6,6 +6,7 @@
 package syncengine
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -15,8 +16,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/syshlted/drivel/internal/fsevent"
 	"github.com/syshlted/drivel/internal/state"
 	"github.com/syshlted/drivel/provider"
+	"github.com/syshlted/drivel/ranges"
 )
 
 // The pull and the push can meet one conflict at the same moment, and each
@@ -186,5 +189,60 @@ func TestThePullWaitsForAPushResolvingItsPath(t *testing.T) {
 	}
 	if got := ts.trashed2(); len(got) != 1 || onlyValue(got) != "theirs" {
 		t.Errorf("trashed %v; want the remote version, once", got)
+	}
+}
+
+// swappingRangeStore replaces the local file the first time a range write of
+// it starts, as swappingStore does for a whole-file Put: the extents are then
+// read through a handle to a file the pull has moved away.
+type swappingRangeStore struct {
+	*patchStore
+	dir, swap string
+	winner    []byte
+	once      *bool
+}
+
+func (s swappingRangeStore) PutRange(ctx context.Context, p string, src io.ReaderAt, size int64, extents []ranges.Range) (provider.RemoteFile, error) {
+	if p == s.swap && !*s.once {
+		*s.once = true
+		abs := filepath.Join(s.dir, p)
+		_ = os.MkdirAll(filepath.Join(s.dir, ConflictDirName), 0o755)
+		_ = os.Rename(abs, filepath.Join(s.dir, ConflictDirName, p))
+		_ = os.WriteFile(abs, s.winner, 0o644)
+	}
+	return s.patchStore.PutRange(ctx, p, src, size, extents)
+}
+
+// A range write whose file was replaced under it is retried as a whole file,
+// so the remote ends with exactly what is at the path. Two halves: the handle's
+// fingerprint must not become the baseline (or the retry would find nothing to
+// do), and the retry must not reuse the extents, which describe the replaced
+// file's writes and would splice one block of the winner into the remote.
+func TestARangeWriteReplacedUnderItIsPushedWhole(t *testing.T) {
+	dir := t.TempDir()
+	st := newState(t)
+	body := bigFile(4)
+	ps := newPatchStore()
+	syncedAt(t, st, ps, "big.bin", body)
+	dirty := localEdit(t, dir, "big.bin", body, testBlock+1024, []byte("loser"))
+	winner := bytes.Repeat([]byte{'W'}, len(body))
+
+	once := false
+	s := swappingRangeStore{patchStore: ps, dir: dir, swap: "big.bin", winner: winner, once: &once}
+	e := New(Config{Store: s, DataDir: dir, State: st})
+	e.retry = retryPolicy{max: 5, base: time.Microsecond, cap: 100 * time.Microsecond}
+	e.Push(context.Background(), fsevent.Event{Op: fsevent.OpWrite, Path: "big.bin", Dirty: dirty})
+
+	if !once {
+		t.Fatal("no range write was attempted; the test is not exercising its route")
+	}
+	if got := ps.remoteBytes("big.bin"); !bytes.Equal(got, winner) {
+		n := 0
+		for i := range got {
+			if got[i] == 'W' {
+				n++
+			}
+		}
+		t.Errorf("remote holds %d of %d winner bytes; want all of what is at the path", n, len(winner))
 	}
 }

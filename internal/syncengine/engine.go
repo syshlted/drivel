@@ -929,6 +929,13 @@ func (e *Engine) executeWithRetry(ctx context.Context, ev fsevent.Event) {
 			return
 		}
 		e.logf("[sync] push %s %s attempt %d failed, retrying: %v", ev.Op, ev.Path, attempt, err)
+		if errors.Is(err, errReplaced) {
+			// The extents describe writes to the file that was replaced, not to
+			// what is at the path now; splicing them from the new file would
+			// make a remote that existed nowhere. Unknown extents mean a
+			// whole-file push (M6).
+			ev.Dirty = nil
+		}
 		wait := jitter(delay)
 		e.mon.retrying(ev, attempt, time.Now().Add(wait), err)
 		if !sleepCtx(ctx, wait) {
@@ -1354,8 +1361,7 @@ func (e *Engine) createFirst(ctx context.Context, p string, f *os.File) (bool, e
 // recorded with no local fingerprint, and the retry pushes what is at p now.
 func (e *Engine) uploaded(p string, rf provider.RemoteFile, f *os.File, n int64) error {
 	fi := statOf(f)
-	cur, err := os.Lstat(filepath.Join(e.dataDir, filepath.FromSlash(p)))
-	replaced := fi == nil || err != nil || !os.SameFile(fi, cur)
+	replaced := !e.stillAt(p, fi)
 	if replaced {
 		e.recordEcho(rf)
 	} else {
@@ -1371,6 +1377,20 @@ func (e *Engine) uploaded(p string, rf provider.RemoteFile, f *os.File, n int64)
 		return errReplaced
 	}
 	return nil
+}
+
+// stillAt reports whether fi, the stat of a handle this push opened, is still
+// the file at p. Every route that read the local file through a handle and is
+// about to record what it read as p's baseline asks first: the pull loop may
+// have moved that file into a conflicts folder and put the remote's version in
+// its place, and a fingerprint of the handle would then describe a file that is
+// no longer there.
+func (e *Engine) stillAt(p string, fi os.FileInfo) bool {
+	if fi == nil {
+		return false
+	}
+	cur, err := os.Lstat(filepath.Join(e.dataDir, filepath.FromSlash(p)))
+	return err == nil && os.SameFile(fi, cur)
 }
 
 // errReplaced is uploaded's report that the file it sent is no longer the one
@@ -1444,7 +1464,16 @@ func (e *Engine) pushShortcut(ctx context.Context, p string, f *os.File, size in
 			e.logf("[sync] range write %s: %d extent(s), %d of %d B", p, len(extents), dirty.Bytes(), size)
 			e.mon.count(cRangePuts, 1)
 			e.mon.count(cRangeBytes, dirty.Bytes())
-			e.recordEchoOf(rf, statOf(f))
+			// The same question uploaded asks of a whole-file Put: extents
+			// read through a handle the pull has since replaced describe the
+			// loser, so the remote is recorded with no local fingerprint and
+			// the retry sends what is at p now.
+			if fi := statOf(f); e.stillAt(p, fi) {
+				e.recordEchoOf(rf, fi)
+			} else {
+				e.recordEcho(rf)
+				return false, seen, errReplaced
+			}
 			return true, seen, nil
 		}
 	}
@@ -1473,7 +1502,13 @@ func (e *Engine) pushShortcut(ctx context.Context, p string, f *os.File, size in
 			// ends that after one pass, and it is the same budget a push that
 			// uploads already has (DESIGN.md §12).
 			remote.Path = p // Stat need not name the path it was asked about
-			e.recordEchoOf(remote, statOf(f))
+			fi := statOf(f)
+			if !e.stillAt(p, fi) {
+				// The bytes compared are no longer at p, and whatever replaced
+				// them recorded its own baseline; this one would overwrite it.
+				return false, seen, errReplaced
+			}
+			e.recordEchoOf(remote, fi)
 			return true, seen, nil
 		}
 	}

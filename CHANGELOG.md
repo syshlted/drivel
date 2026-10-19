@@ -19,7 +19,10 @@ When a conflict was found while this machine was already uploading the same
 file, the upload could finish with the losing version, so the remote and your
 other machines ended up holding the loser while this machine held the winner.
 Both versions were kept, but the file itself never agreed again. Drivel now
-notices that the file changed under the upload and sends the right one.
+notices that the file changed under the upload and sends the right one. On
+SFTP, where Drivel sends only the changed parts of a file, the retry could
+also have mixed the two versions into one file that matched neither; it now
+sends the whole file.
 
 A conflict met by an incoming change and an outgoing upload at the same moment
 is now also decided once. Before, each side could pick a different winner, so
