@@ -592,6 +592,11 @@ func (d *Downloader) applyTo(ctx context.Context, ch provider.RemoteChange, forg
 		return nil
 	}
 
+	// Held from the baseline read to the end, so that a push resolving the same
+	// path cannot record a new baseline or keep a remote version between what
+	// this reads and what it does (Conflicts.resolving).
+	defer d.conflicts.lockPath(ch.Path)()
+
 	echo, hasEcho, err := d.state.GetEcho(ch.Path)
 	if err != nil {
 		return err
@@ -849,6 +854,12 @@ func (d *Downloader) suppressDeleted(rel string, f *provider.RemoteFile) (bool, 
 // A loser that cannot be kept fails the apply, which the refetch pass retries;
 // it is never replaced unkept.
 func (d *Downloader) resolveConflict(ctx context.Context, rel, dst string, f *provider.RemoteFile) error {
+	if d.conflicts.alreadyKept(d.conflictEnv(ctx), rel, keptIdentity(*f)) {
+		// The engine met this remote version first, kept it as the loser and is
+		// pushing the local edit over it. Deciding again by mtime could pick the
+		// other winner, moving away the edit that push is sending.
+		return nil
+	}
 	info, err := os.Stat(dst)
 	if err != nil {
 		return err

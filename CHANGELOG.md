@@ -19,8 +19,13 @@ When a conflict was found while this machine was already uploading the same
 file, the upload could finish with the losing version, so the remote and your
 other machines ended up holding the loser while this machine held the winner.
 Both versions were kept, but the file itself never agreed again. Drivel now
-notices that the file changed under the upload and sends the right one. See
-[conflicts](docs/user/data-safety.md#conflicts).
+notices that the file changed under the upload and sends the right one.
+
+A conflict met by an incoming change and an outgoing upload at the same moment
+is now also decided once. Before, each side could pick a different winner, so
+both versions were kept as losers, including a copy of the version that won,
+and for a moment the remote held the losing version at the file's own path.
+See [conflicts](docs/user/data-safety.md#conflicts).
 
 ### A deletion on another machine no longer takes your unsaved work — 2026-10-18
 

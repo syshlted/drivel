@@ -1164,7 +1164,14 @@ boundaries call. Six things carry it.
    memory) and `state.SetKept` (the `kept` bucket, so a restart between the two
    does not duplicate) stop the second copy. `SetEcho` and `ForgetMany`
    discharge the record in their own transaction; one commit per conflict. The
-   local folder is also checked by name.
+   local folder is also checked by name. **And the two meetings are
+   serialised** by `Conflicts.lockPath` (per path; the pull takes it before
+   reading the baseline, the push before comparing the remote with it), because
+   each decides the winner on its own terms and concurrently they picked
+   opposite ones — found live over Drive 2026-10-19. The second re-checks: the
+   push returns `errReplaced` if its handle is no longer the file at the path,
+   the pull skips a remote version already in the kept record.
+   `conflictrace_test.go`, one test per order, 3 mutation checks.
 5. **`remote-trash` copies the loser and trashes the copy; it does not move the
    remote object.** Moving the original away would show every other client a
    deletion followed by a create at the path. With `provider.Copier` (Drive's

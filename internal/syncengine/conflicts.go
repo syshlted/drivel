@@ -152,7 +152,61 @@ type Conflicts struct {
 	// the two meetings does not keep a duplicate.
 	mu   sync.Mutex
 	kept map[string]string
+
+	// resolving serialises the two components that can meet one conflict at
+	// the same moment: the pull deciding a remote change against a local edit,
+	// and the engine deciding a local edit against a remote that moved. Each
+	// decides who wins on its own terms (the pull by mtime, the push by being
+	// the pusher), so run concurrently they pick opposite winners — the pull
+	// moves the local edit away as the loser while the engine keeps the
+	// remote version as the loser and uploads the edit it already had open,
+	// which a live run over Drive did on 2026-10-19: a spurious trashed copy
+	// of the winner, the loser's bytes at the path for a second, two uploads.
+	// See lockPath.
+	resolving map[string]*pathTurn
 }
+
+// pathTurn is one path's entry in Conflicts.resolving.
+type pathTurn struct {
+	mu      sync.Mutex
+	waiters int
+}
+
+// lockPath takes rel's resolution lock and returns its release. Whichever
+// component takes it second re-reads what the first one changed: the pull
+// takes it before it reads the baseline, the engine before it compares the
+// remote with the baseline, and each must not act on anything it read before.
+// It is held across a provider call (a Stat, a copy, a download) only by
+// whichever is resolving that one path, so nothing else waits on it.
+func (c *Conflicts) lockPath(rel string) (unlock func()) {
+	if c == nil {
+		return func() {}
+	}
+	c.mu.Lock()
+	if c.resolving == nil {
+		c.resolving = map[string]*pathTurn{}
+	}
+	t := c.resolving[rel]
+	if t == nil {
+		t = &pathTurn{}
+		c.resolving[rel] = t
+	}
+	t.waiters++
+	c.mu.Unlock()
+
+	t.mu.Lock()
+	return func() {
+		t.mu.Unlock()
+		c.mu.Lock()
+		if t.waiters--; t.waiters == 0 {
+			delete(c.resolving, rel)
+		}
+		c.mu.Unlock()
+	}
+}
+
+// keptIdentity is what the kept record stores for a remote version.
+func keptIdentity(rf provider.RemoteFile) string { return rf.Version + "\x00" + rf.Hash }
 
 func (c *Conflicts) action() ConflictAction {
 	if c == nil || c.Action == "" {
@@ -284,7 +338,7 @@ func (c *Conflicts) keepRemote(ctx context.Context, env conflictEnv, rel string,
 	if modified.IsZero() {
 		modified = time.Now()
 	}
-	identity := rf.Version + "\x00" + rf.Hash
+	identity := keptIdentity(rf)
 	if c.alreadyKept(env, rel, identity) {
 		return "", nil
 	}

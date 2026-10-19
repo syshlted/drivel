@@ -118,7 +118,13 @@ then uploads yours:
 [sync] conflict report.txt: the remote changed since the last sync; kept it in .drivel-conflicts/report (conflict 2026-10-17 09-30-00).txt (here and on the remote) before uploading the local copy
 ```
 
-Your edit is the one at the real path everywhere. If your local file is
+Your edit is the one at the real path everywhere. If a remote change for the
+same file arrives while that upload is being prepared, whichever of the two
+reaches the conflict first decides it, and the other goes along: one version
+wins, the other is kept once. Before 19 October 2026 both could decide at the
+same moment, and the version that won was then also kept as a loser.
+
+If your local file is
 *unchanged* since the last sync (you only touched it, or saved the same bytes)
 Drivel does not upload it at all, and the newer remote version arrives as an
 ordinary change.

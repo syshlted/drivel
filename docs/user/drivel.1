@@ -1339,7 +1339,9 @@ choose another place: a folder kept on this machine or on the remote only, the
 desktop trash, the backend's trash, or nowhere. A folder that is not set to sync
 is left out in both directions, and moving a copy out of it restores the copy as
 an ordinary file. A loser that cannot be kept is never overwritten: the operation
-that would replace it fails and is retried. A copy is saved locally first and
+that would replace it fails and is retried. A conflict that an incoming change
+and an outgoing upload meet at the same moment is decided once, by whichever
+reaches it first. A copy is saved locally first and
 uploaded in the background, and one that cannot be uploaded stays in the local
 folder. Copies made before 18 October 2026 are
 beside their file and stay local-only.

@@ -1415,7 +1415,18 @@ are both lossy and racy.
   the push of that edit, so `Conflicts` remembers the remote version it kept, per
   path, in memory and in the state store's `kept` bucket (discharged by the
   push's `SetEcho`, so it holds a path only until the conflict settles). A copy
-  in the local folder is found by name anyway. Default `both` reverses the
+  in the local folder is found by name anyway. **The two meetings are
+  serialised, not merely deduplicated** (2026-10-19, found live over Drive by
+  `scripts/multiclient/mc31-policy.sh`): each side decides the winner on its own
+  terms — the pull by mtime, the push by being the pusher — so concurrently they
+  could pick opposite winners, the pull moving the local edit away while the
+  push kept the remote version and uploaded the edit through the handle it
+  already held. `Conflicts.lockPath` is a per-path lock the pull takes before
+  reading the baseline and the push takes before comparing the remote with it.
+  Whichever goes second re-checks what the first did: the push declines a
+  handle that is no longer the file at the path (`errReplaced`, before any
+  upload), and the pull declines to decide again a remote version already in
+  the kept record. Default `both` reverses the
   "local-only by policy" rule above: that rule existed so the walk would not
   upload sibling copies by accident, and those still stay local. A copy in the
   folder is uploaded on purpose, by `keepRemote`/`keepLocal` itself, with its
