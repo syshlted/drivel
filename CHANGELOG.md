@@ -13,6 +13,16 @@ from source with `make build`.
 
 ## Unreleased
 
+### Two remote files differing only in case no longer overwrite each other — 2026-10-20
+
+On a filesystem that treats `Foo.txt` and `foo.txt` as one file — macOS's
+default, `/mnt/c` under WSL2 — a backend holding both had the second written over
+the first, and the first's next upload sent the second's content under the
+first's name. Drivel now warns when a mount starts on such a filesystem, keeps
+the file already there, and skips the other with a line naming both. A file
+opened through the mount under another spelling is uploaded under its stored
+name. See [case-insensitive filesystems](docs/user/data-safety.md#case-insensitive-filesystems).
+
 ### Another Drivel's folder inside yours is left to it entirely — 2026-10-20
 
 When one Drivel's backing directory sits inside another's, the outer one already

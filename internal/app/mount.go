@@ -390,6 +390,24 @@ func Open(ctx context.Context, spec MountSpec, reg *provider.Registry) (*Mount, 
 	}
 	m.conflicts = conflicts
 
+	// A backing filesystem that folds names (macOS's default, NTFS under WSL2,
+	// a casefold directory) cannot hold two names a case-sensitive backend can.
+	// The pull refuses to write one over the other; the warning is so that the
+	// lines saying so are not the first a user hears of it.
+	var folding syncengine.Folding
+	if m.store != nil {
+		f, err := syncengine.ProbeFolding(backing.Path)
+		switch {
+		case err != nil:
+			m.logf("could not tell whether the backing store folds file names (%v); assuming it does not", err)
+		case f.Any():
+			m.logf("WARNING: the backing store %s treats names that differ only in %s as one file, and the backend need not: "+
+				"of two remote files named that way only one can exist here, and the other is skipped and reported. "+
+				"See the case-insensitive filesystems section of data-safety", backing.Path, f)
+		}
+		folding = f
+	}
+
 	m.engine = syncengine.New(syncengine.Config{
 		Store:    m.store,
 		DataDir:  backing.Path,
@@ -401,6 +419,7 @@ func Open(ctx context.Context, spec MountSpec, reg *provider.Registry) (*Mount, 
 		Monitor:  m.mon,
 
 		Conflicts: conflicts,
+		Folding:   folding,
 
 		DrainTimeout: engineDrainTimeout,
 	})
@@ -431,7 +450,7 @@ func Open(ctx context.Context, spec MountSpec, reg *provider.Registry) (*Mount, 
 		// start token before the sweep, poll from it only after — is a statement
 		// about the cursor. It runs off the FUSE path, so the mount comes up and
 		// stays usable while a large remote is swept.
-		m.down = dl.Logger(m.lg).Monitor(m.mon).PausedBy(m.engine).Conflicts(conflicts).Reconcile(syncengine.ReconcileOptions{
+		m.down = dl.Logger(m.lg).Monitor(m.mon).PausedBy(m.engine).Conflicts(conflicts).Folds(folding).Reconcile(syncengine.ReconcileOptions{
 			Push:       m.engine,
 			Fetch:      spec.Materialize,
 			Force:      spec.Resync,

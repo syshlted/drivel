@@ -74,10 +74,14 @@ which would put Drivel's placeholder marker in a file *inside the directory it
 syncs*. Drivel detects the emulation and reports the volume as having no
 attributes.
 
-**A case-insensitive backing filesystem is a real hazard**, and macOS defaults to
-one. Drive is case-sensitive, so `Foo.txt` and `foo.txt` are two distinct remote
-files that collide into one local path. Nothing currently handles this; a live
-macOS run is what will establish how it behaves.
+**A case-insensitive backing filesystem limits what can sync**, and macOS
+defaults to one. Drive is case-sensitive, so `Foo.txt` and `foo.txt` are two
+distinct remote files that collide into one local path. Drivel detects the
+folding when a mount starts and keeps one of the pair, reporting the other,
+rather than writing one over the other — see
+[case-insensitive filesystems](data-safety.md#case-insensitive-filesystems). That
+has been tested on a Linux `casefold` filesystem; a live macOS run is still what
+will establish how APFS behaves.
 
 ### On licensing and macFUSE
 

@@ -359,6 +359,42 @@ Both make the same choice, so the file you have locally is the one Drivel
 updates when you save it. (Before 17 October 2026 a sweep applied the siblings in
 whatever order the listing gave, and could leave you holding a different one.)
 
+## Case-insensitive filesystems
+
+Some filesystems treat `Foo.txt` and `foo.txt` as one file: macOS's default
+APFS and HFS+ volumes, NTFS (which is what `/mnt/c` is under WSL2), and a Linux
+directory with the `casefold` attribute. APFS also treats the two ways of
+writing an accented letter, composed and decomposed, as one name. Google Drive
+and SFTP servers on Linux do neither, so two files the backend keeps apart can
+have only one place in your backing directory. Drivel checks when a mount starts
+and says so:
+
+```
+WARNING: the backing store /Users/you/drive treats names that differ only in letter case as one file, and the backend need not: …
+```
+
+When the backend then has two such files, the one already in your backing
+directory stays, and the other is skipped every time it is reported, naming the
+file it would have landed on:
+
+```
+[pull] skip    notes/foo.txt (this backing filesystem folds letter case, and notes/Foo.txt is already here under that name: applying one would overwrite the other)
+```
+
+The same goes for two folders, which would otherwise merge into one. A remote
+deletion of the skipped name leaves the other file alone, and a file you open
+through the mount under another spelling — `FOO.TXT` for `Foo.txt` — is uploaded
+under the name it is stored as, rather than as a second remote file.
+
+Which of the two should exist here is yours to decide: rename one of them on the
+backend, and the next sweep brings the other in. Before 20 October 2026 the
+second file was written over the first, and the next upload of the first sent
+the second's content to the backend under the first's name.
+
+A folder renamed only in case on the backend is renamed here too. Drivel checks
+the top of the backing directory, so a folder you have given the `casefold`
+attribute below a case-sensitive top is not covered.
+
 ## The databases are caches
 
 Drivel keeps two small [bbolt](https://github.com/etcd-io/bbolt) databases: sync

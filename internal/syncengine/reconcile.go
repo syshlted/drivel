@@ -1329,6 +1329,16 @@ func (d *Downloader) deleteHere(ctx context.Context, sw state.Sweep, c candidate
 //	                remaining version of that work, and no inference is worth
 //	                losing it: keep it and push it back instead.
 func (d *Downloader) deleteGone(ctx context.Context, rel string, e state.Echo, st *sweepStats, forget map[string]struct{}) {
+	if stored, ok := d.aliased(rel); ok {
+		// What answers to rel here is another name's file, so nothing of rel's
+		// is local: the row is "gone on both sides", and the other file must not
+		// be judged against rel's baseline — it would read as diverged and be
+		// pushed back under rel's name.
+		d.logf("[sweep] %s: gone remotely, and that name is %s here, a different file (this backing filesystem folds %s); dropping its record", rel, stored, d.folding)
+		forget[rel] = struct{}{}
+		st.orphaned++
+		return
+	}
 	dst := filepath.Join(d.dataDir, filepath.FromSlash(rel))
 	info, err := os.Lstat(dst)
 	switch {

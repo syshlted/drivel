@@ -1673,8 +1673,8 @@ compiles for
 is not supported and is not planned; use WSL2, or Google's native Drive client.
 Other Unixes (OpenBSD, NetBSD, Solaris, illumos, AIX) lack a Go FUSE binding.
 .PP
-Four things differ off Linux; the third holds on every platform, and is here
-because it is where it bites.
+Five things differ off Linux; the third and fourth hold on every platform, and
+are here because it is where they bite.
 .TP
 .B In-place mode is unavailable
 It routes backing I/O through
@@ -1710,6 +1710,16 @@ refuses to start a lazy mount there, naming the directory: the fix is eager mode
 or a different
 .IR -data ,
 not preserving any database.
+.TP
+.B A case-insensitive backing store holds one of two names
+macOS's default volumes, NTFS and a Linux
+.B casefold
+directory treat names differing only in case (on APFS, also in Unicode
+normalisation) as one file, where the backend need not.
+.B drivel
+warns at startup when the backing store folds names, keeps the file already
+there when the backend holds two such names, and skips the other with a line
+naming both, rather than writing one over the other.
 .TP
 .B macOS backing directories belong on APFS or HFS+
 On exFAT, FAT and some network volumes macOS keeps extended attributes in hidden

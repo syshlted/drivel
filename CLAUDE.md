@@ -2803,7 +2803,22 @@ the mount layer has to accommodate:
 3. **A case-insensitive backing filesystem is a correctness surface**, and macOS
    defaults to one (APFS and HFS+). Drive is case-sensitive, so `Foo.txt` and
    `foo.txt` collide into one local path — the MC-30 sibling problem arriving by a
-   second route. Nothing handles it; a live macOS run should find out what happens.
+   second route. **Detected and reported since 2026-10-20, not emulated**
+   (`syncengine/alias.go`): `app.Open` runs `ProbeFolding` on the backing root
+   (case and Unicode normalisation) and warns; on a folding store the pull
+   refuses a remote path whose components resolve to an entry *stored under a
+   different name* (`aliasOf`), because the temp-then-rename download onto
+   `foo.txt` replaced `Foo.txt`'s bytes and kept its name — measured on a casefold
+   tmpfs, as was a case-only `rename(2)` succeeding and doing nothing. A remote
+   removal of the folded name and the sweep's `deleteGone` leave the other file
+   alone; the engine uploads a write made through the mount under another
+   spelling under the stored name; a reported folder move that only changes case
+   goes through a temporary name (`moveEntry`). The stored name comes from an
+   `O_PATH` descriptor's `/proc` link on Linux and from the directory listing
+   elsewhere. **Tested on a Linux casefold tmpfs, not on APFS** —
+   `DRIVEL_CASEFOLD_DIR` runs the real-filesystem tests; a live macOS run is
+   still owed. Only the root is probed, so a `+F` directory below a
+   case-sensitive root is not covered.
 4. **A kernel may read through a write handle, so `node.Open` opens the backing file
    readable whatever the caller asked for.** FreeBSD's fusefs fills a buffer-cache
    block before writing part of it and falls back to the write filehandle for that

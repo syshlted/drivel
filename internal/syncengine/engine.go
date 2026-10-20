@@ -205,6 +205,8 @@ type Engine struct {
 	// conflicts is the mount's conflict policy, shared with its pull loop.
 	conflicts *Conflicts
 	foreign   *foreignTrees // other drivels' trees nested in dataDir (MC-47)
+	folding   Folding
+	alias     func(rel string) (stored string, ok bool) // nil unless folding.Any(); see alias.go
 
 	mon      *Monitor
 	ctl      chan ctlReq
@@ -262,6 +264,10 @@ type Config struct {
 	// Conflicts is where the losing side of a conflict goes (conflicts.go). Give
 	// the pull loop the same value. Nil selects the default policy.
 	Conflicts *Conflicts
+
+	// Folding is what the backing filesystem treats as one name (ProbeFolding).
+	// The zero value folds nothing, and costs nothing.
+	Folding Folding
 }
 
 // New constructs an Engine, applying defaults for any unset tuning fields.
@@ -286,6 +292,7 @@ func New(cfg Config) *Engine {
 		abandonGrace: defaultAbandonGrace,
 		conflicts:    cfg.Conflicts,
 		foreign:      newForeignTrees(cfg.DataDir),
+		folding:      cfg.Folding,
 	}
 	if e.conflicts == nil {
 		e.conflicts = &Conflicts{}
@@ -315,6 +322,9 @@ func New(cfg Config) *Engine {
 		// The stream coalesces on the uploader's own window, so an overlay sees
 		// one transition per settled change rather than one per close(2).
 		e.mon.debounce = e.debounce
+	}
+	if e.folding.Any() {
+		e.alias = func(rel string) (string, bool) { return aliasOf(e.dataDir, rel) }
 	}
 	return e
 }
@@ -1072,7 +1082,18 @@ func (e *Engine) push(ctx context.Context, ev fsevent.Event) error {
 		return nil
 
 	case fsevent.OpCreate, fsevent.OpWrite:
-		return e.pushContent(ctx, ev.Path, ev.Dirty)
+		p := ev.Path
+		if e.alias != nil {
+			// Opened through the mount under another spelling of a name the
+			// backing filesystem folds: the bytes written are the stored file's,
+			// and uploading them under the spelling used would make a second
+			// remote file beside it holding the same content.
+			if stored, ok := e.alias(p); ok {
+				e.logf("[sync] %s is %s on this backing filesystem, which folds %s; uploading it under that name", p, stored, e.folding)
+				p = stored
+			}
+		}
+		return e.pushContent(ctx, p, ev.Dirty)
 
 	case fsevent.OpUnlink, fsevent.OpRmdir:
 		// The baseline is read BEFORE the removal, because it is the record the

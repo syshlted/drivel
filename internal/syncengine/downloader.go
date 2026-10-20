@@ -127,6 +127,11 @@ type Downloader struct {
 	// (NewDownloader installs the default, and Conflicts replaces it).
 	conflicts *Conflicts
 	foreign   *foreignTrees // other drivels' trees nested in dataDir (MC-47)
+	// folding is what the backing filesystem treats as one name, and alias the
+	// check that follows from it (alias.go); nil on a filesystem that folds
+	// nothing, where it would only cost syscalls.
+	folding Folding
+	alias   func(rel string) (stored string, ok bool)
 
 	// M14. mon is written to and never read (see Monitor); hold is what a pause
 	// makes this loop wait at, between polls and between sweep pages.
@@ -192,12 +197,16 @@ func (d *Downloader) Logger(lg *log.Logger) *Downloader {
 }
 
 // logf writes one line for this pull loop.
+//
+// gosec G706 sees a filename read back from the backing filesystem (alias.go)
+// reach here. Paths are logged verbatim by design, from every source, and this
+// is the seam a redaction filter would sit behind (CLAUDE.md, M25).
 func (d *Downloader) logf(format string, args ...any) {
 	if d.lg == nil {
-		log.Printf(format, args...)
+		log.Printf(format, args...) //nolint:gosec // G706: see above
 		return
 	}
-	d.lg.Printf(format, args...)
+	d.lg.Printf(format, args...) //nolint:gosec // G706: see above
 }
 
 // NewDownloader constructs the pull loop. cad zero-values fall back to
@@ -225,6 +234,27 @@ func NewDownloader(src provider.ChangeSource, store provider.Store, dataDir stri
 // notSynced is this downloader's answer to "does this mount sync p?" (see the
 // package-level notSynced): "" when it does, else why not.
 func (d *Downloader) notSynced(p string) string { return notSynced(d.conflicts, d.foreign, p) }
+
+// Folds tells the downloader what its backing filesystem treats as one name
+// (ProbeFolding). On one that folds anything, a remote path that would land on
+// a local entry stored under a different name is not applied (alias.go).
+func (d *Downloader) Folds(f Folding) *Downloader {
+	d.folding = f
+	d.alias = nil
+	if f.Any() {
+		d.alias = func(rel string) (string, bool) { return aliasOf(d.dataDir, rel) }
+	}
+	return d
+}
+
+// aliased reports the local path rel would land on when that is a different
+// name for the same entry — another file's, by the backend's lights.
+func (d *Downloader) aliased(rel string) (string, bool) {
+	if d.alias == nil {
+		return "", false
+	}
+	return d.alias(rel)
+}
 
 // Conflicts sets the mount's conflict policy — the same value its engine is
 // given, so the pull and the push agree on where a loser goes and on which
@@ -582,6 +612,13 @@ func (d *Downloader) applyTo(ctx context.Context, ch provider.RemoteChange, forg
 	d.moveLocally(ch)
 
 	if ch.Removed || ch.File == nil {
+		if stored, ok := d.aliased(ch.Path); ok {
+			// The name the backend removed is, here, another file's: nothing of
+			// this path's exists locally to remove, and the file there is not it.
+			d.logf("[pull] ignore  %s removed remotely: this backing filesystem folds %s, and that name is %s here, a different file", ch.Path, d.folding, stored)
+			forget[ch.Path] = struct{}{}
+			return nil
+		}
 		if err := d.applyRemoval(ctx, ch.Path, dst, forget); err != nil {
 			return err
 		}
@@ -632,6 +669,15 @@ func (d *Downloader) applyTo(ctx context.Context, ch provider.RemoteChange, forg
 		if drop {
 			return nil
 		}
+	}
+
+	if stored, ok := d.aliased(ch.Path); ok {
+		// Applying it would write into the entry stored under the other name —
+		// replacing that file's bytes, or merging two folders into one. Which of
+		// the two should exist here is the user's to decide (the MC-30 rule);
+		// writing one over the other is nobody's.
+		d.logf("[pull] skip    %s (this backing filesystem folds %s, and %s is already here under that name: applying one would overwrite the other)", ch.Path, d.folding, stored)
+		return nil
 	}
 
 	if f.IsDir {
@@ -750,21 +796,28 @@ func (d *Downloader) moveLocally(ch provider.RemoteChange) bool {
 	}
 	src := filepath.Join(d.dataDir, filepath.FromSlash(ch.MovedFrom))
 	dst := filepath.Join(d.dataDir, filepath.FromSlash(ch.Path))
-	if _, err := os.Lstat(src); err != nil {
+	sfi, err := os.Lstat(src)
+	if err != nil {
 		// Nothing of ours at the old path: a client that never held the subtree,
 		// or a re-report of a move already applied. The ordinary apply fetches
 		// what it needs, which for the first case is the right thing to do.
 		return false
 	}
-	if _, err := os.Lstat(dst); err == nil {
-		d.logf("[pull] not moving %s -> %s: the destination already exists locally", ch.MovedFrom, ch.Path)
-		return false
+	recase := false
+	if dfi, err := os.Lstat(dst); err == nil {
+		// On a filesystem that folds names, a rename that only changes case is a
+		// destination that is the source under another spelling: not occupied.
+		if !os.SameFile(sfi, dfi) || d.alias == nil {
+			d.logf("[pull] not moving %s -> %s: the destination already exists locally", ch.MovedFrom, ch.Path)
+			return false
+		}
+		recase = true
 	}
 	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
 		d.logf("[pull] move %s -> %s: %v", ch.MovedFrom, ch.Path, err)
 		return false
 	}
-	if err := os.Rename(src, dst); err != nil {
+	if err := moveEntry(src, dst, recase); err != nil {
 		d.logf("[pull] move %s -> %s: %v", ch.MovedFrom, ch.Path, err)
 		return false
 	}
