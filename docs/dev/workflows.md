@@ -227,7 +227,11 @@ flowchart TD
     q{"Remote object?"} -->|yes| ql{"Local copy?"}
     q -->|"no (local only)"| qb2{"Has a baseline?"}
 
-    ql -->|no| mat{"lazy, or<br/>-materialize?"}
+    ql -->|no| qg{"baseline the remote<br/>still matches?"}
+    qg -->|no| mat{"lazy, or<br/>-materialize?"}
+    qg -->|yes| guards2{"sweep complete?<br/>baseline predates it?<br/>remote re-checked?<br/>folder accounted for?<br/>within -max-deletes?"}
+    guards2 -->|all yes| delr["delete REMOTELY —<br/>deleted here"]
+    guards2 -->|any no| keepr["KEEP the remote copy"]
     mat -->|yes| dl2["materialise:<br/>download or placeholder"]
     mat -->|no| defer["count as deferred,<br/>still marked seen"]
 
@@ -244,7 +248,7 @@ flowchart TD
     guards -->|any no| keep["KEEP — and push back<br/>if it diverged"]
 
     classDef danger fill:#7a1f1f,stroke:#3d0f0f,color:#fff
-    class del danger
+    class del,delr danger
 ```
 
 **A delete is inferred only from a baseline, never from absence alone.** The
@@ -253,7 +257,20 @@ per-generation `seen` marks answer "did this sweep observe it?". No baseline mea
 the path is *new*, whichever side it is on — which is why **the first-ever run
 deletes nothing**.
 
-The four guards on the delete rows are each load-bearing:
+Both directions have a delete row. *Unlisted remotely, present here and
+unmodified* is a deletion made elsewhere and removes the local copy. *Listed
+remotely and still matching the baseline, absent here* is a deletion made here —
+while drivel was down, or one whose push was abandoned — and removes the remote
+copy. That second row was in DESIGN.md's table from M7b and was not implemented
+until 2026-10-20: the remote-present rows were left to the pull's `apply`, which
+returns on an echo match before it looks at the local side, so such a path sat
+with both sides disagreeing for good. It is `goneHere`/`deleteHere`, and it adds
+three checks of its own: the remote is re-`Stat`ed immediately before the
+removal and must still match (an edit made since wins over the deletion); the
+local path must still be absent; and a directory is removed only if every object
+the sweep saw inside it was removed first, because `Store.Remove` is recursive.
+
+The four guards on the delete rows are each load-bearing, in both directions:
 
 1. Deletes run only after a **complete** sweep.
 2. The baseline must **predate** the sweep, or a file created locally *during* it

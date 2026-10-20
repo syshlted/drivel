@@ -154,6 +154,56 @@ func TestSeenMarksAreScopedToTheirGeneration(t *testing.T) {
 	}
 }
 
+// EachSeenUnder is the question asked before a remote directory is removed: what
+// did this sweep see inside it? Strictly inside — not the directory itself, not a
+// sibling that merely shares a prefix (dir2, dir.txt), and not another
+// generation's marks.
+func TestEachSeenUnderVisitsOnlyThatSubtree(t *testing.T) {
+	s := openTestStore(t)
+	if err := s.MarkSeen("g1", []string{"dir", "dir/a.txt", "dir/sub/b.txt", "dir2/c.txt", "dir.txt", "top.txt"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.MarkSeen("g2", []string{"dir/other-gen.txt"}); err != nil {
+		t.Fatal(err)
+	}
+	collect := func(gen, dir string) []string {
+		t.Helper()
+		var got []string
+		if err := s.EachSeenUnder(gen, dir, func(p string) error {
+			got = append(got, p)
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+		return got
+	}
+	if got, want := collect("g1", "dir"), []string{"dir/a.txt", "dir/sub/b.txt"}; !equalStrings(got, want) {
+		t.Fatalf("EachSeenUnder(g1, dir) = %v; want %v", got, want)
+	}
+	if got := collect("g1", ""); len(got) != 6 {
+		t.Fatalf("EachSeenUnder(g1, root) = %v; want all six of g1's marks", got)
+	}
+	if got := collect("", "dir"); len(got) != 0 {
+		t.Fatalf("an empty generation visited %v", got)
+	}
+	stop := errors.New("enough")
+	if err := s.EachSeenUnder("g1", "dir", func(string) error { return stop }); !errors.Is(err, stop) {
+		t.Fatalf("callback error = %v; want it returned", err)
+	}
+}
+
+func equalStrings(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
 // EachUnseenEcho is the delete-candidate query: only paths that HAVE a baseline
 // and were NOT seen. A path with no baseline is new, not deleted — the rule that
 // makes the first-ever run delete nothing.

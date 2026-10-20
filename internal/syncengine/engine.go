@@ -352,8 +352,8 @@ const defaultAbandonGrace = 5 * time.Second
 //
 // What it gives up is bounded and repaired: the shed events are paths in the
 // repair bucket, DrainedCleanly reports false so the unclean-shutdown mark
-// stays, and the next start sweeps. An abandoned deletion is still not
-// repaired (repairPathOf), as everywhere else.
+// stays, and the next start sweeps — which also re-makes a shed deletion
+// (repairPathOf).
 func (e *Engine) BeginShutdown() {
 	e.shutOnce.Do(func() {
 		time.AfterFunc(e.drainTimeout, func() { close(e.abort) })
@@ -988,13 +988,15 @@ func repairPathOf(ev fsevent.Event) (string, bool) {
 		// name is what a Move was going to achieve anyway.
 		return ev.NewPath, ev.NewPath != ""
 	case fsevent.OpUnlink, fsevent.OpRmdir:
-		// Nothing local to send. An abandoned deletion is therefore NOT repaired
-		// by this record, and M27 does not close that case: the remote object is
-		// still there and still marked seen by the sweep, so the delete pass never
-		// considers it. Undoing it needs the deletion to go back through
-		// -max-deletes, which is the delete pass's own machinery rather than a
-		// re-push — see DESIGN.md §9, M27.
-		return "", false
+		// Nothing local to send, and the record does not ask for anything to be.
+		// What it buys is the sweep falling due: the deletion itself is re-made
+		// by the sweep's "gone locally" row (Downloader.goneHere), which finds the
+		// baseline the failed push left standing beside a remote that still
+		// matches it — under -max-deletes and with the remote re-checked first,
+		// like every other deletion a sweep makes. The repair pass sees the path
+		// absent and drops the record, so nothing is re-sent; and a file re-created
+		// at the path since is pushed as the new content it is.
+		return ev.Path, ev.Path != ""
 	case fsevent.OpSetattr:
 		return "", false // metadata-only; push does nothing for it, so it cannot fail
 	}

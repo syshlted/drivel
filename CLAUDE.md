@@ -1394,6 +1394,20 @@ elapsed, and on `-resync`.
    writes no completion stamp, leaves the in-progress record for the next mount,
    and logs `reconcile INCOMPLETE`. Anything added to this loop later inherits
    that rule: **a partial listing may materialise and may not conclude.**
+7. **Both directions have a delete row, and they share one `-max-deletes`
+   count.** `deleteGone` is "unlisted remotely, unmodified here ⇒ delete
+   locally"; `deleteHere` (2026-10-20) is "listed remotely and still matching
+   the baseline, absent here ⇒ delete remotely" — the row DESIGN.md's table had
+   from M7b and nothing implemented. Its own three guards are not optional: the
+   remote is **re-`Stat`ed right before the `Remove`** and must still match (an
+   edit made since the listing beats the deletion and is downloaded back); the
+   local path must still be **absent with the baseline unchanged**; and **a
+   directory goes only once every object the sweep saw inside it
+   (`state.EachSeenUnder`) was removed by this pass**, because `Store.Remove` is
+   recursive. A path shared by same-name siblings is never a candidate. It goes
+   through `Engine.Push`, so it is entombed and, if it fails, owed. An
+   unmounted filesystem inside the backing tree reads as "absent" to it — the
+   guard behind that is `-max-deletes`, and Drive's trash behind that.
 
 Below the seam: a flat listing has no parent-before-child guarantee, so an object
 whose parent is unseen is parked on that parent's ID and released when it arrives;
@@ -1930,10 +1944,16 @@ three, and 13-byte files.
    SFTP (a full tmpfs backing store, byte-identical once it grew), but there
    the sweep retries first, so the feed path's live half is still unrun.
 
-**One thing M27 does not close, and it is not an oversight.** An abandoned
-**deletion** is not repaired — no local content to re-send, and inferring it
-later has to go through `-max-deletes`, which is the delete pass's machinery, so
-`repairPathOf` declines to record one at all.
+**An abandoned deletion is repaired since 2026-10-20, through the delete pass
+and not by a re-push.** It used to be the one thing M27 did not close: no local
+content to re-send, and nothing inferred it later, because the M7b table's third
+row ("baseline present, local absent, remote present ⇒ delete remotely") was
+never implemented — `apply` returns on the echo match before it looks at the
+local side. That row now exists (`goneHere` records it from the listing,
+`deleteHere` acts on it in `applyDeletes`), so a deletion made while drivel was
+down propagates too. `repairPathOf` records a deletion's path only so a repair
+sweep falls due; the repair pass drops it for being absent. See "Enumeration &
+reconcile" rule 7.
 
 **A shutdown now overtakes a blocked dispatch (2026-10-17)**, which this section
 listed as the second thing M27 did not close. The send into a worker queue is

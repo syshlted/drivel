@@ -153,7 +153,10 @@ The rules and their reasoning are in [Workflows §4](workflows.md#4-the-enumerat
 The short form:
 
 - Snapshot the cursor **before** the sweep, adopt it **after**.
-- A delete is inferred **only from a baseline**, never from absence.
+- A delete is inferred **only from a baseline**, never from absence — in both
+  directions, under one `-max-deletes` count. The "deleted here" row
+  (`deleteHere`) re-checks the remote right before removing it and removes a
+  directory only once everything the sweep listed inside it is gone.
 - The seen marks and the completion stamp are **persistent**, for two different
   reasons (resume; and measuring the periodic schedule).
 - The sweep is the **only** correct place to prune a baseline. No cheaper prune

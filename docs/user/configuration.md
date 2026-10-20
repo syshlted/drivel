@@ -192,9 +192,19 @@ Three things follow from that, and the last one is the one worth knowing:
 - **`-sweep-interval 0` does not switch this off.** `0` means "do not poll on a
   schedule"; a file that failed to upload is still repaired.
 
-A *deletion* that is abandoned is the exception: there is no local file to
-re-send, so Drivel does not retry it and does not infer it later. Delete it
-again if you see one fail.
+A *deletion* that is abandoned is repaired by the same sweep, differently:
+there is no local file to re-send, so the sweep finds the file still on the
+backend, still holding what was last synced, and gone here — and deletes it
+there, under the same [guards](data-safety.md#deletion) as every deletion a
+sweep makes, `-max-deletes` included:
+
+```
+[sync] push unlink notes/old.txt failed after 1 attempt(s): … (recorded for repair by the next sweep)
+[sweep] delete  notes/old.txt remotely (deleted here, and the remote still holds what was last synced)
+```
+
+If the backend's copy changed in the meantime, it is kept and downloaded here
+again, because an edit wins over a deletion.
 
 ## When Drivel is killed mid-upload
 

@@ -1368,6 +1368,15 @@ A deletion arriving from another machine removes a local file only if it still
 holds what was last synced. A file edited here and not yet uploaded, or one never
 synced, is kept and uploaded again; a deleted directory stays if anything in it
 was kept.
+.PP
+The other direction is settled by the enumeration sweep. A file deleted here while
+.B drivel
+was not running, or whose deletion could not be sent, is deleted on the backend
+when the backend still holds what was last synced \(em re-checked immediately
+before the removal \(em and counts toward
+.BR -max-deletes .
+A remote copy edited since is kept and downloaded again, and a remote directory
+is removed only once everything the sweep listed inside it has been.
 .SH ABANDONED UPLOADS
 Every push is retried with a growing delay between attempts \(em five attempts
 over roughly seven seconds \(em and an error the backend reports as permanent is
@@ -1407,9 +1416,10 @@ does not switch any of this off.
 .PP
 An abandoned
 .I deletion
-is the exception. There is no local file to re-send, so it is neither retried
-nor inferred later: the remote object is still present and still indistinguishable
-from a file the user has. Delete it again.
+is recorded too, and the same sweep re-makes it: with no local file to re-send,
+it finds the remote object still matching what was last synced and the local
+path gone, and deletes it on the backend under the same guards as any deletion a
+sweep infers.
 .SS Uploads lost to a crash
 Recording the path only happens if
 .B drivel

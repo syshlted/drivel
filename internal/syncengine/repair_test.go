@@ -84,8 +84,8 @@ func TestASuccessfulRetryRecordsNoRepair(t *testing.T) {
 }
 
 // Which path a record names, per op. A rename is owed at its DESTINATION, where
-// the bytes now are; a deletion is owed nowhere, because there is no local
-// content to re-send and M27 does not claim to repair that case.
+// the bytes now are; a deletion is owed at the path it removed — not to re-send
+// anything, but so a sweep falls due to re-make it (see the gone-locally row).
 func TestRepairPathOf(t *testing.T) {
 	cases := []struct {
 		ev   fsevent.Event
@@ -95,8 +95,8 @@ func TestRepairPathOf(t *testing.T) {
 		{fsevent.Event{Op: fsevent.OpCreate, Path: "a.txt"}, "a.txt"},
 		{fsevent.Event{Op: fsevent.OpMkdir, Path: "d"}, "d"},
 		{fsevent.Event{Op: fsevent.OpRename, Path: "old.txt", NewPath: "new.txt"}, "new.txt"},
-		{fsevent.Event{Op: fsevent.OpUnlink, Path: "a.txt"}, ""},
-		{fsevent.Event{Op: fsevent.OpRmdir, Path: "d"}, ""},
+		{fsevent.Event{Op: fsevent.OpUnlink, Path: "a.txt"}, "a.txt"},
+		{fsevent.Event{Op: fsevent.OpRmdir, Path: "d"}, "d"},
 		{fsevent.Event{Op: fsevent.OpSetattr, Path: "a.txt"}, ""},
 		{fsevent.Event{Op: fsevent.OpWrite, Path: ""}, ""},
 	}

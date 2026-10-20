@@ -195,7 +195,33 @@ side it is on.
 That single rule has a consequence worth stating plainly: **the first run never
 deletes anything.**
 
-Four further guards:
+It works in both directions. A file the backend no longer has, whose local copy
+is still what was last synced, is deleted here. A file **you deleted here while
+Drivel was not running** — from the backing directory, or by deleting through the
+mount when the deletion could not be sent — is deleted on the backend, if the
+backend still holds what was last synced:
+
+```
+[sweep] delete  notes/old.txt remotely (deleted here, and the remote still holds what was last synced)
+```
+
+If the backend's copy has changed since, somebody edited it after you last
+synced, and the edit wins: it is downloaded here again instead. Drivel asks the
+backend once more immediately before each such deletion, so an edit made while
+the sweep was running is caught too. A folder is deleted on the backend only
+once everything the sweep found inside it has been deleted first; a folder that
+holds something Drivel never synced — a file someone added there, a
+Google-native document — stays, with only your deleted files gone from it:
+
+```
+[sweep] keep    notes remotely (deleted here, but the remote holds notes/new.txt, which this mount never synced or did not delete)
+```
+
+Before 20 October 2026 this direction did nothing at all. A file deleted here
+while Drivel was down stayed on the backend and on every other machine, with
+nothing ever bringing the two sides back into agreement.
+
+Four further guards, for both directions:
 
 1. Deletions run only after a **complete** enumeration. An interrupted sweep
    deletes nothing.
@@ -204,10 +230,11 @@ Four further guards:
 3. A local file that **changed since its baseline is kept and pushed back**, never
    deleted. Divergence beats absence.
 4. `-max-deletes` (default 100) **abandons the whole delete pass** if the count
-   looks wrong, rather than trimming it. A very large count means the premise is
-   broken — a state database reused against a different Drive folder, an empty
-   backing directory, a mount pointing somewhere unexpected — not that there are
-   4000 real deletions.
+   looks wrong, rather than trimming it. Deletions in both directions count
+   toward the one limit. A very large count means the premise is broken — a
+   state database reused against a different Drive folder, an empty backing
+   directory, a mount pointing somewhere unexpected — not that there are 4000
+   real deletions.
 
 If the deletions really were genuine, re-run with **`-resync` and a higher cap
 together**. Raising the cap alone does nothing until the next scheduled sweep,

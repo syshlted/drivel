@@ -555,6 +555,13 @@ type sweepStats struct {
 	foreign     int // subtrees skipped: another drivel's backing store or mount (MC-47)
 	writing     int // new local files skipped: still open through the mount
 	siblings    int // paths more than one remote object claims (MC-30)
+	goneKept    int // deleted here, but kept remotely: it changed there, or holds what we never saw
+
+	// gone is the "deleted locally" row's candidates: paths the remote still
+	// holds exactly as last synced and that are absent here (goneHere). Like
+	// listed, only this process's pages: a resumed sweep proposes fewer
+	// deletions, which is the safe direction, and the next sweep finds the rest.
+	gone map[string]goneEntry
 
 	// listed is when each path this process has listed in this sweep was last
 	// modified, by the object that currently stands for it; see applyPage. Not
@@ -609,6 +616,9 @@ func (s sweepStats) String() string {
 	}
 	if s.kept > 0 {
 		out += fmt.Sprintf(", %d kept (locally modified after a remote delete)", s.kept)
+	}
+	if s.goneKept > 0 {
+		out += fmt.Sprintf(", %d kept remotely (deleted here, but changed there or holding what this mount never synced)", s.goneKept)
 	}
 	if s.orphaned > 0 {
 		out += fmt.Sprintf(", %d stale record(s) dropped", s.orphaned)
@@ -729,11 +739,13 @@ func (d *Downloader) standsForPath(f provider.RemoteFile, st *sweepStats) bool {
 
 // reconcileRemote applies one remote object to the local tree.
 //
-// The remote-present rows of the three-way table are exactly what the pull loop's
-// apply already does — echo match ⇒ nothing, identical local bytes ⇒ nothing,
-// divergent local ⇒ §6 conflict copy, absent local ⇒ materialise — with the echo
-// record serving as the baseline in both. So this adds only what a sweep needs on
-// top: the two kinds of object it must NOT materialise.
+// Most of the remote-present rows of the three-way table are what the pull
+// loop's apply already does — echo match ⇒ nothing, identical local bytes ⇒
+// nothing, divergent local ⇒ §6 conflict copy, absent local with no baseline ⇒
+// materialise — with the echo record serving as the baseline in both. So this
+// adds what a sweep needs on top: the kinds of object it must NOT materialise,
+// and the one row apply cannot see, absent local WITH a baseline the remote
+// still matches, which is a deletion made here (goneHere).
 func (d *Downloader) reconcileRemote(ctx context.Context, f provider.RemoteFile, st *sweepStats) error {
 	if f.ExportOnly {
 		// A Google-native doc has no byte stream, no size and no checksum: nothing
@@ -755,6 +767,9 @@ func (d *Downloader) reconcileRemote(ctx context.Context, f provider.RemoteFile,
 		st.suppressed++
 		return nil
 	}
+	if gone, err := d.goneHere(f, st); err != nil || gone {
+		return err
+	}
 	if !d.wouldMaterialize(f) {
 		st.deferred++
 		return nil
@@ -764,6 +779,51 @@ func (d *Downloader) reconcileRemote(ctx context.Context, f provider.RemoteFile,
 	}
 	st.materialize++
 	return nil
+}
+
+// goneEntry is one candidate for the "deleted locally" row: the baseline the
+// listing matched, and whether the object is a directory.
+type goneEntry struct {
+	echo state.Echo
+	dir  bool
+}
+
+// goneHere reports whether f is a candidate for the "deleted locally" row of the
+// three-way table — baseline present, local absent, remote present — and records
+// it for the delete pass if so.
+//
+// That row was in DESIGN.md's table from M7b and nothing implemented it, because
+// the remote-present rows were left to the pull's apply, which returns on an
+// echo match before it looks at the local side at all. So a file deleted from the
+// backing tree while drivel was down, and every deletion whose push was
+// abandoned, left a remote object that still matched its baseline beside a local
+// path that no longer existed: no pass ever acted on it, and the two sides
+// disagreed for good while every other client kept the file.
+//
+// It is the mirror of deleteGone and carries the same evidence rule: the
+// baseline is what makes absence mean something, and only a remote that still
+// matches it is deleted — one that moved since is somebody's later edit, and an
+// edit beats a deletion here exactly as it does in the other direction. Nothing
+// is acted on here: the delete pass does that, after a complete sweep, inside
+// the same -max-deletes count, with both sides checked again first.
+func (d *Downloader) goneHere(f provider.RemoteFile, st *sweepStats) (bool, error) {
+	if d.rec.Push == nil || f.Path == "" || reservedPath(f.Path) {
+		return false, nil
+	}
+	echo, ok, err := d.state.GetEcho(f.Path)
+	if err != nil || !ok || !echo.Matches(f.Hash, f.Version) {
+		return false, err
+	}
+	// Absent, and nothing else: a path that cannot be read, or whose parent has
+	// become a file, is not evidence that anybody deleted it.
+	if _, err := os.Lstat(filepath.Join(d.dataDir, filepath.FromSlash(f.Path))); !errors.Is(err, fs.ErrNotExist) {
+		return false, nil
+	}
+	if st.gone == nil {
+		st.gone = map[string]goneEntry{}
+	}
+	st.gone[f.Path] = goneEntry{echo: echo, dir: f.IsDir}
+	return true, nil
 }
 
 // wouldMaterialize reports whether a remote object with no local counterpart
@@ -1055,10 +1115,12 @@ func (d *Downloader) repushDiverged(ctx context.Context, sw state.Sweep, rel, ab
 	st.repushed++
 }
 
-// applyDeletes runs the two rows of the table that remove something. It is the
-// only part of a reconcile that can destroy data, and it runs last, only after a
-// sweep that completed, only on paths with a baseline older than the sweep, and
-// only within MaxDeletes.
+// applyDeletes runs the rows of the table that remove something: deleteGone for
+// a baseline the remote no longer lists, deleteHere for one it still lists that
+// is gone locally. It is the only part of a reconcile that can destroy data, and
+// it runs last, only after a sweep that completed, only on paths with a baseline
+// older than the sweep, and only within MaxDeletes — which counts both rows
+// together, because a broken premise produces either one.
 func (d *Downloader) applyDeletes(ctx context.Context, sw state.Sweep, st *sweepStats) error {
 	// The cap is applied DURING the walk, not after it. The shape that most needs
 	// refusing — a state DB whose paths are all absent from this remote — is also
@@ -1068,7 +1130,15 @@ func (d *Downloader) applyDeletes(ctx context.Context, sw state.Sweep, st *sweep
 	// are already performing, and it is what makes the refusal actionable, since
 	// "4231 deletions" reads very differently to an operator than "more than 100".
 	var cands []candidate
-	total := 0
+	total, here := 0, 0
+	add := func(c candidate) {
+		total++
+		if d.rec.MaxDeletes > 0 && total > d.rec.MaxDeletes {
+			cands = nil
+			return
+		}
+		cands = append(cands, c)
+	}
 	err := d.state.EachUnseenEcho(sw.Gen, func(p string, e state.Echo) error {
 		// The baseline has to be older than the sweep. An echo written *during* the
 		// sweep describes a file that appeared after its page was listed — a local
@@ -1082,26 +1152,32 @@ func (d *Downloader) applyDeletes(ctx context.Context, sw state.Sweep, st *sweep
 			// it is this mount's to delete any more.
 			return nil
 		}
-		total++
-		if d.rec.MaxDeletes > 0 && total > d.rec.MaxDeletes {
-			cands = nil
-			return nil
-		}
-		cands = append(cands, candidate{path: p, echo: e})
+		add(candidate{path: p, echo: e})
 		return nil
 	})
 	if err != nil {
 		return err
 	}
+	for p, g := range st.gone {
+		// The same age rule, for the same reason. And never a path more than one
+		// remote object claims: Remove would take the one that stands for it and
+		// the next would come back in its place (MC-30).
+		if !g.echo.At.Before(sw.Started) || st.shared[p] {
+			continue
+		}
+		here++
+		add(candidate{path: p, echo: g.echo, here: true, dir: g.dir})
+	}
 	if total == 0 {
 		return nil
 	}
 	if d.rec.MaxDeletes > 0 && total > d.rec.MaxDeletes {
-		d.logf("[sweep] REFUSING to delete: the sweep says %d previously-synced path(s) are gone from the remote, over the -max-deletes limit of %d. "+
+		d.logf("[sweep] REFUSING to delete: the sweep says %d previously-synced path(s) are gone from one side "+
+			"(%d from the remote, %d from here), over the -max-deletes limit of %d. "+
 			"That many at once usually means the state DB, the backing dir or -drive-root do not match each other, rather than %d real deletions. "+
 			"Nothing was deleted. If the deletions are genuine, re-run with -resync AND a higher -max-deletes (or 0 for no limit): "+
 			"this sweep still counts as complete, so raising the limit alone changes nothing until the next -sweep-interval falls due.",
-			total, d.rec.MaxDeletes, total)
+			total, total-here, here, d.rec.MaxDeletes, total)
 		return nil
 	}
 
@@ -1129,21 +1205,118 @@ func (d *Downloader) applyDeletes(ctx context.Context, sw state.Sweep, st *sweep
 			d.logf("[sweep] clearing %d record(s): %v", len(paths), err)
 		}
 	}()
+	removed := map[string]struct{}{} // remote objects deleteHere removed, for a parent's check
 	for _, c := range cands {
 		if ctx.Err() != nil {
 			return ctx.Err()
+		}
+		if c.here {
+			d.deleteHere(ctx, sw, c, st, forget, removed)
+			continue
 		}
 		d.deleteGone(ctx, c.path, c.echo, st, forget)
 	}
 	return nil
 }
 
-// candidate is one path with a baseline that the sweep did not observe remotely.
-// The echo travels with the path because deleteGone needs it to decide whether
-// the local copy is still the one the baseline describes.
+// candidate is one path with a baseline that one side no longer has: unlisted
+// remotely (deleteGone), or — here — listed remotely and absent locally
+// (deleteHere). The echo travels with the path because both need it to decide
+// whether the side still holding the content holds what the baseline describes.
 type candidate struct {
 	path string
 	echo state.Echo
+	here bool // gone locally, still listed remotely
+	dir  bool // for here: the remote object is a directory
+}
+
+// deleteHere removes from the remote a path that is gone locally and that the
+// sweep listed as still holding exactly what was last synced — the "deleted
+// locally while we were off" row, and the repair for a deletion whose push was
+// abandoned. goneHere has why it exists.
+//
+// The listing may be minutes old by now, so both sides are looked at again,
+// and every doubt keeps the remote object:
+//
+//   - The local path must still be absent, and its baseline unchanged. Either
+//     moving means the path was re-created or re-synced during the sweep, which
+//     is the live path's business.
+//   - The remote must still match the baseline, by one Stat taken immediately
+//     before the removal. A remote edit made since the listing is somebody's
+//     work, and an edit beats a deletion: it stays, and the next sweep brings it
+//     back here as the change it is. The window this leaves is the round trip
+//     between the Stat and the Remove.
+//   - A directory goes only if every object this sweep saw inside it was removed
+//     by this pass first. The removal is recursive, so whatever the listing
+//     showed in it that is not being deleted on purpose — a file somebody added
+//     there, a Google-native document, an unsynced conflicts folder — would go
+//     with it unseen. Kept, it is re-created here as the new content it holds.
+//
+// The deletion itself goes through the engine like any other push, so the
+// baseline is entombed exactly as for a deletion made through the mount, and a
+// removal that fails is owed again.
+func (d *Downloader) deleteHere(ctx context.Context, sw state.Sweep, c candidate, st *sweepStats, forget, removed map[string]struct{}) {
+	rel := c.path
+	if _, err := os.Lstat(filepath.Join(d.dataDir, filepath.FromSlash(rel))); !errors.Is(err, fs.ErrNotExist) {
+		return
+	}
+	e, ok, err := d.state.GetEcho(rel)
+	if err != nil {
+		d.logf("[sweep] %s: reading its baseline: %v (keeping the remote copy)", rel, err)
+		return
+	}
+	if !ok || e.Hash != c.echo.Hash || e.Version != c.echo.Version || !e.At.Equal(c.echo.At) {
+		return
+	}
+	if c.dir {
+		var unaccounted string
+		errStop := errors.New("stop")
+		err := d.state.EachSeenUnder(sw.Gen, rel, func(p string) error {
+			if _, ok := removed[p]; !ok {
+				unaccounted = p
+				return errStop
+			}
+			return nil
+		})
+		if err != nil && !errors.Is(err, errStop) {
+			d.logf("[sweep] %s: reading what the sweep listed inside it: %v (keeping the remote directory)", rel, err)
+			return
+		}
+		if unaccounted != "" {
+			d.logf("[sweep] keep    %s remotely (deleted here, but the remote holds %s, which this mount never synced or did not delete)", rel, unaccounted)
+			st.goneKept++
+			return
+		}
+	}
+	rf, exists, err := d.store.Stat(ctx, rel)
+	d.mon.observe(err)
+	switch {
+	case err != nil:
+		d.logf("[sweep] %s: checking the remote before deleting it: %v (keeping it; the next sweep tries again)", rel, err)
+		return
+	case !exists:
+		// Gone on both sides by now: nothing to remove, and the baseline
+		// describes nothing.
+		forget[rel] = struct{}{}
+		removed[rel] = struct{}{}
+		return
+	case rf.IsDir != c.dir || (!c.dir && !e.Matches(rf.Hash, rf.Version)):
+		d.logf("[sweep] keep    %s remotely (deleted here, but changed remotely since the sweep listed it)", rel)
+		st.goneKept++
+		return
+	}
+	op := fsevent.OpUnlink
+	if c.dir {
+		op = fsevent.OpRmdir
+	}
+	d.logf("[sweep] delete  %s remotely (deleted here, and the remote still holds what was last synced)", rel)
+	d.rec.Push.Push(ctx, fsevent.Event{Op: op, Path: rel})
+	st.remoteDel++
+	// The push reports nothing; the baseline is how to tell. The engine entombs it
+	// on a removal that worked and leaves it standing on one it gave up on.
+	if _, still, err := d.state.GetEcho(rel); err == nil && !still {
+		removed[rel] = struct{}{}
+	}
 }
 
 // deleteGone handles one path that has a baseline but is no longer on the remote.

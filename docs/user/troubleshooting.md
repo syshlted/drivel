@@ -289,12 +289,17 @@ mount started** are considered: this is repair for what happened while Drivel wa
 down, not a second uploader running beside the first. So if you suspect a file is
 still behind, restart the mount — or run `-resync` to sweep without waiting.
 
-**A file I deleted is still on the remote, and nothing retried the deletion.**
-This one is not repaired automatically. A push that is abandoned is re-sent from
-the local file, and a deletion has no local file to re-send from — so if the
-`[sync] push unlink …` line failed, delete it again, or from the other machine.
-Drivel never infers that deletion for you, because the remote object is still
-there and still looks like a file you have.
+**A file I deleted is still on the remote.** A deletion that could not be sent
+is retried by a sweep about five minutes later, and so is a file deleted from the
+backing directory while Drivel was not running — though after a clean shutdown
+that one waits for the next scheduled sweep, so run `-resync` to have it picked
+up at once. Look in the sweep's log for the path. `delete … remotely` means it
+went. `keep … remotely (… changed remotely …)` means somebody edited it after you
+last synced, and the edit won over your deletion — it is downloaded here again.
+`keep … remotely (… holds …)` on a folder names something inside it that Drivel
+never synced, which keeps the folder. A `REFUSING to delete` line means the
+sweep wanted more deletions than [`-max-deletes`](configuration.md#mount-options)
+allows; see above.
 
 **`[pull] apply PATH: …` — a remote change did not arrive.** The download or
 the local write failed. Drivel retries it on its own about a minute later

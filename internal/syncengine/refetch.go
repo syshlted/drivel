@@ -40,7 +40,8 @@ const maxRefetchBackoff = 6
 // offered again — repaired only by the next sweep, which is a day away on
 // Drive's default and never at -sweep-interval 0 (MC-46).
 //
-// A removal is declined, for the reason M27 declines an abandoned deletion.
+// A removal is declined, for the reason an abandoned outbound deletion is
+// re-made by the sweep's delete rows rather than replayed from a record.
 // Re-applying one later means deleting a local path on the strength of a report
 // that may be hours old, and in the meantime the user may have written new work
 // there that is not yet pushed. A removal that failed has left the local copy

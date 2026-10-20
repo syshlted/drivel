@@ -655,6 +655,36 @@ func (s *Store) SeenPath(gen, path string) (ok bool, err error) {
 	return ok, err
 }
 
+// EachSeenUnder calls fn for every path this generation's sweep observed strictly
+// below dir — everything the remote holds inside it, as far as one complete
+// listing can say. It is how a sweep that is about to remove a remote directory
+// checks that it has accounted for the directory's whole content: a removal is
+// recursive, so anything listed under it that is not being deleted on purpose
+// would go with it. dir "" means the mount root, and every seen path is below it.
+//
+// The marks are persistent, so the answer covers the pages a previous process
+// listed before a resume as well as this one's. fn's error aborts the scan and
+// is returned unwrapped; fn runs inside a read transaction and must not write to
+// this store.
+func (s *Store) EachSeenUnder(gen, dir string, fn func(path string) error) error {
+	if gen == "" {
+		return nil
+	}
+	prefix := seenKey(gen, "")
+	if dir != "" {
+		prefix = seenKey(gen, dir+"/")
+	}
+	return s.db.View(func(tx *bolt.Tx) error {
+		c := tx.Bucket(bucketSeen).Cursor()
+		for k, _ := c.Seek(prefix); k != nil && bytes.HasPrefix(k, prefix); k, _ = c.Next() {
+			if err := fn(string(k[len(gen)+1:])); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
 // EachUnseenEcho calls fn for every baseline (echo) record whose path this
 // generation's sweep did NOT observe remotely — the candidates for "deleted
 // remotely while we were not running".

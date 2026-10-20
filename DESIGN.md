@@ -1936,11 +1936,32 @@ are both lossy and racy.
    `EachUnseenEcho` join over them. The rule, unchanged: **a delete may be inferred
    only from a baseline, never from absence alone.**
 
-   The remote-present rows needed no new code at all. They are exactly what the pull
+   The remote-present rows were meant to need no new code. They are what the pull
    loop's `apply` already does — echo match ⇒ nothing, identical local bytes ⇒
    nothing, divergent local ⇒ §6 conflict copy, absent local ⇒ materialise — with the
-   echo serving as the baseline in both. The sweep adds only what it must not
+   echo serving as the baseline in both. The sweep adds what it must not
    materialise (below) and the seen mark.
+
+   **Except row three, which that reasoning dropped and nothing implemented until
+   2026-10-20.** `apply` returns on the echo match before it looks at the local side,
+   so "baseline present, local absent, remote present" was handled as "nothing" —
+   a file deleted from the backing tree while drivel was down, and every deletion
+   whose push was abandoned, left the remote object standing beside a missing local
+   path for good, on every client. `goneHere` now records the row from the listing
+   (remote matches the baseline, local `lstat` is `ENOENT` and nothing else) and the
+   delete pass acts on it as `deleteHere`, inside the same `-max-deletes` count as
+   the other delete row. Three checks are its own. **The remote is re-`Stat`ed
+   immediately before each removal** and must still match the baseline, because
+   the listing can be minutes old and a remote edit made since is somebody's work —
+   an edit beats a deletion here exactly as `deleteGone`'s guard 3 makes it beat one
+   in the other direction. **The local path must still be absent and its baseline
+   unchanged.** And **a directory is removed only if every object this sweep saw
+   inside it (`state.EachSeenUnder`, so a resumed sweep's earlier pages count) was
+   removed first**, because `Store.Remove` is recursive and would otherwise take a
+   file somebody added, or a Google-native document, unseen. The deletion goes
+   through `Engine.Push`, so it is entombed like one made through the mount. The
+   residual is the round trip between the re-check and the `Remove`, the same one
+   the live `rmdir` push has always had for a child added remotely.
 
    **Four guards make the delete rows safe**, and each exists because of a specific
    way the inference can be wrong:
@@ -5189,7 +5210,13 @@ this whole group walks through, so it is a precondition rather than a note.
     the delete pass's machinery rather than a re-push — the remote object is
     still there and still marked seen, so the delete pass never considers it.
     `repairPathOf` therefore declines to record one at all, rather than
-    recording a path the repair pass would drop for having no file. And **a shutdown cannot overtake a blocked
+    recording a path the repair pass would drop for having no file.
+    **Closed 2026-10-20 through exactly that machinery**: the delete pass grew
+    the M7b reconcile table's missing third row (`deleteHere`, see M7b), which is what
+    "inferring it later" needed, and `repairPathOf` now records a deletion's
+    path — not for anything to be re-sent (the repair pass finds the path absent
+    and drops the record) but so a repair sweep falls due within `repairDelay`
+    instead of at `-sweep-interval`. And **a shutdown cannot overtake a blocked
     dispatch**: the send into a worker queue is unconditional (dropping is the
     thing this bound exists to avoid), so a cancelled context does not unwind a
     saturated engine, the engine's `drainTimeout` is only armed after the loop

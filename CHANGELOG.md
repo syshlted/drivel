@@ -13,6 +13,18 @@ from source with `make build`.
 
 ## Unreleased
 
+### A file deleted while Drivel was not running is now deleted everywhere — 2026-10-20
+
+Deleting a file from the backing directory while Drivel was stopped used to do
+nothing on the backend: the file stayed there and on every other machine, and
+Drivel never brought the two sides back into agreement. The same was true of a
+deletion Drivel failed to send. The next sweep now deletes such a file on the
+backend, if the backend still holds what was last synced. If somebody has edited
+it since, the edit wins and the file is downloaded here again. A folder is
+deleted on the backend only once everything inside it that Drivel found has been
+deleted too, and these deletions count toward `-max-deletes` like the others.
+See [deletion](docs/user/data-safety.md#deletion).
+
 ### Two machines editing one file now always agree on the result — 2026-10-18
 
 When a conflict was found while this machine was already uploading the same
