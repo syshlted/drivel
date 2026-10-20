@@ -141,6 +141,9 @@ type Downloader struct {
 	// sending counts conflict copies on their way to the remote, at most
 	// conflictSenders at once (sendConflictCopy).
 	sending sync.WaitGroup
+	// unsent is the copies sendConflictCopy has taken and not yet finished,
+	// which the sweep's walk must leave to it (copyInFlight).
+	unsent  sync.Map
 	senders chan struct{}
 }
 
@@ -284,8 +287,10 @@ const conflictSenders = 2
 // with the folder on both sides the walk sends it later.
 func (d *Downloader) sendConflictCopy(ctx context.Context, copyRel string, job func(context.Context) string) {
 	d.sending.Add(1)
+	d.unsent.Store(copyRel, struct{}{})
 	go func() {
 		defer d.sending.Done()
+		defer d.unsent.Delete(copyRel)
 		if !d.waitUnpaused(ctx) {
 			d.logf("[pull] conflict copy %s: not sent before shutdown (kept in the local folder)", copyRel)
 			return
@@ -299,6 +304,20 @@ func (d *Downloader) sendConflictCopy(ctx context.Context, copyRel string, job f
 		defer func() { <-d.senders }()
 		d.logf("[pull] conflict copy %s: %s", copyRel, job(ctx))
 	}()
+}
+
+// copyInFlight reports whether sendConflictCopy is still sending rel.
+//
+// The walk's "new locally" row must not push such a copy as well. Until the
+// sender records the copy's baseline the walk sees a local file with none, and
+// both uploaded it: whichever went second found the other's object at the
+// path with no record of it, and kept it as a conflict copy of the conflict
+// copy, one folder deeper (seen live over SFTP, 2026-10-20). Left alone, the
+// copy is recorded by its sender — or, if the send fails, found by the next
+// sweep, which is the fallback the copy's own log line names.
+func (d *Downloader) copyInFlight(rel string) bool {
+	_, ok := d.unsent.Load(rel)
+	return ok
 }
 
 // Run polls until ctx is cancelled. It resumes from the persisted cursor, or

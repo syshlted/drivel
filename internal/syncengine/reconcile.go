@@ -972,6 +972,9 @@ func (d *Downloader) pushLocalOnly(ctx context.Context, sw state.Sweep, st *swee
 			}
 			return nil
 		}
+		if d.copyInFlight(rel) {
+			return nil // its sender records it (copyInFlight)
+		}
 		if e.IsDir() {
 			// Another drivel's backing store or live mount is not content, and
 			// syncing it is the MC-47 multiplication: that mount syncs it, we push

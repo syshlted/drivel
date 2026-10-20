@@ -854,3 +854,32 @@ func TestAFileReplacedDuringItsUploadIsPushedAgain(t *testing.T) {
 		t.Errorf("local copies = %v; the loser should still be kept", got)
 	}
 }
+
+// A conflict copy the pull is still sending in the background is the sender's
+// to record. The sweep's walk used to find it with no baseline yet and push it
+// as well, and the second upload kept the first's object as a conflict copy of
+// the conflict copy, one folder deeper — seen live over SFTP on 2026-10-20.
+func TestTheWalkLeavesAConflictCopyItsSenderHasNotFinished(t *testing.T) {
+	f := newSweepFixture(t, ReconcileOptions{Force: true})
+	copyRel := ConflictDirName + "/a (conflict 2026-10-20 02-07-57).txt"
+	writeFile(t, f.dir, copyRel, "the remote's losing version")
+	release := make(chan struct{})
+	done := make(chan struct{})
+	f.dl.sendConflictCopy(context.Background(), copyRel, func(context.Context) string {
+		<-release
+		close(done)
+		return copyRel + " (here and on the remote)"
+	})
+
+	f.run(t)
+
+	for _, op := range f.push.ops() {
+		if strings.HasSuffix(op, copyRel) {
+			t.Fatalf("pushes = %v; the walk pushed a copy its sender is still sending", f.push.ops())
+		}
+	}
+	close(release)
+	<-done
+
+	f.run(t) // after the send: the next sweep's walk may meet it like any file
+}

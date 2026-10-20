@@ -13,6 +13,14 @@ from source with `make build`.
 
 ## Unreleased
 
+### A conflict copy is no longer kept as a conflict of itself — 2026-10-20
+
+When a remote change met a local edit, the copy Drivel kept could be uploaded
+twice at once, and the second upload then kept the first as another conflict
+copy, in a `.drivel-conflicts` folder inside the `.drivel-conflicts` folder. It
+was most likely on SFTP, whose sweeps run every few seconds. Each copy is now
+uploaded once. Nested copies made before this are ordinary files you can delete.
+
 ### Files keep their modification time, and an edit made during an upload is kept — 2026-10-20
 
 An upload now carries the file's own modification time, so your other machines

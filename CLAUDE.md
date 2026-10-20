@@ -1168,7 +1168,11 @@ boundaries call. Six things carry it.
    `conflictSenders` at once, after the pause gate, waited for by `Run`),
    because inline it held up every inbound change behind a large loser and
    ignored a pause. The engine runs it inline: its workers are already off the
-   event path and already gated.
+   event path and already gated. **The walk leaves a copy in flight alone**
+   (`Downloader.copyInFlight`, since 2026-10-20): it used to find the copy with
+   no baseline yet and push it too, and the second upload kept the first's
+   object as a conflict copy of the conflict copy, one folder deeper — seen
+   live over SFTP at a 3s sweep.
 3. **Default `both` reverses "conflict copies are local-only".** That rule
    existed so the walk would not publish sibling copies by accident; those
    (made before 2026-10-18) are still recognised by `conflictRe` and still
