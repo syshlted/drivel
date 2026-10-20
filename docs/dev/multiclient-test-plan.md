@@ -691,6 +691,14 @@ roughly in descending order of how likely they are to change a decision:
     both start orders** (MC-47's row): nothing grew and nothing reached the
     remote but the seed.
 
+    **Two holes that run did not exercise were closed 2026-10-20.** Only the walk
+    pruned a nested tree, so a write *through* the outer mount into it was still
+    pushed, and the pull and both delete rows would write into or delete from
+    it; every pass now asks `syncengine.notSynced`. And a flock taken *through*
+    the mount never reached the backing file `HeldByAnother` probes; flock (not
+    POSIX locks) is now forwarded, with the mount re-announcing a path written
+    under an exclusive lock once the lock goes. Neither has a live re-run yet.
+
 19. **One `cp` of a large file costs two full uploads, and this is what MC-11's
     extra upload was.** §5.3 below records a single duplicate in the 1000-file
     seed run and sends it to Tier A to be chased as a coalescer question. MC-40's

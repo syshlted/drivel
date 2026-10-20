@@ -126,6 +126,7 @@ type Downloader struct {
 	// conflicts is the mount's conflict policy, shared with its engine; never nil
 	// (NewDownloader installs the default, and Conflicts replaces it).
 	conflicts *Conflicts
+	foreign   *foreignTrees // other drivels' trees nested in dataDir (MC-47)
 
 	// M14. mon is written to and never read (see Monitor); hold is what a pause
 	// makes this loop wait at, between polls and between sweep pages.
@@ -217,8 +218,13 @@ func NewDownloader(src provider.ChangeSource, store provider.Store, dataDir stri
 		src: src, store: store, dataDir: dataDir, state: st, cad: cad,
 		repairBase: repairDelay, refetchBase: refetchDelay, openedAt: time.Now(),
 		conflicts: &Conflicts{}, senders: make(chan struct{}, conflictSenders),
+		foreign: newForeignTrees(dataDir),
 	}
 }
+
+// notSynced is this downloader's answer to "does this mount sync p?" (see the
+// package-level notSynced): "" when it does, else why not.
+func (d *Downloader) notSynced(p string) string { return notSynced(d.conflicts, d.foreign, p) }
 
 // Conflicts sets the mount's conflict policy — the same value its engine is
 // given, so the pull and the push agree on where a loser goes and on which
@@ -554,7 +560,14 @@ func (d *Downloader) applyTo(ctx context.Context, ch provider.RemoteChange, forg
 		// applied, not recorded, and its removal is not this mount's to apply.
 		return nil
 	}
-	if ch.MovedFrom != "" && !d.conflicts.Syncs(ch.MovedFrom) {
+	if why := d.foreign.why(ch.Path); why != "" {
+		// The same for another drivel's tree nested in this one, and said: a
+		// write here is a write into that mount's tree, which it would send to
+		// its own remote, and a removal would delete that mount's files.
+		d.logf("[pull] skip    %s (%s)", ch.Path, why)
+		return nil
+	}
+	if ch.MovedFrom != "" && d.notSynced(ch.MovedFrom) != "" {
 		// Moved out of one: there is no local source to rename, so it arrives
 		// as what it now is, a new object at its new path.
 		ch.MovedFrom = ""
@@ -1084,9 +1097,22 @@ func (d *Downloader) applyRemoval(ctx context.Context, rel, dst string, forget m
 	// Children first, deepest first, so a directory is removed only once
 	// everything in it has been decided.
 	var paths []string
-	err = filepath.WalkDir(dst, func(p string, _ fs.DirEntry, err error) error {
+	kept := 0
+	err = filepath.WalkDir(dst, func(p string, de fs.DirEntry, err error) error {
 		if err != nil {
 			return nil //nolint:nilerr // unreadable: left where it is, which is the safe direction
+		}
+		if de.IsDir() && p != dst {
+			// Another drivel's tree inside the removed directory is that mount's
+			// content, not this remote's to delete: left whole, and it keeps its
+			// parents.
+			if r, rErr := filepath.Rel(d.dataDir, p); rErr == nil {
+				if why := d.foreign.why(filepath.ToSlash(r)); why != "" {
+					d.logf("[pull] keep    %s (%s)", filepath.ToSlash(r), why)
+					kept++
+					return filepath.SkipDir
+				}
+			}
 		}
 		paths = append(paths, p)
 		return nil
@@ -1094,7 +1120,6 @@ func (d *Downloader) applyRemoval(ctx context.Context, rel, dst string, forget m
 	if err != nil {
 		return err
 	}
-	kept := 0
 	for i := len(paths) - 1; i >= 0; i-- {
 		p := paths[i]
 		r, rErr := filepath.Rel(d.dataDir, p)
@@ -1157,7 +1182,7 @@ func (d *Downloader) removeIfSynced(ctx context.Context, rel, abs string, fi os.
 		}
 	}
 	d.logf("[pull] keep    %s (deleted remotely, but %s)", rel, why)
-	if !fi.Mode().IsRegular() || !d.conflicts.Syncs(rel) {
+	if !fi.Mode().IsRegular() || d.notSynced(rel) != "" {
 		return false
 	}
 	// Dropped inline, as the sweep does: the push below writes a fresh echo for

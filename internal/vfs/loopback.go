@@ -40,6 +40,8 @@ type node struct {
 	lg     *log.Logger    // nil => the log package's default
 	// writing is the mount's set of new files still open (fsevent.Writing).
 	writing *fsevent.Writing
+	// flocks is the mount's record of forwarded exclusive flocks (flock.go).
+	flocks *flocks
 }
 
 // logf writes one line for this mount.
@@ -89,7 +91,7 @@ func (n *node) WrapChild(_ context.Context, ops fs.InodeEmbedder) fs.InodeEmbedd
 		n.logf("vfs: unexpected child type %T; passing through uninstrumented", ops)
 		return ops
 	}
-	return &node{LoopbackNode: ln, events: n.events, hyd: n.hyd, xattr: n.xattr, lg: n.lg, writing: n.writing}
+	return &node{LoopbackNode: ln, events: n.events, hyd: n.hyd, xattr: n.xattr, lg: n.lg, writing: n.writing, flocks: n.flocks}
 }
 
 // NewRoot builds the root InodeEmbedder for a loopback mount backed by
@@ -121,6 +123,7 @@ func NewRoot(opts mount.Options) (fs.InodeEmbedder, error) {
 		xattr:        opts.Xattr,
 		lg:           opts.Logger,
 		writing:      opts.Writing,
+		flocks:       newFlocks(),
 	}
 	// Mirrors NewLoopbackRoot: relative-path computation prefers this over
 	// walking up to the FUSE mount root.
@@ -168,7 +171,7 @@ func (n *node) Create(ctx context.Context, name string, flags, mode uint32, out 
 		// The file was just created or truncated, so its content is resident by
 		// definition — mark the handle so no read on it tries to fault anything in.
 		n.writing.Open(path)
-		h := &fileHandle{wrapped: fh, path: path, events: n.events, hyd: n.hyd, lg: n.lg, created: true, writing: n.writing}
+		h := &fileHandle{wrapped: fh, path: path, events: n.events, hyd: n.hyd, lg: n.lg, created: true, writing: n.writing, locks: n.flocks}
 		h.resident.Store(true)
 		fh = h
 	}
@@ -224,7 +227,7 @@ func (n *node) Open(ctx context.Context, flags uint32) (fs.FileHandle, uint32, s
 		fh, fuseFlags, errno = n.LoopbackNode.Open(ctx, flags)
 	}
 	if errno == 0 {
-		fh = &fileHandle{wrapped: fh, path: path, events: n.events, hyd: n.hyd, lg: n.lg}
+		fh = &fileHandle{wrapped: fh, path: path, events: n.events, hyd: n.hyd, lg: n.lg, locks: n.flocks}
 	}
 	return fh, fuseFlags, errno
 }

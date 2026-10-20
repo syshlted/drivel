@@ -44,6 +44,18 @@ func (backend) Serve(ctx context.Context, opts mount.Options) error {
 			// for why the passthrough is the dangerous direction.
 			DisableXAttrs: !opts.Xattr,
 			AllowOther:    opts.AllowOther,
+			// flock(2) only, never POSIX locks: a BSD lock taken through the mount
+			// is forwarded to the backing file (fileHandle.Setlk), so a process
+			// holding one — bbolt does, on every database it has open for writing —
+			// is seen by the engine's claim.HeldByAnother and is not uploaded
+			// mid-transaction, which a lock the kernel kept to itself never was.
+			// flock is per open file description and so is a FUSE file handle, so
+			// forwarding it changes nothing about its semantics. POSIX locks are
+			// per process and released by any close; go-fuse's loopback answers
+			// them with OFD locks on one descriptor, which gets both wrong, so the
+			// kernel goes on keeping those itself (EnableLocks would forward both).
+			// Only a kernel that offers the capability gets it.
+			ExtraCapabilities: fuse.CAP_FLOCK_LOCKS,
 			// Caller options, then the compulsory ones — the order is the
 			// guarantee, not a detail. go-fuse turns nodev/nosuid/noexec into
 			// mount(2) flags and passes the rest to the mount helper, which rejects

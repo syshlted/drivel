@@ -124,6 +124,29 @@ func Marked(dir string) bool {
 	return err == nil
 }
 
+// NestedUnder reports the shallowest directory along rel — a root-relative slash
+// path, rel itself included — that carries a marker strictly below root: the
+// root of another drivel's backing store that rel lies in, or is. root's own
+// marker is not consulted, since it is this mount's. One Lstat per component.
+//
+// It is the per-path form of the question the sweep's walk asks per directory
+// (Marked), for the passes that meet one path at a time — the push, the pull,
+// the delete rows — and must give the walk's answer, or a subtree the walk
+// prunes is still written into by a pull and uploaded by a push.
+func NestedUnder(root, rel string) (string, bool) {
+	if rel == "" || rel == "." {
+		return "", false
+	}
+	parts := strings.Split(rel, "/")
+	for i := range parts {
+		q := strings.Join(parts[:i+1], "/")
+		if Marked(filepath.Join(root, filepath.FromSlash(q))) {
+			return q, true
+		}
+	}
+	return "", false
+}
+
 func markerText(owner string) string {
 	return "drivel backing store for mount " + owner + "\n" +
 		"This directory is synced by a running drivel; its contents are not to be synced again from a directory above it.\n"
@@ -147,7 +170,10 @@ func readOwner(p string) string {
 // the database is an ordinary file with a configurable name. Uploading one
 // would publish a file caught mid-transaction, again on every commit.
 //
-// A lock taken through a FUSE mount is kept by the kernel and never reaches
-// the backing file, so this sees only processes working on the backing tree
-// directly — exactly the ones that are not this mount's users.
+// A flock taken through this mount reaches the backing file too, since
+// 2026-10-20: the mount asks the kernel to forward flock(2) (vfs backend.go)
+// and applies it to the backing descriptor, so a database opened through the
+// mount is recognised as well. The mount announces the file again once such a
+// lock goes (vfs flock.go), because a push declined here is not retried. A
+// POSIX (fcntl) lock is still kept by the kernel and is invisible here.
 func HeldByAnother(f *os.File) bool { return heldExclusively(f) }

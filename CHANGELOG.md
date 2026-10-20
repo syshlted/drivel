@@ -13,6 +13,22 @@ from source with `make build`.
 
 ## Unreleased
 
+### Another Drivel's folder inside yours is left to it entirely — 2026-10-20
+
+When one Drivel's backing directory sits inside another's, the outer one already
+left that folder out of its sweeps. It no longer touches it at all: a file
+written there through the outer mount is not uploaded to the outer mount's
+backend, nothing from that backend is downloaded into it, and a deletion
+arriving from it does not delete inside it. Before, a file written there through
+the outer mount reached both backends, and a remote change could land in the
+other mount's folder and be sent on to *its* backend.
+
+Drivel also now sees a `flock` lock taken through the mount, not only one taken
+directly in the backing directory, so a database open through the mount is not
+uploaded half-written. A change made while somebody else held the lock is sent
+when the lock is released. See
+[several Drivel processes](docs/user/configuration.md#several-drivel-processes).
+
 ### A file deleted while Drivel was not running is now deleted everywhere — 2026-10-20
 
 Deleting a file from the backing directory while Drivel was stopped used to do

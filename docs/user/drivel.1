@@ -1303,14 +1303,22 @@ start when its backing directory, mountpoint or state database lies inside the
 backing directory of another running
 .BR drivel ,
 or when another one already serves the same directory; a marker whose mount is
-not running is only noted. A sweep skips any subdirectory holding a marker, and on
-Linux any other
+not running is only noted. Any subdirectory holding a marker, and on Linux any
+other
 .B drivel
-mountpoint, rather than syncing another mount's files a second time. The marker
-itself is never synced in either direction, and a file another program holds
-locked for writing directly in the backing directory \(em another
+mountpoint, is left to that mount by every part of this one: nothing in it is
+uploaded, even when written through this mount, nothing is downloaded into it,
+and a remote deletion does not reach inside it. A rename into one is a deletion
+here, and a rename out of one a new file. The marker itself is never synced in
+either direction, and a file another program holds an exclusive
+.BR flock (2)
+on \(em another
 .BR drivel 's
-state database, for one \(em is not uploaded while the lock is held.
+state database, for one \(em is not uploaded while the lock is held. That
+includes a lock taken through the mount, on Linux, where such locks are passed
+to the backing file; a write made under one is uploaded once it is released.
+.BR fcntl (2)
+locks are not passed through.
 .SH IN-PLACE MODE
 Omitting
 .I -data

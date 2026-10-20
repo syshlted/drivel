@@ -11,6 +11,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"syscall"
+	"time"
 
 	"github.com/hanwen/go-fuse/v2/fs"
 	"github.com/hanwen/go-fuse/v2/fuse"
@@ -42,6 +43,10 @@ type fileHandle struct {
 	writing *fsevent.Writing // where a created handle is counted until announced
 	// announced latches once a created handle has sent its OpCreate.
 	announced atomic.Bool
+	// locks is the mount's record of forwarded exclusive flocks, and exclusive
+	// whether this handle holds one (flock.go).
+	locks     *flocks
+	exclusive atomic.Bool
 }
 
 // dirtyTracker records which byte extents a handle wrote, so the uploader can
@@ -220,6 +225,7 @@ func (f *fileHandle) announce() {
 		return
 	}
 	f.dirty.restart()
+	f.locks.announced(f.path)
 	if f.events != nil {
 		// No extents: nothing is remote yet for a range write to patch.
 		f.events <- fsevent.Event{Op: fsevent.OpCreate, Path: f.path}
@@ -235,16 +241,27 @@ func (f *fileHandle) Release(ctx context.Context) syscall.Errno {
 	if r, ok := f.wrapped.(fs.FileReleaser); ok {
 		errno = r.Release(ctx)
 	}
+	// The descriptor is closed, so a flock this handle held is gone with it.
+	owed := f.exclusive.Swap(false) && f.locks.dropped(f.path)
 	// Emit the content-change event only after a successful close of a handle we
 	// actually wrote to. Coalesces a burst of Writes into one upload trigger, and
 	// carries the extents those writes touched (nil if they cannot be trusted).
 	if f.created && !f.announced.Load() {
 		// Never flushed (a kernel that skipped FLUSH): the file exists whatever
-		// the close returned, and this is its one event.
+		// the close returned, and this is its one event — a whole-file one,
+		// which also settles anything owed.
 		f.announce()
 		return errno
 	}
-	if written, extents := f.dirty.snapshot(size); errno == 0 && written && f.events != nil {
+	written, extents := f.dirty.snapshot(size)
+	if owed {
+		// An earlier event for this path was announced under the lock and may
+		// have been declined, taking its extents with it. This handle's extents
+		// are not all that changed, so the push is of the whole file.
+		written, extents = true, nil
+	}
+	if errno == 0 && written && f.events != nil {
+		f.locks.announced(f.path)
 		f.events <- fsevent.Event{Op: fsevent.OpWrite, Path: f.path, Dirty: extents}
 	}
 	return errno
@@ -301,6 +318,67 @@ func (f *fileHandle) Setattr(ctx context.Context, in *fuse.SetAttrIn, out *fuse.
 	}
 	return errno
 }
+
+// Setlk takes or drops a flock(2) on the backing file, which the mount asks the
+// kernel to forward (backend.go: CAP_FLOCK_LOCKS) so that a lock taken through
+// the mount is one a process working on the backing tree — this mount's own
+// engine among them — can see. POSIX locks are never forwarded, so a request
+// without FUSE_LK_FLOCK is not one this handle was promised; it is refused
+// rather than answered with the loopback's OFD lock, whose semantics differ.
+func (f *fileHandle) Setlk(ctx context.Context, owner uint64, lk *fuse.FileLock, flags uint32) syscall.Errno {
+	l, ok := f.wrapped.(fs.FileSetlker)
+	if !ok || flags&fuse.FUSE_LK_FLOCK == 0 {
+		return syscall.ENOSYS
+	}
+	errno := l.Setlk(ctx, owner, lk, flags)
+	if errno != 0 {
+		return errno
+	}
+	if lk.Typ == syscall.F_WRLCK {
+		if !f.exclusive.Swap(true) {
+			f.locks.took(f.path)
+		}
+		return 0
+	}
+	// Unlocked, or downgraded to shared, which the engine does not wait for.
+	if f.exclusive.Swap(false) && f.locks.dropped(f.path) && f.events != nil {
+		// Something was announced while it stood; announce it again now that a
+		// push of it can go through. Whole-file: see Release.
+		f.events <- fsevent.Event{Op: fsevent.OpWrite, Path: f.path}
+	}
+	return 0
+}
+
+// Setlkw is Setlk that waits, and it waits by retrying the non-blocking form
+// rather than by blocking in flock(2). The loopback's own Setlkw blocks a
+// server goroutine in the syscall, which no FUSE interrupt can reach: a caller
+// that gave up (a signal, flock -w's timeout) would get its EINTR while the
+// backing descriptor went on to take the lock anyway, held for a process that
+// believes it does not hold it until the file is closed. Polling observes the
+// interrupt — go-fuse cancels ctx on it — at the cost of up to flockPoll of
+// latency once the holder lets go.
+func (f *fileHandle) Setlkw(ctx context.Context, owner uint64, lk *fuse.FileLock, flags uint32) syscall.Errno {
+	wait := time.Millisecond
+	for {
+		errno := f.Setlk(ctx, owner, lk, flags)
+		if errno != syscall.EWOULDBLOCK && errno != syscall.EAGAIN {
+			return errno
+		}
+		t := time.NewTimer(wait)
+		select {
+		case <-ctx.Done():
+			t.Stop()
+			return syscall.EINTR
+		case <-t.C:
+		}
+		if wait *= 2; wait > flockPoll {
+			wait = flockPoll
+		}
+	}
+}
+
+// flockPoll is the longest Setlkw waits between attempts.
+const flockPoll = 50 * time.Millisecond
 
 func (f *fileHandle) Allocate(ctx context.Context, off uint64, size uint64, mode uint32) syscall.Errno {
 	a, ok := f.wrapped.(fs.FileAllocater)

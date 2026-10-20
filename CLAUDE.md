@@ -2267,11 +2267,27 @@ composition — and about the ways several mounts can corrupt each other.
    ordinary file of any name, so no up-walk sees it) is caught at the push
    instead: `pushContent` declines a file someone holds an exclusive **flock**
    on (`claim.HeldByAnother`), which bbolt does for every database open for
-   writing. A lock taken *through* a FUSE mount stays in the kernel and never
-   reaches the backing file, so this sees only processes working on the backing
-   tree directly. Not covered: a write *through* this mount into
-   the nested tree (bounded at one level, because the nested mount's copy lands
-   under the marker the walk prunes). **The marker name is reserved in both
+   writing. **Since 2026-10-20 a flock taken *through* the mount reaches the
+   backing file as well**: `vfs` negotiates `CAP_FLOCK_LOCKS` alone (never
+   `EnableLocks`, which also forwards POSIX locks, whose per-process,
+   any-close-releases semantics go-fuse's OFD-lock loopback gets wrong) and
+   `fileHandle.Setlk` applies it to the backing descriptor; a blocking request
+   polls the non-blocking form so a FUSE interrupt can end it. **Forwarding
+   would have been a regression on its own**: the decline is not retried, and
+   it was safe only because a holder visible on the backing tree was never a
+   mount user — `flock f -c 'echo x >> f'` holds the lock on a descriptor that
+   never writes, so its append was declined and nothing announced it again. So
+   `vfs/flock.go` records exclusive holders per path and, when the last one goes
+   (unlock, downgrade, release), re-announces a path that had a content event
+   while one stood, as a **whole-file** event (the declined event's extents went
+   with it). And **every pass now refuses another drivel's nested tree, not
+   just the walk** (`syncengine/nested.go`, `notSynced` = `Conflicts.Syncs` plus
+   `claim.NestedUnder` and a 5s-cached mountinfo read): until then a write
+   *through* this mount into the nested tree was pushed to this mount's remote,
+   and a pull wrote this remote's files into the other mount's tree — which sent
+   them to *its* remote, another account's — and a remote deletion deleted the
+   other mount's files. A rename across the edge is a removal or a creation,
+   exactly as for a private conflicts folder. **The marker name is reserved in both
    directions** (`syncengine.reservedPath`, at any depth): pushed, a nested
    drivel's marker written *through* this mount reaches every client and their
    walks prune that subtree for good; pulled, a remote object of the name

@@ -204,6 +204,7 @@ type Engine struct {
 	// an engine that is no longer running fails instead of waiting forever.
 	// conflicts is the mount's conflict policy, shared with its pull loop.
 	conflicts *Conflicts
+	foreign   *foreignTrees // other drivels' trees nested in dataDir (MC-47)
 
 	mon      *Monitor
 	ctl      chan ctlReq
@@ -284,6 +285,7 @@ func New(cfg Config) *Engine {
 		abort:        make(chan struct{}),
 		abandonGrace: defaultAbandonGrace,
 		conflicts:    cfg.Conflicts,
+		foreign:      newForeignTrees(cfg.DataDir),
 	}
 	if e.conflicts == nil {
 		e.conflicts = &Conflicts{}
@@ -1119,7 +1121,10 @@ func (e *Engine) push(ctx context.Context, ev fsevent.Event) error {
 }
 
 // pushAcrossConflictsFolder settles an event touching a conflicts folder this
-// mount does not sync (Conflicts.Syncs), reporting done when it did.
+// mount does not sync (Conflicts.Syncs), or another drivel's tree nested in its
+// backing store (foreignTrees), reporting done when it did. The two are one
+// edge: what lies past it is not this mount's to send, and a rename across it
+// is the only event that means something here.
 //
 // Inside such a folder nothing is sent: a reviewed copy deleted, edited or
 // renamed there stays this mount's business. A rename across its edge is the
@@ -1128,27 +1133,29 @@ func (e *Engine) push(ctx context.Context, ev fsevent.Event) error {
 // moved in, a file has left the synced tree, which is a removal on the remote
 // exactly as a delete would be.
 func (e *Engine) pushAcrossConflictsFolder(ctx context.Context, ev fsevent.Event) (bool, error) {
-	from := e.conflicts.Syncs(ev.Path)
+	fromWhy := e.notSynced(ev.Path)
+	from := fromWhy == ""
 	if ev.Op != fsevent.OpRename {
 		if from {
 			return false, nil
 		}
-		e.logf("[sync] skip     %s (in a conflicts folder this mount keeps to itself)", ev.Path)
+		e.logf("[sync] skip     %s (%s)", ev.Path, fromWhy)
 		return true, nil
 	}
-	to := e.conflicts.Syncs(ev.NewPath)
+	toWhy := e.notSynced(ev.NewPath)
+	to := toWhy == ""
 	switch {
 	case from && to:
 		return false, nil
 	case !from && !to:
-		e.logf("[sync] skip     %s -> %s (in a conflicts folder this mount keeps to itself)", ev.Path, ev.NewPath)
+		e.logf("[sync] skip     %s -> %s (%s)", ev.Path, ev.NewPath, fromWhy)
 		return true, nil
 	case !from:
 		fi, err := os.Lstat(filepath.Join(e.dataDir, filepath.FromSlash(ev.NewPath)))
 		if err != nil {
 			return true, nil //nolint:nilerr // gone already: nothing to push is not a failure
 		}
-		e.logf("[sync] restore  %s -> %s (out of a conflicts folder)", ev.Path, ev.NewPath)
+		e.logf("[sync] restore  %s -> %s (moved out of what this mount keeps out of its sync)", ev.Path, ev.NewPath)
 		if fi.IsDir() {
 			return true, e.pushTree(ctx, ev.NewPath)
 		}
@@ -1164,9 +1171,13 @@ func (e *Engine) pushAcrossConflictsFolder(ctx context.Context, ev fsevent.Event
 	e.forgetMovedSubtree(ev.Path, ev.NewPath)
 	e.entombPath(ev.Path, base)
 	e.mon.count(cDeletes, 1)
-	e.logf("[sync] delete   %s (moved into a conflicts folder this mount keeps to itself)", ev.Path)
+	e.logf("[sync] delete   %s (moved %s)", ev.Path, toWhy)
 	return true, nil
 }
+
+// notSynced is this engine's answer to "does this mount sync p?" (see the
+// package-level notSynced): "" when it does, else why not.
+func (e *Engine) notSynced(p string) string { return notSynced(e.conflicts, e.foreign, p) }
 
 // forgetMovedSubtree drops the records of everything that was under the
 // directory oldPath and is now under newPath, in one commit. A removal by
@@ -1216,7 +1227,7 @@ func (e *Engine) pushTree(ctx context.Context, rel string) error {
 			return err
 		}
 		r = filepath.ToSlash(r)
-		if !e.conflicts.Syncs(r) || reservedPath(r) {
+		if e.notSynced(r) != "" || reservedPath(r) {
 			if de.IsDir() {
 				return filepath.SkipDir
 			}

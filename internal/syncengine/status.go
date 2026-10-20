@@ -268,6 +268,9 @@ func (r StatusReader) one(e entry, t Transient, rec state.Record) (PathStatus, e
 	case inConflictDir(e.rel) && !r.Conflicts.Syncs(e.rel):
 		ps.Status, ps.Detail = StatusLocalOnly, "a conflicts folder this mount keeps to itself (conflicts-dir)"
 		return ps, nil
+	case nestedClaim(r.DataDir, e.rel) != "":
+		ps.Status, ps.Detail = StatusLocalOnly, "inside another drivel mount's backing store at "+nestedClaim(r.DataDir, e.rel)+"/: that mount syncs it"
+		return ps, nil
 	case base == ConflictDirName:
 		// Synced: falls through to the ordinary answer for a directory.
 	case strings.HasPrefix(base, ".drivel-"):

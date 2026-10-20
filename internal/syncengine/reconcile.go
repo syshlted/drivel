@@ -678,10 +678,10 @@ func (d *Downloader) applyPage(ctx context.Context, sw state.Sweep, files []prov
 
 	for i := range files {
 		f := files[i]
-		if !d.conflicts.Syncs(f.Path) {
+		if d.notSynced(f.Path) != "" {
 			// Marked seen above and otherwise left alone: a conflicts folder
-			// this mount keeps out of its sync is neither materialised nor
-			// counted.
+			// this mount keeps out of its sync, or another drivel's tree nested
+			// in this one, is neither materialised, deleted nor counted.
 			continue
 		}
 		if !d.standsForPath(f, st) {
@@ -908,7 +908,7 @@ func (d *Downloader) pushOwedRepairs(ctx context.Context, st *sweepStats, noRepu
 // tree is the authority on what that path is now, not what it was when the push
 // was abandoned.
 func (d *Downloader) repairEvent(rel string) (fsevent.Event, bool) {
-	if d.skipLocal(rel) {
+	if d.skipLocal(rel) || d.foreign.why(rel) != "" {
 		return fsevent.Event{}, false // what the walk would not push, the repair does not either
 	}
 	fi, err := os.Lstat(filepath.Join(d.dataDir, filepath.FromSlash(rel)))
@@ -1147,9 +1147,10 @@ func (d *Downloader) applyDeletes(ctx context.Context, sw state.Sweep, st *sweep
 		if !e.At.Before(sw.Started) {
 			return nil
 		}
-		if !d.conflicts.Syncs(p) {
-			// A baseline left by an earlier conflicts-dir = both. Neither side of
-			// it is this mount's to delete any more.
+		if d.notSynced(p) != "" {
+			// A baseline left by an earlier conflicts-dir = both, or synced
+			// before another drivel claimed that subtree. Neither side of it is
+			// this mount's to delete any more.
 			return nil
 		}
 		add(candidate{path: p, echo: e})

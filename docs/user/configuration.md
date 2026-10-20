@@ -466,14 +466,33 @@ its sweep leaves the inner directory alone and says so:
 [sweep] skip    bdata/ (another drivel mount's backing store: its contents are that mount's to sync)
 ```
 
-On Linux the sweep also skips another Drivel's *mountpoint* inside its tree. And
-Drivel refuses to upload a file another program holds locked for writing
-directly in the backing directory — which is what another Drivel's state database
-looks like while it runs:
+On Linux the sweep also skips another Drivel's *mountpoint* inside its tree.
+Nothing else touches either kind of directory: a file you write into one
+through this mount is not uploaded by this mount, nothing from this mount's
+backend is downloaded into it, and a deletion arriving from this mount's backend
+does not reach inside it:
+
+```
+[sync] skip     bdata/notes.txt (inside another drivel mount's backing store at bdata/: that mount syncs it)
+```
+
+Moving a file into such a directory is a deletion as far as this mount's
+backend is concerned, and moving one out is a new file. Before 20 October 2026
+only the sweep knew to stay out, so a file written into the other mount's
+directory through this one went to both backends.
+
+And Drivel refuses to upload a file another program holds locked for writing —
+which is what another Drivel's state database, or any database, looks like
+while it runs:
 
 ```
 [sync] skip theirs.db: another process holds it locked for writing (a live database?); not uploading it mid-write
 ```
+
+That covers a lock taken through the mount as well as one taken directly in the
+backing directory: `flock(2)` locks taken through the mount reach the file
+underneath (on Linux; POSIX `fcntl` locks are not passed through). A write
+made while somebody else held the lock is uploaded once the lock is released.
 
 The marker is never synced, in either direction: a file of that name is not
 uploaded, and a remote one is not downloaded over it. The marker file stays
