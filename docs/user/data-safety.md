@@ -140,13 +140,34 @@ and was never downloaded. On Google Drive and SFTP the check is part of the
 upload itself, so it costs nothing extra. Before 18 October 2026 only files of
 4 MiB or more were checked, and a smaller one was replaced without a trace.
 
-**One limit remains: the check and the upload are not one step on every
-backend.** Two machines uploading the same path within the same instant can
-still pass each other, and then the first one's edit is lost. On an OpenSSH
-server a new file is placed with a hard link, which refuses an existing name,
-so two first uploads cannot both win there. On Google Drive the edit that lost survives in the
-file's revision history. Before 17 October 2026 neither machine checked, and the
-edit that uploaded first was lost every time.
+**The check is made again at the end of the upload, not only before it.** A
+large upload takes a while, and another machine's edit can reach the remote
+while yours is still being sent. Since 20 October 2026 that is caught too:
+
+- On **SFTP**, Drivel looks once more immediately before moving the finished
+  upload into place, and if the file changed it stops without replacing
+  anything, keeps the other edit as a conflict copy, and uploads yours again.
+  What is left is the moment between that last look and the move, a single round
+  trip to the server.
+- On **Google Drive**, which has no way to refuse an upload over a changed file,
+  Drivel checks the file's revision history straight after its upload. If its
+  upload replaced somebody else's edit, that edit is downloaded from the
+  history and kept as a conflict copy:
+
+  ```
+  [sync] conflict report.txt: an edit made on the remote during this upload was replaced by it; kept it in .drivel-conflicts/report (conflict 2026-10-20 09-30-00).txt (here and on the remote)
+  ```
+
+  This costs nothing when nobody else touched the file. If something did — even
+  just renaming it or changing who it is shared with — it costs one extra
+  request to list the revisions.
+
+Two first uploads of a new file can still both succeed on Google Drive, as two
+files of the same name (see [same-name siblings](#same-name-siblings)). On an
+OpenSSH server a new file is placed with a hard link, which refuses an existing
+name, so two first uploads cannot both win there. Before 17 October 2026
+neither machine checked at all, and the edit that uploaded first was lost every
+time.
 
 ## Deletion
 
@@ -283,9 +304,10 @@ than a thousand files gone, and still not what you asked for.
 
 ## Metadata Drivel does not preserve
 
-The bytes of a file are what syncs. Three things about a file are not part of
-that, because Drive has nowhere to put them, and each is visible on your *other*
-machines rather than on the one you wrote from:
+The bytes of a file are what syncs. Here is what happens to three other things
+about it, each visible on your *other* machines rather than on the one you wrote
+from — permissions and holes have nowhere to live on the backend, so Drivel can
+only do its best on the receiving side:
 
 - **Permissions.** A file Drivel downloads for the first time is created by the
   same atomic write that stops you ever seeing a half-finished file, and that
@@ -297,10 +319,14 @@ machines rather than on the one you wrote from:
   backend never carries. (Before 20 October 2026 every download reset the file
   to `0600`.) The copy on the machine that wrote it keeps whatever mode you gave
   it.
-- **Modification times.** A downloaded file is stamped with the time the upload
-  reached the provider, not the time the file was written. Restore an archive
-  through a mount and your other machines will date every file in it to the
-  restore. Again, the machine that wrote it keeps the original.
+- **Modification times** do travel, since 20 October 2026: an upload carries the
+  file's own modification time to Google Drive and SFTP, and a download is
+  stamped with it, so a file is dated to its last edit on every machine. SFTP
+  keeps whole seconds and Google Drive milliseconds. Before, a file was dated to
+  the moment its upload reached the backend, so an archive restored through a
+  mount was dated to the restore everywhere else. One exception: on SFTP, an
+  edit Drivel sends as just the changed blocks of a large file leaves that file
+  dated to the upload.
 - **Holes in sparse files** are restored on the way down, not carried: an 8 MiB
   file holding 4 KiB of real data still uploads and downloads 8 MiB, because the
   backends have no notion of a hole, but Drivel leaves every all-zero 4 KiB block

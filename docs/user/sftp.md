@@ -174,11 +174,18 @@ of a large file is unaffected — that takes the offset path above, not this one
 
 **A remote edit can be missed in one narrow case.** With no checksum available,
 drivel identifies a remote file by its modification time and size — the same
-heuristic `rsync` uses without `--checksum`. SFTP reports modification times in
-whole seconds, so a remote edit that keeps a file's byte length *exactly* and
-lands in the same second as drivel's own last write to it is indistinguishable
-from drivel's own echo, and is not pulled until something else touches the file.
-It takes deliberate effort to hit; it is listed because it is real.
+heuristic `rsync` uses without `--checksum`. An upload carries the file's own
+modification time, and SFTP keeps it in whole seconds, so an edit that keeps a
+file's byte length *exactly* and was made in the same second as the version
+drivel last synced is indistinguishable from it, and is not pulled until
+something else touches the file. It takes deliberate effort to hit; it is listed
+because it is real.
+
+**An edit that reaches the server while drivel is uploading the same file is
+kept.** Just before moving its finished upload into place, drivel checks the
+file once more; if it changed, nothing is replaced, the other edit becomes a
+conflict copy, and drivel uploads again. Only the instant between that check and
+the move is left uncovered.
 
 **A renamed folder is downloaded again by your other machines.** Drivel finds
 remote changes here by listing the tree, and a listing cannot tell a rename from a
@@ -198,6 +205,8 @@ link during a sweep would let a loop run forever.
 
 **Permissions are not synced.** A file drivel uploads gets whatever mode your SSH
 account's umask gives it. Ownership, ACLs and extended attributes do not travel.
+Modification times do, except after an edit drivel sends as just the changed
+blocks of a large file, which leaves the server's copy dated to the upload.
 
 **An interrupted upload can leave a `.drivel-upload.*` file on the server.**
 Drivel uploads to a temporary name and renames it into place, so the real path

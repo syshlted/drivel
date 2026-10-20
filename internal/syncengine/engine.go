@@ -1324,7 +1324,7 @@ func (e *Engine) pushContent(ctx context.Context, p string, dirty *ranges.Set) e
 	if done {
 		return nil
 	}
-	proceed, create, err := e.preserveDivergedRemote(ctx, p, f, seen)
+	proceed, create, checked, err := e.preserveDivergedRemote(ctx, p, f, seen)
 	if err != nil || !proceed {
 		return err
 	}
@@ -1334,24 +1334,99 @@ func (e *Engine) pushContent(ctx context.Context, p string, dirty *ranges.Set) e
 		return err
 	}
 	if create {
-		done, err := e.createFirst(ctx, p, f)
+		done, checked2, err := e.createFirst(ctx, p, f)
 		if err != nil || done {
 			return err
 		}
+		checked = checked2
 	}
-	// Counted rather than taken from the Stat above, because the two disagree
-	// exactly when the number matters. A file still being written grows during its
-	// own push — Put streams to EOF, so the whole of it goes across — and the
-	// pre-transfer size then under-reports the transfer by however much arrived in
-	// the meantime: a 512 MiB copy was logged as 372 MiB (MC-40). This line is the
-	// instrument the campaign measures transfer volume with
-	// (docs/dev/multiclient-test-plan.md §2.7), so it reports what was sent.
-	counted := &countingReader{r: f}
-	rf, err := e.store.Put(ctx, p, counted)
+	rf, n, err := e.sendWhole(ctx, p, f, false, e.replacing(checked))
 	if err != nil {
 		return err
 	}
-	return e.uploaded(p, rf, f, counted.n)
+	return e.uploaded(p, rf, f, n)
+}
+
+// replacing is the remote a whole-file upload should expect to replace: the one
+// the divergence check just looked at and either found to be our baseline or
+// kept as a conflict copy. Nil when nothing was looked at, nothing was there,
+// or the mount asked to overwrite — then there is nothing to refuse over.
+func (e *Engine) replacing(checked remoteView) *provider.RemoteFile {
+	if !checked.statted || !checked.exists || checked.rf.IsDir || e.conflicts.action() == ConflictsOverwrite {
+		return nil
+	}
+	rf := checked.rf
+	return &rf
+}
+
+// sendWhole uploads f to p in full, reporting how many bytes went.
+//
+// Through provider.Uploader when the store offers it, which carries two things
+// a Put cannot: the local modification time, so every other client dates the
+// file to its last edit rather than to this upload, and the remote this push
+// expects to replace. A store that can refuse before replacing answers
+// ErrChanged, and the push is retried — the retry's divergence check then
+// keeps the newer remote as a conflict copy before it uploads. A store that can
+// only tell afterwards reports what it displaced, and that version is kept the
+// same way (keepDisplaced). Without the capability, Put or Create as before.
+//
+// Counted rather than taken from a Stat, because the two disagree exactly when
+// the number matters. A file still being written grows during its own push —
+// the upload streams to EOF, so the whole of it goes across — and the
+// pre-transfer size then under-reports the transfer by however much arrived in
+// the meantime: a 512 MiB copy was logged as 372 MiB (MC-40). The upload line
+// is the instrument the campaign measures transfer volume with
+// (docs/dev/multiclient-test-plan.md §2.7), so it reports what was sent.
+func (e *Engine) sendWhole(ctx context.Context, p string, f *os.File, create bool, replaces *provider.RemoteFile) (provider.RemoteFile, int64, error) {
+	counted := &countingReader{r: f}
+	if u, ok := provider.AsUploader(e.store); ok {
+		up, err := u.Upload(ctx, p, counted, provider.UploadOptions{
+			Create: create, Modified: modTimeOf(f), Replaces: replaces,
+		})
+		if errors.Is(err, provider.ErrChanged) {
+			return provider.RemoteFile{}, counted.n, remoteChangedError{err}
+		}
+		if err != nil {
+			return provider.RemoteFile{}, counted.n, err
+		}
+		if up.Displaced != nil {
+			e.keepDisplaced(ctx, p, *up.Displaced)
+		}
+		return up.File, counted.n, nil
+	}
+	if create {
+		c, _ := provider.AsCreator(e.store)
+		rf, err := c.Create(ctx, p, counted)
+		return rf, counted.n, err
+	}
+	rf, err := e.store.Put(ctx, p, counted)
+	return rf, counted.n, err
+}
+
+// keepDisplaced keeps a version an upload replaced unseen — somebody's edit
+// that reached the remote after this push last looked — as a §6 conflict copy,
+// read back through provider.VersionGetter. The upload has already happened,
+// so nothing here can fail the push: a version that cannot be kept is said to
+// be in the backend's own history, which is where it still is.
+func (e *Engine) keepDisplaced(ctx context.Context, p string, displaced provider.RemoteFile) {
+	if _, ok := provider.AsVersionGetter(e.store); !ok {
+		e.logf("[sync] conflict %s: this upload replaced an edit made on the remote meanwhile, and the backend cannot read it back; it is in the backend's version history", p)
+		e.mon.count(cConflicts, 1)
+		return
+	}
+	defer e.conflicts.lockPath(p)()
+	env := e.conflictEnv()
+	env.version = displaced.Version
+	where, err := e.conflicts.keepRemote(ctx, env, p, displaced)
+	switch {
+	case err != nil:
+		e.logf("[sync] conflict %s: this upload replaced an edit made on the remote meanwhile, and keeping it failed: %v (it is in the backend's version history)", p, err)
+	case where == "":
+		return // kept already
+	default:
+		e.logf("[sync] conflict %s: an edit made on the remote during this upload was replaced by it; kept it in %s", p, where)
+	}
+	e.mon.count(cConflicts, 1)
 }
 
 // createFirst is a first push through provider.Creator, reporting done when the
@@ -1359,28 +1434,26 @@ func (e *Engine) pushContent(ctx context.Context, p string, dirty *ranges.Set) e
 // record of, which goes through the same divergence check a Stat would have
 // fed — kept as a conflict copy, or recognised as these very bytes — and the
 // caller then uploads with Put as it would have anyway. f is rewound for it.
-func (e *Engine) createFirst(ctx context.Context, p string, f *os.File) (bool, error) {
-	c, _ := provider.AsCreator(e.store)
-	counted := &countingReader{r: f}
-	rf, err := c.Create(ctx, p, counted)
+func (e *Engine) createFirst(ctx context.Context, p string, f *os.File) (bool, remoteView, error) {
+	rf, n, err := e.sendWhole(ctx, p, f, true, nil)
 	if err == nil {
-		return true, e.uploaded(p, rf, f, counted.n)
+		return true, remoteView{}, e.uploaded(p, rf, f, n)
 	}
 	if !errors.Is(err, provider.ErrExist) {
-		return true, err
+		return true, remoteView{}, err
 	}
 	remote, exists, err := e.store.Stat(ctx, p)
 	if err != nil {
-		return true, err
+		return true, remoteView{}, err
 	}
-	proceed, _, err := e.preserveDivergedRemote(ctx, p, f, remoteView{statted: true, exists: exists, rf: remote})
+	proceed, _, checked, err := e.preserveDivergedRemote(ctx, p, f, remoteView{statted: true, exists: exists, rf: remote})
 	if err != nil || !proceed {
-		return true, err
+		return true, remoteView{}, err
 	}
 	if _, err := f.Seek(0, io.SeekStart); err != nil {
-		return true, err
+		return true, remoteView{}, err
 	}
-	return false, nil
+	return false, checked, nil
 }
 
 // uploaded records a whole-file upload of p that sent n bytes.
@@ -1438,6 +1511,18 @@ func (replacedError) Error() string {
 	return "the file was replaced during its upload; sending what is there now"
 }
 func (replacedError) Retryable() bool { return true }
+
+// remoteChangedError is an upload refused because the remote stopped being the
+// object this push checked (provider.ErrChanged). Retryable, because the retry
+// is the remedy: it looks at the remote again, keeps what it finds there as a
+// conflict copy, and expects to replace that instead.
+type remoteChangedError struct{ err error }
+
+func (e remoteChangedError) Error() string {
+	return "the remote changed during the upload, so nothing was replaced; looking at it again: " + e.err.Error()
+}
+func (e remoteChangedError) Unwrap() error { return e.err }
+func (remoteChangedError) Retryable() bool { return true }
 
 // countingReader reports how many bytes a store actually read out of a file. It
 // is not a progress meter: nothing reads n until the Put has returned.
@@ -1627,6 +1712,15 @@ func statOf(f *os.File) os.FileInfo {
 		return nil
 	}
 	return fi
+}
+
+// modTimeOf is f's modification time, or the zero time — which an upload reads
+// as "let the backend choose" — when it cannot be had.
+func modTimeOf(f *os.File) time.Time {
+	if fi := statOf(f); fi != nil {
+		return fi.ModTime()
+	}
+	return time.Time{}
 }
 
 // recordEcho notes the content we just pushed at rf.Path so the change-feed

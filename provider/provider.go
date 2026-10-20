@@ -45,6 +45,13 @@ var ErrCursorExpired = errors.New("provider: change cursor expired")
 // path is occupied, and must not have changed the path when it does.
 var ErrExist = errors.New("provider: path already exists")
 
+// ErrChanged is returned by Uploader.Upload when the caller said which object it
+// expected to replace (UploadOptions.Replaces) and the store found, before
+// replacing anything, that the path no longer holds it. The path must be left
+// untouched. The engine answers it by looking at the remote again, which keeps
+// the newer version as a conflict copy before the next attempt (DESIGN.md §6).
+var ErrChanged = errors.New("provider: remote object changed")
+
 // IsRetryable reports whether err is a transient failure worth retrying with
 // backoff (a rate limit, a 5xx, a dropped connection) rather than a permanent
 // one (bad request, permission denied, not found). A provider signals "retryable"
@@ -323,4 +330,84 @@ type Trasher interface {
 // returned Hash is how a caller that cares finds out.
 type Copier interface {
 	Copy(ctx context.Context, from, to string) (RemoteFile, error)
+}
+
+// Uploader is an OPTIONAL capability: Put and Create, given the facts an upload
+// can carry and the plain methods have no room for. A store that offers it is
+// uploaded to through it; one that does not gets Put and Create as before, and
+// loses only what the options would have bought.
+//
+// It exists for two of them. Modified, because a Put cannot set an object's
+// modification time, so every remote file was stamped with its upload time and
+// every other client dated the file to the upload. And Replaces, because the
+// engine checks the remote against its baseline with a Stat before replacing
+// it, and a write landing between that Stat and the end of the upload — the
+// whole duration of a large one — was replaced unseen: two clients' concurrent
+// edits ended with one of them gone and no conflict copy (DESIGN.md §6).
+//
+// Replaces asks the store to make that check as late as it can. A store that
+// can refuse before replacing returns ErrChanged and leaves the path alone. One
+// that can only find out afterwards — Drive has no conditional write — reports
+// the version it displaced in Uploaded.Displaced, readable through
+// VersionGetter for as long as the backend keeps it, and the engine keeps it as
+// the conflict's losing side. A store that can do neither ignores Replaces, and
+// is then exactly as safe as Put.
+type Uploader interface {
+	Upload(ctx context.Context, path string, r io.Reader, opts UploadOptions) (Uploaded, error)
+}
+
+// UploadOptions is what Uploader.Upload is told beyond the path and content.
+// The zero value asks for nothing and is Put.
+type UploadOptions struct {
+	// Create refuses an occupied path with ErrExist, exactly as Creator.Create
+	// does, and may do so before reading any content.
+	Create bool
+
+	// Modified is the modification time the object should carry, where the
+	// store keeps one it can set. It must be set as part of the upload, never as
+	// a second request after it: the store's change feed would otherwise report
+	// the object between the two, under an identity the engine has no record of,
+	// and the engine would read its own upload as somebody else's change. Zero
+	// leaves the time to the store.
+	Modified time.Time
+
+	// Replaces is the object the caller last saw at the path and means to
+	// replace: compared by Hash where both have one, else by Version, as the
+	// engine's own baselines are. Nil replaces whatever is there. Ignored with
+	// Create.
+	Replaces *RemoteFile
+}
+
+// Matches reports whether got is the content want describes, by the identity
+// UploadOptions.Replaces is compared with — the engine's own baseline rule:
+// the content checksum where either side has one, else the opaque version.
+// Two objects with neither are never the same, which is the safe answer for a
+// question whose wrong "yes" overwrites somebody's work.
+func Matches(want, got RemoteFile) bool {
+	if want.IsDir != got.IsDir {
+		return false
+	}
+	if want.Hash != "" || got.Hash != "" {
+		return want.Hash == got.Hash
+	}
+	return want.Version != "" && want.Version == got.Version
+}
+
+// Uploaded is the result of an Upload.
+type Uploaded struct {
+	File RemoteFile
+
+	// Displaced is the version this upload replaced when that was not
+	// Replaces, for a store that can tell only after the fact. Its Version is a
+	// name VersionGetter.GetVersion accepts. Nil when nothing unexpected was
+	// replaced, or when the store cannot say.
+	Displaced *RemoteFile
+}
+
+// VersionGetter is an OPTIONAL capability: reading a version of an object
+// other than its current content — the one an Upload displaced. version is a
+// RemoteFile.Version the store handed out in Uploaded.Displaced; any other value
+// may be refused. A store with no history does not implement it.
+type VersionGetter interface {
+	GetVersion(ctx context.Context, path, version string) (io.ReadCloser, error)
 }

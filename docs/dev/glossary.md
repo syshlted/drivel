@@ -35,7 +35,7 @@ means "it is new". No baseline ⇒ no deletion, ever.
 
 One of the optional interfaces beside `provider.Store` — `ChangeSource`,
 `Enumerator`, `RangeGetter`, `RangePutter`, `ContentHasher`, `Creator`,
-`Trasher`, `Copier`. Which of them a store
+`Trasher`, `Copier`, `Uploader`, `VersionGetter`. Which of them a store
 offers is asked through `provider.Capabilities` and the `As*` accessors, never by
 type assertion: a backend in another process is reached through one proxy type
 that has every optional method regardless of what is behind it. A store may

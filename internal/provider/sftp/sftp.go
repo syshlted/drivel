@@ -315,16 +315,7 @@ func do[T any](ctx context.Context, s *Store, fn func(c *conn) (T, error)) (T, e
 // of old temporaries is the open follow-up.
 func (s *Store) Put(ctx context.Context, p string, r io.Reader) (provider.RemoteFile, error) {
 	return do(ctx, s, func(c *conn) (provider.RemoteFile, error) {
-		abs := c.abs(p)
-		tmp, err := c.uploadTemp(abs, r)
-		if err != nil {
-			return provider.RemoteFile{}, err
-		}
-		if err := c.rename(tmp, abs); err != nil {
-			_ = c.cli.Remove(tmp)
-			return provider.RemoteFile{}, fmt.Errorf("renaming %s into place: %w", tmp, err)
-		}
-		return c.statFile(p, abs)
+		return c.upload(p, r, provider.UploadOptions{})
 	})
 }
 
@@ -339,14 +330,53 @@ func (s *Store) Put(ctx context.Context, p string, r io.Reader) (provider.Remote
 // round trip and no transfer.
 func (s *Store) Create(ctx context.Context, p string, r io.Reader) (provider.RemoteFile, error) {
 	return do(ctx, s, func(c *conn) (provider.RemoteFile, error) {
-		abs := c.abs(p)
+		return c.upload(p, r, provider.UploadOptions{Create: true})
+	})
+}
+
+// Upload implements provider.Uploader: Put and Create, carrying the local
+// modification time and checking what is about to be replaced.
+//
+// The time is set on the temporary, before it is renamed into place, so the
+// object never exists under the path with any other time — the property the
+// interface asks for, since a sweep listing it in between would read a version
+// the engine has no record of. Setting it on a temporary has one cost, which is
+// the stale-temporary reclaim in Enumerate: a file last modified more than a
+// day ago lands in a temporary that looks abandoned for the round trip before
+// its rename, and a sweep meeting it then removes it. The rename fails and the
+// engine's retry uploads it again. SFTP's mtime is whole seconds.
+//
+// Replaces is checked by a Stat of the destination immediately before the
+// rename, which is the latest moment SFTP allows: there is no conditional
+// rename. A write landing between that Stat and the rename is still replaced
+// unseen — but that window is one round trip, where the engine's own check
+// before the upload left the whole transfer open.
+func (s *Store) Upload(ctx context.Context, p string, r io.Reader, opts provider.UploadOptions) (provider.Uploaded, error) {
+	rf, err := do(ctx, s, func(c *conn) (provider.RemoteFile, error) {
+		return c.upload(p, r, opts)
+	})
+	return provider.Uploaded{File: rf}, err
+}
+
+// upload is Put, Create and Upload.
+func (c *conn) upload(p string, r io.Reader, opts provider.UploadOptions) (provider.RemoteFile, error) {
+	abs := c.abs(p)
+	if opts.Create {
 		if err := c.vacant(p, abs); err != nil {
 			return provider.RemoteFile{}, err
 		}
-		tmp, err := c.uploadTemp(abs, r)
-		if err != nil {
-			return provider.RemoteFile{}, err
+	}
+	tmp, err := c.uploadTemp(abs, r)
+	if err != nil {
+		return provider.RemoteFile{}, err
+	}
+	if !opts.Modified.IsZero() {
+		if err := c.cli.Chtimes(tmp, opts.Modified, opts.Modified); err != nil {
+			_ = c.cli.Remove(tmp)
+			return provider.RemoteFile{}, fmt.Errorf("stamping %s: %w", tmp, err)
 		}
+	}
+	if opts.Create {
 		defer func() { _ = c.cli.Remove(tmp) }() // a no-op after the fallback rename
 		if c.hardlink && c.cli.Link(tmp, abs) == nil {
 			return c.statFile(p, abs)
@@ -362,7 +392,36 @@ func (s *Store) Create(ctx context.Context, p string, r io.Reader) (provider.Rem
 			return provider.RemoteFile{}, fmt.Errorf("renaming %s into place: %w", tmp, err)
 		}
 		return c.statFile(p, abs)
-	})
+	}
+	if opts.Replaces != nil {
+		if err := c.stillHolds(p, abs, *opts.Replaces); err != nil {
+			_ = c.cli.Remove(tmp)
+			return provider.RemoteFile{}, err
+		}
+	}
+	if err := c.rename(tmp, abs); err != nil {
+		_ = c.cli.Remove(tmp)
+		return provider.RemoteFile{}, fmt.Errorf("renaming %s into place: %w", tmp, err)
+	}
+	return c.statFile(p, abs)
+}
+
+// stillHolds reports ErrChanged unless abs still holds the object want
+// describes. Gone counts as changed: replacing it would re-create a file
+// somebody deleted, which is for the engine to decide with the remote in view.
+func (c *conn) stillHolds(p, abs string, want provider.RemoteFile) error {
+	fi, err := c.cli.Stat(abs)
+	switch {
+	case err == nil:
+	case isNotExist(err):
+		return fmt.Errorf("replace %q: removed since it was last seen: %w", p, provider.ErrChanged)
+	default:
+		return err
+	}
+	if !provider.Matches(want, remoteFile(p, fi)) {
+		return fmt.Errorf("replace %q: changed since it was last seen: %w", p, provider.ErrChanged)
+	}
+	return nil
 }
 
 // vacant reports ErrExist when something stands at abs.

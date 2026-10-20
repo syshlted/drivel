@@ -143,15 +143,71 @@ func (s *server) Create(stream pb.Provider_CreateServer) error {
 	return receiveUpload(stream, c.Create)
 }
 
+// Upload serves provider.Uploader over Put's stream shape, its options read
+// from the first message.
+func (s *server) Upload(stream pb.Provider_UploadServer) error {
+	store, err := s.current()
+	if err != nil {
+		return err
+	}
+	u, ok := provider.AsUploader(store)
+	if !ok {
+		return unsupported(provider.CapUploader)
+	}
+	return receiveStream(stream, func(ctx context.Context, first *pb.PutRequest, r io.Reader) (*pb.UploadResponse, error) {
+		up, err := u.Upload(ctx, first.GetPath(), r, uploadOptionsFromPB(first.GetOptions()))
+		if err != nil {
+			return nil, err
+		}
+		out := &pb.UploadResponse{File: fileToPB(up.File)}
+		if up.Displaced != nil {
+			out.Displaced = fileToPB(*up.Displaced)
+		}
+		return out, nil
+	})
+}
+
+// GetVersion serves provider.VersionGetter, streamed as Get is.
+func (s *server) GetVersion(req *pb.GetVersionRequest, stream pb.Provider_GetVersionServer) error {
+	store, err := s.current()
+	if err != nil {
+		return err
+	}
+	v, ok := provider.AsVersionGetter(store)
+	if !ok {
+		return unsupported(provider.CapVersionGetter)
+	}
+	rc, err := v.GetVersion(stream.Context(), req.GetPath(), req.GetVersion())
+	if err != nil {
+		return encodeError(err)
+	}
+	return sendChunks(rc, stream.Send) // closes rc
+}
+
 // uploadServer is the server half of Put and Create.
-type uploadServer interface {
+type uploadServer = streamServer[*pb.FileResponse]
+
+// streamServer is the server half of an upload stream replying R.
+type streamServer[R any] interface {
 	Recv() (*pb.PutRequest, error)
-	SendAndClose(*pb.FileResponse) error
+	SendAndClose(R) error
 	Context() context.Context
 }
 
 // receiveUpload turns an upload stream into one call of put.
 func receiveUpload(stream uploadServer, put func(context.Context, string, io.Reader) (provider.RemoteFile, error)) error {
+	return receiveStream(stream, func(ctx context.Context, first *pb.PutRequest, r io.Reader) (*pb.FileResponse, error) {
+		rf, err := put(ctx, first.GetPath(), r)
+		if err != nil {
+			return nil, err
+		}
+		return &pb.FileResponse{File: fileToPB(rf)}, nil
+	})
+}
+
+// receiveStream turns an upload stream into one call of handle, given the first
+// message and a reader over the rest.
+func receiveStream[R any](stream streamServer[R], handle func(context.Context, *pb.PutRequest, io.Reader) (R, error)) error {
 	// The first message names the path and the rest are content, so the reader
 	// handed to the backend starts only once the path is known. chunkReader does
 	// the rest: it turns the remaining messages into an io.Reader without
@@ -160,8 +216,7 @@ func receiveUpload(stream uploadServer, put func(context.Context, string, io.Rea
 	if err != nil {
 		return encodeError(fmt.Errorf("put: reading the path: %w", err))
 	}
-	path := first.GetPath()
-	if path == "" && first.GetData() != nil {
+	if first.GetPath() == "" && first.GetData() != nil {
 		return encodeError(errors.New("put: content arrived before a path"))
 	}
 
@@ -172,7 +227,7 @@ func receiveUpload(stream uploadServer, put func(context.Context, string, io.Rea
 		}
 		return msg.GetData(), nil
 	}}
-	rf, err := put(stream.Context(), path, r)
+	resp, err := handle(stream.Context(), first, r)
 	if err != nil {
 		return encodeError(err)
 	}
@@ -180,7 +235,7 @@ func receiveUpload(stream uploadServer, put func(context.Context, string, io.Rea
 	// mid-send makes gRPC cancel the stream, and the host would see its own
 	// successful upload as a transport failure.
 	r.drain()
-	return stream.SendAndClose(&pb.FileResponse{File: fileToPB(rf)})
+	return stream.SendAndClose(resp)
 }
 
 func (s *server) Mkdir(ctx context.Context, req *pb.MkdirRequest) (*pb.FileResponse, error) {

@@ -13,6 +13,19 @@ from source with `make build`.
 
 ## Unreleased
 
+### Files keep their modification time, and an edit made during an upload is kept — 2026-10-20
+
+An upload now carries the file's own modification time, so your other machines
+date a file to when it was last edited rather than to when it was uploaded.
+
+And two machines editing one large file no longer lose an edit when one lands
+while the other is still uploading. On SFTP, Drivel checks again just before
+putting its upload in place and stops if the file changed, keeping the other edit
+as a conflict copy. On Google Drive, which cannot refuse an upload, Drivel checks
+the file's revision history afterwards and keeps any edit its upload replaced as
+a conflict copy. See
+[when both machines upload](docs/user/data-safety.md#when-both-machines-upload).
+
 ### Downloads keep a file's permissions, and come back sparse — 2026-10-20
 
 A download that replaces a file now keeps that file's permissions, so a script

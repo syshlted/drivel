@@ -81,9 +81,11 @@ func (s *remoteStore) Capabilities() provider.CapabilitySet { return s.caps }
 // ---------------------------------------------------------------- Store
 
 func (s *remoteStore) Put(ctx context.Context, path string, r io.Reader) (provider.RemoteFile, error) {
-	return s.upload(ctx, path, r, func(api pb.ProviderClient, sctx context.Context) (uploadStream, error) {
-		return api.Put(sctx)
-	})
+	resp, err := upload(ctx, s, &pb.PutRequest{Msg: &pb.PutRequest_Path{Path: path}}, path, r,
+		func(api pb.ProviderClient, sctx context.Context) (uploadStream[*pb.FileResponse], error) {
+			return api.Put(sctx)
+		})
+	return fileFromPB(resp.GetFile()), err
 }
 
 // Create is Put's refusing twin (provider.Creator). It runs the same stream
@@ -91,22 +93,62 @@ func (s *remoteStore) Put(ctx context.Context, path string, r io.Reader) (provid
 // upload already handles a backend that closes the stream mid-send, by asking
 // it why, which here is the KIND_EXIST the engine is waiting for.
 func (s *remoteStore) Create(ctx context.Context, path string, r io.Reader) (provider.RemoteFile, error) {
-	return s.upload(ctx, path, r, func(api pb.ProviderClient, sctx context.Context) (uploadStream, error) {
-		return api.Create(sctx)
-	})
+	resp, err := upload(ctx, s, &pb.PutRequest{Msg: &pb.PutRequest_Path{Path: path}}, path, r,
+		func(api pb.ProviderClient, sctx context.Context) (uploadStream[*pb.FileResponse], error) {
+			return api.Create(sctx)
+		})
+	return fileFromPB(resp.GetFile()), err
 }
 
-// uploadStream is the client half of Put and Create, which share a shape.
-type uploadStream interface {
-	Send(*pb.PutRequest) error
-	CloseAndRecv() (*pb.FileResponse, error)
+// Upload is Put with options (provider.Uploader): the same stream, with the
+// options riding on the first message beside the path.
+func (s *remoteStore) Upload(ctx context.Context, path string, r io.Reader, opts provider.UploadOptions) (provider.Uploaded, error) {
+	first := &pb.PutRequest{Msg: &pb.PutRequest_Path{Path: path}, Options: uploadOptionsToPB(opts)}
+	resp, err := upload(ctx, s, first, path, r,
+		func(api pb.ProviderClient, sctx context.Context) (uploadStream[*pb.UploadResponse], error) {
+			return api.Upload(sctx)
+		})
+	if err != nil {
+		return provider.Uploaded{}, err
+	}
+	out := provider.Uploaded{File: fileFromPB(resp.GetFile())}
+	if d := resp.GetDisplaced(); d != nil {
+		f := fileFromPB(d)
+		out.Displaced = &f
+	}
+	return out, nil
 }
 
-// upload streams r to path through whichever call open starts.
-func (s *remoteStore) upload(ctx context.Context, path string, r io.Reader, open func(pb.ProviderClient, context.Context) (uploadStream, error)) (provider.RemoteFile, error) {
+// GetVersion reads a displaced version (provider.VersionGetter). Like Get, the
+// stream has a context of its own that Close cancels.
+func (s *remoteStore) GetVersion(ctx context.Context, path, version string) (io.ReadCloser, error) {
 	api, _, err := s.sess.acquire(ctx)
 	if err != nil {
-		return provider.RemoteFile{}, err
+		return nil, err
+	}
+	sctx, cancel := context.WithCancel(ctx)
+	stream, err := api.GetVersion(sctx, &pb.GetVersionRequest{Path: path, Version: version})
+	if err != nil {
+		cancel()
+		return nil, decodeError(err)
+	}
+	return newStreamReadCloser(stream.Recv, cancel), nil
+}
+
+// uploadStream is the client half of Put, Create and Upload, which share a
+// shape and differ in their reply.
+type uploadStream[R any] interface {
+	Send(*pb.PutRequest) error
+	CloseAndRecv() (R, error)
+}
+
+// upload streams r to path through whichever call open starts, first being the
+// message that names the path.
+func upload[R any](ctx context.Context, s *remoteStore, first *pb.PutRequest, path string, r io.Reader, open func(pb.ProviderClient, context.Context) (uploadStream[R], error)) (R, error) {
+	var none R
+	api, _, err := s.sess.acquire(ctx)
+	if err != nil {
+		return none, err
 	}
 	// The stream gets a context this call owns, so that a local read failure can
 	// abort it rather than end it cleanly. See sendError.
@@ -115,12 +157,12 @@ func (s *remoteStore) upload(ctx context.Context, path string, r io.Reader, open
 
 	stream, err := open(api, sctx)
 	if err != nil {
-		return provider.RemoteFile{}, decodeError(err)
+		return none, decodeError(err)
 	}
 	// The path goes first and alone, so the backend can open its destination
 	// before a byte of content arrives.
-	if err := stream.Send(&pb.PutRequest{Msg: &pb.PutRequest_Path{Path: path}}); err != nil {
-		return provider.RemoteFile{}, decodeError(err)
+	if err := stream.Send(first); err != nil {
+		return none, decodeError(err)
 	}
 	if err := chunked(r, func(b []byte) error {
 		return stream.Send(&pb.PutRequest{Msg: &pb.PutRequest_Data{Data: b}})
@@ -131,21 +173,21 @@ func (s *remoteStore) upload(ctx context.Context, path string, r io.Reader, open
 			// cleanly would tell the backend the content ended here and it would
 			// store a truncated object and report success.
 			cancel()
-			return provider.RemoteFile{}, fmt.Errorf("reading %s to upload: %w", path, err)
+			return none, fmt.Errorf("reading %s to upload: %w", path, err)
 		}
 		// The wire failed, which usually means the backend already gave up and
 		// closed the stream. Its reason is the useful error; the send error is the
 		// symptom.
 		if _, rerr := stream.CloseAndRecv(); rerr != nil {
-			return provider.RemoteFile{}, decodeError(rerr)
+			return none, decodeError(rerr)
 		}
-		return provider.RemoteFile{}, decodeError(se.err)
+		return none, decodeError(se.err)
 	}
 	resp, err := stream.CloseAndRecv()
 	if err != nil {
-		return provider.RemoteFile{}, decodeError(err)
+		return none, decodeError(err)
 	}
-	return fileFromPB(resp.GetFile()), nil
+	return resp, nil
 }
 
 func (s *remoteStore) Mkdir(ctx context.Context, path string) (provider.RemoteFile, error) {

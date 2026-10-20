@@ -268,6 +268,39 @@ downloading and re-uploading it. Implement it only if no bytes cross the network
 the engine does already without it, and doing it below the seam would hide the
 cost.
 
+## 3d. (Optional) Implement `Uploader` and `VersionGetter`
+
+```go
+type Uploader interface {
+    Upload(ctx context.Context, path string, r io.Reader, opts provider.UploadOptions) (provider.Uploaded, error)
+}
+type VersionGetter interface {
+    GetVersion(ctx context.Context, path, version string) (io.ReadCloser, error)
+}
+```
+
+`Upload` is `Put` and `Create` with the facts a `Put` has no room for, and once
+a store offers it, every whole-file push goes through it. `opts.Create` is
+`Create`'s refusal. `opts.Modified` is the local file's modification time: set it
+**in the request that carries the content**, never with a second request after
+it, because a feed reporting the object between the two would show the engine an
+identity no baseline records. `opts.Replaces` is the remote the engine checked
+just before uploading. Compare it with `provider.Matches`, the engine's own
+rule. Then do one of three things:
+
+- **Refuse before replacing** if your protocol lets you look late. Return an
+  error wrapping `provider.ErrChanged`, and leave the path untouched. The engine
+  retries, keeps the newer remote as a conflict copy, and uploads again. SFTP
+  `Stat`s the destination just before its rename.
+- **Report afterwards** if it can only tell then. Fill `Uploaded.Displaced` with
+  the version your upload replaced, and implement `GetVersion` so the engine can
+  read it back and keep it. Drive lists revisions when its version counter moved
+  by more than one.
+- **Ignore it** if you can do neither. That is exactly as safe as `Put`, no less.
+
+Without `Upload`, files are dated to their upload on every other client, and an
+edit landing during an upload is replaced unseen.
+
 ## 4. Ship it
 
 A backend always runs in **its own process**, launched by drivel and reached over

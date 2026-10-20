@@ -98,7 +98,7 @@ func TestAPushWaitsForThePullResolvingItsPath(t *testing.T) {
 	}
 	pushed := make(chan result, 1)
 	go func() {
-		p, _, err := e.preserveDivergedRemote(context.Background(), "a.txt", f, remoteView{})
+		p, _, _, err := e.preserveDivergedRemote(context.Background(), "a.txt", f, remoteView{})
 		pushed <- result{p, err}
 	}()
 	close(hs.release)
@@ -152,7 +152,7 @@ func TestThePullWaitsForAPushResolvingItsPath(t *testing.T) {
 	}
 	pushed := make(chan result, 1)
 	go func() {
-		p, _, err := e.preserveDivergedRemote(context.Background(), "a.txt", f, remoteView{})
+		p, _, _, err := e.preserveDivergedRemote(context.Background(), "a.txt", f, remoteView{})
 		pushed <- result{p, err}
 	}()
 	<-hs.started

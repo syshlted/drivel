@@ -71,6 +71,11 @@ type config struct {
 	// visible in the journal, since HashContent notes the byte count it was
 	// actually given.
 	Digest string `toml:"digest"`
+	// Displace makes Upload behave like a backend with no conditional write:
+	// it replaces an object that is no longer UploadOptions.Replaces and then
+	// reports it in Uploaded.Displaced, readable through GetVersion, instead of
+	// refusing with ErrChanged first.
+	Displace bool `toml:"displace"`
 }
 
 func factory(_ context.Context, p provider.Params) (provider.Store, error) {
@@ -90,7 +95,7 @@ func factory(_ context.Context, p provider.Params) (provider.Store, error) {
 		_ = f.Close()
 	}
 	caps, _ := provider.CapabilitySetFromNames(cfg.Capabilities)
-	s := &fake{cfg: cfg, caps: caps, files: map[string][]byte{}}
+	s := &fake{cfg: cfg, caps: caps, files: map[string][]byte{}, mtimes: map[string]time.Time{}, versions: map[string][]byte{}}
 	for _, seed := range cfg.Seed {
 		path, body, _ := strings.Cut(seed, "=")
 		s.files[path] = []byte(body)
@@ -111,9 +116,11 @@ type fake struct {
 	cfg  config
 	caps provider.CapabilitySet
 
-	mu    sync.Mutex
-	files map[string][]byte
-	dirs  map[string]bool
+	mu       sync.Mutex
+	files    map[string][]byte
+	dirs     map[string]bool
+	mtimes   map[string]time.Time // set by Upload's Modified; fixedTime otherwise
+	versions map[string][]byte    // displaced versions, by the Version reported
 }
 
 func (f *fake) Capabilities() provider.CapabilitySet { return f.caps }
@@ -150,6 +157,8 @@ func (f *fake) gate(op string) error {
 		return fmt.Errorf("fake %s: %w", op, provider.ErrCursorExpired)
 	case "exist":
 		return fmt.Errorf("fake %s: %w", op, provider.ErrExist)
+	case "changed":
+		return fmt.Errorf("fake %s: %w", op, provider.ErrChanged)
 	case "retryable":
 		return retryable{fmt.Errorf("fake %s: try again", op)}
 	case "canceled":
@@ -174,6 +183,7 @@ func (f *fake) Put(_ context.Context, path string, r io.Reader) (provider.Remote
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.files[path] = body
+	delete(f.mtimes, path) // a Put carries no time: the backend's own again
 	f.note("put %s %d", path, len(body))
 	return f.stat(path), nil
 }
@@ -200,6 +210,65 @@ func (f *fake) Create(_ context.Context, path string, r io.Reader) (provider.Rem
 	f.files[path] = body
 	f.note("create %s %d", path, len(body))
 	return f.stat(path), nil
+}
+
+// Upload is Put and Create with options. Replaces is checked before anything is
+// written and refused with ErrChanged — unless Displace is configured, when the
+// upload goes ahead and what it replaced is reported afterwards.
+func (f *fake) Upload(_ context.Context, path string, r io.Reader, opts provider.UploadOptions) (provider.Uploaded, error) {
+	if err := f.gate("upload"); err != nil {
+		return provider.Uploaded{}, err
+	}
+	f.mu.Lock()
+	_, had := f.files[path]
+	var current provider.RemoteFile
+	if had {
+		current = f.stat(path)
+	}
+	f.mu.Unlock()
+	if opts.Create && had {
+		f.note("upload %s refused: exists", path)
+		return provider.Uploaded{}, fmt.Errorf("fake: %q: %w", path, provider.ErrExist)
+	}
+	moved := !opts.Create && opts.Replaces != nil && had && current.Hash != opts.Replaces.Hash
+	if moved && !f.cfg.Displace {
+		f.note("upload %s refused: changed", path)
+		return provider.Uploaded{}, fmt.Errorf("fake: %q: %w", path, provider.ErrChanged)
+	}
+	body, err := io.ReadAll(r)
+	if err != nil {
+		return provider.Uploaded{}, err
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var out provider.Uploaded
+	if moved {
+		d := current
+		d.Version = "was-" + current.Version
+		f.versions[d.Version] = f.files[path]
+		out.Displaced = &d
+	}
+	f.files[path] = body
+	if !opts.Modified.IsZero() {
+		f.mtimes[path] = opts.Modified
+	}
+	f.note("upload %s %d", path, len(body))
+	out.File = f.stat(path)
+	return out, nil
+}
+
+// GetVersion reads back a version Upload displaced.
+func (f *fake) GetVersion(_ context.Context, path, version string) (io.ReadCloser, error) {
+	if err := f.gate("get-version"); err != nil {
+		return nil, err
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	body, ok := f.versions[version]
+	if !ok {
+		return nil, fmt.Errorf("fake: %q at %q: %w", path, version, provider.ErrNotExist)
+	}
+	return io.NopCloser(strings.NewReader(string(body))), nil
 }
 
 // Trash removes path and says so differently from Remove, so a journal can tell
@@ -309,12 +378,16 @@ var fixedTime = time.Date(2026, 9, 11, 12, 0, 0, 123456000, time.UTC)
 // stat builds a RemoteFile. The caller holds f.mu.
 func (f *fake) stat(path string) provider.RemoteFile {
 	body := f.files[path]
+	mtime, ok := f.mtimes[path]
+	if !ok {
+		mtime = fixedTime
+	}
 	return provider.RemoteFile{
 		Path:     path,
 		Size:     int64(len(body)),
 		Hash:     fmt.Sprintf("len:%d", len(body)),
 		Version:  fmt.Sprintf("v%d", len(body)),
-		Modified: fixedTime,
+		Modified: mtime,
 	}
 }
 

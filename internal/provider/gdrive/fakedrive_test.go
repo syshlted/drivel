@@ -48,6 +48,18 @@ type fakeDrive struct {
 	// about content, not about IDs.
 	content map[string][]byte
 
+	// revs is each file's revision history, oldest first, as revisions.list
+	// returns it: one per content write. Drive serves a non-head revision's bytes
+	// only while it is marked keep-forever, and this fake enforces that, so a
+	// test that reads one proves the provider marked it first.
+	revs map[string][]*fakeRevision
+
+	// interloper, when set, runs inside an update with a body, before the update
+	// is applied — another client's write landing between the provider's last
+	// look at the file and its own write, which is the race Drive has no
+	// conditional update to refuse.
+	interloper func(f *fakeDrive, file *drive.File)
+
 	// srv is this fake's server, kept so that further clients can be attached to
 	// one remote — several machines syncing one Drive folder. See client.
 	srv *httptest.Server
@@ -58,6 +70,7 @@ type fakeDrive struct {
 	updates int // Files.Update with a body
 	copies  int // Files.Copy
 	deletes int // Files.Delete
+	revList int // Revisions.List
 
 	// nextID mints an opaque ID per create, as Drive does. It is what makes a
 	// same-name sibling possible at all: keying a created object by its name
@@ -147,11 +160,19 @@ type fakeDrive struct {
 // half of what verification does.
 const fakeRootID = "root-concrete"
 
+// fakeRevision is one revision of a file's content.
+type fakeRevision struct {
+	drive.Revision
+	body []byte
+}
+
 var (
-	reFileID   = regexp.MustCompile(`^/files/([^/]+)$`)
-	reFileCopy = regexp.MustCompile(`^/files/([^/]+)/copy$`)
-	reQueryOne = regexp.MustCompile(`name = '((?:[^'\\]|\\.)*)'`)
-	reQueryTwo = regexp.MustCompile(`'([^']*)' in parents`)
+	reRevisions = regexp.MustCompile(`^/files/([^/]+)/revisions$`)
+	reRevision  = regexp.MustCompile(`^/files/([^/]+)/revisions/([^/]+)$`)
+	reFileID    = regexp.MustCompile(`^/files/([^/]+)$`)
+	reFileCopy  = regexp.MustCompile(`^/files/([^/]+)/copy$`)
+	reQueryOne  = regexp.MustCompile(`name = '((?:[^'\\]|\\.)*)'`)
+	reQueryTwo  = regexp.MustCompile(`'([^']*)' in parents`)
 )
 
 func newFakeDrive(t *testing.T, files ...*drive.File) (*Drive, *fakeDrive) {
@@ -376,6 +397,46 @@ func (f *fakeDrive) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case strings.HasPrefix(r.URL.Path, uploadPath):
 		f.serveUpload(w, r)
 
+	case reRevisions.MatchString(fileIDPath) && r.Method == http.MethodGet:
+		id := f.normalize(reRevisions.FindStringSubmatch(fileIDPath)[1])
+		f.revList++
+		list := &drive.RevisionList{}
+		for _, rev := range f.revs[id] {
+			cp := rev.Revision
+			list.Revisions = append(list.Revisions, &cp)
+		}
+		writeJSON(w, list)
+
+	case reRevision.MatchString(fileIDPath):
+		m := reRevision.FindStringSubmatch(fileIDPath)
+		id, revID := f.normalize(m[1]), m[2]
+		var rev *fakeRevision
+		for _, x := range f.revs[id] {
+			if x.Id == revID {
+				rev = x
+			}
+		}
+		if rev == nil {
+			writeErr(w, http.StatusNotFound, "Revision not found: "+revID)
+			return
+		}
+		switch {
+		case r.Method == http.MethodPatch:
+			var in drive.Revision
+			_ = json.NewDecoder(r.Body).Decode(&in)
+			rev.KeepForever = in.KeepForever
+			writeJSON(w, rev.Revision)
+		case r.Method == http.MethodGet && r.URL.Query().Get("alt") == "media":
+			if revs := f.revs[id]; !rev.KeepForever && rev != revs[len(revs)-1] {
+				writeErr(w, http.StatusForbidden, "Only revisions marked keepForever can be downloaded")
+				return
+			}
+			w.Header().Set("Content-Type", "application/octet-stream")
+			_, _ = w.Write(rev.body)
+		default:
+			writeJSON(w, rev.Revision)
+		}
+
 	case reFileID.MatchString(fileIDPath) && r.Method == http.MethodGet:
 		id := f.normalize(fileIDFrom(fileIDPath))
 		got, ok := f.files[id]
@@ -498,10 +559,16 @@ func (f *fakeDrive) serveUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	f.updates++
+	if f.interloper != nil {
+		f.interloper(f, got)
+	}
 	if in.Name != "" {
 		got.Name = in.Name
 	}
 	f.writeBodyLocked(got, body)
+	if in.ModifiedTime != "" {
+		got.ModifiedTime = in.ModifiedTime
+	}
 	writeJSON(w, got)
 }
 
@@ -565,7 +632,11 @@ func (f *fakeDrive) createLocked(in *drive.File, body []byte) *drive.File {
 	}
 	in.Parents[0] = f.normalize(in.Parents[0])
 	f.files[in.Id] = in
+	asked := in.ModifiedTime
 	f.writeBodyLocked(in, body)
+	if asked != "" {
+		in.ModifiedTime = asked
+	}
 	return in
 }
 
@@ -583,6 +654,14 @@ func (f *fakeDrive) writeBodyLocked(file *drive.File, body []byte) {
 	sum := md5.Sum(body)
 	file.Md5Checksum = hex.EncodeToString(sum[:])
 	file.Size = int64(len(body))
+	if f.revs == nil {
+		f.revs = map[string][]*fakeRevision{}
+	}
+	rev := &fakeRevision{body: body}
+	rev.Id = fmt.Sprintf("rev-%d", f.clock)
+	rev.Md5Checksum, rev.Size, rev.ModifiedTime = file.Md5Checksum, file.Size, file.ModifiedTime
+	f.revs[file.Id] = append(f.revs[file.Id], rev)
+	file.HeadRevisionId = rev.Id
 }
 
 // fakeEpoch is the modifiedTime the seeded files carry, so every mutation the

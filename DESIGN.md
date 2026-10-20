@@ -1414,6 +1414,27 @@ are both lossy and racy.
   already resolves the path, so the refusal costs nothing there. SFTP links the
   temporary into place, which also makes the refusal atomic. A store without
   `Creator` pays one `Stat`. So files of every size are guarded.
+- **The `Stat`→`Put` gap is closed on SFTP and detected on Drive (2026-10-20)**,
+  through `provider.Uploader`: the engine hands the upload the remote it just
+  checked (`UploadOptions.Replaces`). SFTP `Stat`s the destination immediately
+  before its rename and refuses with `provider.ErrChanged`, which the engine
+  retries — the retry's divergence check keeps the newer remote as a copy and
+  replaces *that* — leaving one round trip of the upload's whole duration open.
+  Drive has no conditional update in v3 (v2's `etag`/`If-Match` did not
+  survive), so `gdrive` checks after the fact: a new `version` exactly one past
+  the checked one means nothing intervened and costs nothing; any larger step
+  lists revisions, and the one before the upload's own head is the content it
+  replaced. If that is not the checked hash, it comes back as
+  `Uploaded.Displaced`, and the engine reads it through
+  `provider.VersionGetter` — which marks the revision keep-forever, downloads
+  it, and unmarks it, since the guide says Drive serves a non-head blob
+  revision only while kept — and keeps it as the conflict's loser. Whether
+  Drive's own update moves `version` by exactly one is unmeasured: if it moves
+  by more, every rewrite pays one `revisions.list`, which is cost, not
+  correctness. The same capability carries the local mtime (`Modified`), in the
+  request that carries the content, so a file is dated to its last edit
+  everywhere — and so §6's last-writer-wins now compares two edit times rather
+  than an edit time and an upload time.
 - **Where the loser goes is configurable (2026-10-18)**, and who wins is not.
   `syncengine.Conflicts` is one value per mount, shared by the engine, the pull
   loop and the status reader, and every resolution calls its `keepLocal` (the

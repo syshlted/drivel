@@ -1104,9 +1104,18 @@ copy that cannot be fetched fails the push** (the engine's retry decides), never
 falls through to an overwrite. And **a local copy equal to its baseline is not
 pushed at all** over a newer remote — a touch used to push stale bytes over
 someone's edit — which needs the provider's digest, so hashless backends keep a
-copy instead. What remains: two pushes whose `Stat`s both precede either `Put`
-still lose one edit (no shipped backend has a conditional write; SFTP's
-`Create` closes it for two *first* pushes only). It costs one `Stat` per
+copy instead. **The `Stat`→`Put` gap behind it is narrowed on SFTP and detected
+on Drive since 2026-10-20** (`provider.Uploader`, `UploadOptions.Replaces`):
+SFTP re-`Stat`s right before its rename and refuses with `provider.ErrChanged`,
+which `Engine.sendWhole` turns into a retry whose divergence check keeps the
+newer remote first; Drive, with no conditional update in v3, checks afterwards
+— a `version` exactly one past the checked one is free, any larger step lists
+revisions — and reports the replaced revision in `Uploaded.Displaced`, which
+`keepDisplaced` reads back through `provider.VersionGetter` (keep-forever, read,
+unmark) and keeps as the loser. What remains is SFTP's one round trip between
+the re-`Stat` and the rename, and two *first* pushes on Drive (MC-30's siblings;
+SFTP's hard link closes those). The same capability carries the local mtime,
+in the content's own request, so remote mtimes are edit times now. It costs one `Stat` per
 small-file rewrite, which `TestSmallFileChecksTheRemoteOnlyWhenItHasABaseline`
 pins. **A path with no baseline is guarded at every size since 2026-10-18**,
 which was the cost decision this paragraph used to leave open: the first push
@@ -2081,7 +2090,11 @@ makes it different from `gdrive` follows from that plus one absence, so most of
    heuristic with the rsync caveat: SFTP's mtime is whole seconds, so a remote edit
    preserving the exact byte length *and* landing in the same second as our own
    write reads as our echo and is not pulled until something else touches the file.
-   Documented, not mitigated — the alternatives are worse.
+   Documented, not mitigated — the alternatives are worse. **Since 2026-10-20 the
+   mtime is the writer's local edit time, not the rename's** (`Upload` stamps the
+   temporary before it is renamed, so the object never shows another time), so
+   the collision is now two same-length edits in one second rather than two
+   uploads; a block-wise `PutRange` still leaves the server's time.
 6. **Host key verification fails closed and that IS the milestone.**
    `ssh.InsecureIgnoreHostKey` is absent from the tree and
    `TestInsecureIgnoreHostKeyIsAbsentFromTheTree` greps for it (it is a grep because
@@ -2371,10 +2384,13 @@ Ten things carry the correctness.
    files could then claim one kind with a resolution order that is either a
    directory listing or last-install-wins. Two files claiming one kind *by filename*
    resolve first-on-the-path-wins and the loser is named in the log.
-5. **Four error classifications are rebuilt on the far side, and each one lost is
+5. **Five error classifications are rebuilt on the far side, and each one lost is
    silent.** The plugin classifies (only it can see its backend's error types) and
    sends the classification as a gRPC status detail. `ErrExist` lost ⇒ a first
-   push over an unknown remote fails instead of keeping a conflict copy. `ErrNotExist` lost ⇒ renames
+   push over an unknown remote fails instead of keeping a conflict copy.
+   `ErrChanged` lost ⇒ a refused upload reads as a plain failure and is not
+   retried as a conflict (the engine wraps it retryable itself, but only if it
+   still *is* one). `ErrNotExist` lost ⇒ renames
    stop syncing. `ErrCursorExpired` lost ⇒ inbound sync stops forever, which is the
    bug the sentinel exists for. `IsRetryable` lost ⇒ the first 429 is permanent. The
    concrete error *type* is deliberately not preserved.

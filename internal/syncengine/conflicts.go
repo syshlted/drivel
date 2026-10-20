@@ -8,6 +8,7 @@ package syncengine
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"path"
 	"path/filepath"
@@ -281,6 +282,27 @@ type conflictEnv struct {
 	// half is deferred: the loser is safe on local disk before the caller goes
 	// on to replace it.
 	later func(copyRel string, job func(context.Context) string)
+
+	// version, when set, is the provider version keepRemote keeps instead of
+	// rel's current content: one an upload displaced (provider.Uploaded), read
+	// through provider.VersionGetter. The backend's own copy is never used for
+	// it, since that copies the current content — the winner.
+	version string
+}
+
+// fetchRemote downloads the remote side of a conflict at rel — its current
+// content, or env.version — into dst.
+func (env conflictEnv) fetchRemote(ctx context.Context, rel, dst string, modified time.Time) error {
+	if env.version == "" {
+		_, err := fetchTo(ctx, env.store, rel, dst, modified, env.observe)
+		return err
+	}
+	vg, ok := provider.AsVersionGetter(env.store)
+	if !ok {
+		return fmt.Errorf("version %s of %s: this backend cannot read back an older version", env.version, rel)
+	}
+	_, err := fetchFrom(func() (io.ReadCloser, error) { return vg.GetVersion(ctx, rel, env.version) }, dst, modified, env.observe)
+	return err
 }
 
 // finish runs job, the remote half of keeping the copy at copyRel, inline or
@@ -351,7 +373,7 @@ func (c *Conflicts) keepRemote(ctx context.Context, env conflictEnv, rel string,
 		if err != nil {
 			return "", err
 		}
-		if _, err := fetchTo(ctx, env.store, rel, e.Path, modified, env.observe); err != nil {
+		if err := env.fetchRemote(ctx, rel, e.Path, modified); err != nil {
 			e.Abandon()
 			return "", err
 		}
@@ -369,7 +391,7 @@ func (c *Conflicts) keepRemote(ctx context.Context, env conflictEnv, rel string,
 			where = w
 			break
 		}
-		if _, err := fetchTo(ctx, env.store, rel, dst, modified, env.observe); err != nil {
+		if err := env.fetchRemote(ctx, rel, dst, modified); err != nil {
 			return "", err
 		}
 		where = c.publish(ctx, env, copyRel)
@@ -390,7 +412,7 @@ func (c *Conflicts) keepRemote(ctx context.Context, env conflictEnv, rel string,
 // both sides the local copy is downloaded from the new remote copy rather than
 // from rel, so the two are the same version by construction.
 func (c *Conflicts) keepRemoteByCopy(ctx context.Context, env conflictEnv, rel, copyRel string, modified time.Time) (string, bool) {
-	if c.action() == ConflictsDir && c.place() == ConflictsLocal {
+	if c.action() == ConflictsDir && c.place() == ConflictsLocal || env.version != "" {
 		return "", false
 	}
 	cp, ok := provider.AsCopier(env.store)
@@ -494,7 +516,15 @@ func (c *Conflicts) upload(ctx context.Context, env conflictEnv, copyRel, src st
 		return err
 	}
 	defer f.Close()
-	rf, err := env.store.Put(ctx, copyRel, f)
+	var rf provider.RemoteFile
+	if u, ok := provider.AsUploader(env.store); ok {
+		// Dated as the loser was, which is also the time in the copy's name.
+		var up provider.Uploaded
+		up, err = u.Upload(ctx, copyRel, f, provider.UploadOptions{Modified: modTimeOf(f)})
+		rf = up.File
+	} else {
+		rf, err = env.store.Put(ctx, copyRel, f)
+	}
 	env.observe(err)
 	if err != nil {
 		return err

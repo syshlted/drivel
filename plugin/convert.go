@@ -96,3 +96,32 @@ func extentsFromPB(exts []*pb.Extent) []ranges.Range {
 	}
 	return out
 }
+
+// uploadOptionsToPB renders provider.UploadOptions for the first message of an
+// Upload stream. The zero value is an empty message.
+func uploadOptionsToPB(o provider.UploadOptions) *pb.UploadOptions {
+	out := &pb.UploadOptions{Create: o.Create}
+	if !o.Modified.IsZero() {
+		out.Modified = timestamppb.New(o.Modified)
+	}
+	if o.Replaces != nil {
+		out.Replaces = fileToPB(*o.Replaces)
+	}
+	return out
+}
+
+// uploadOptionsFromPB is uploadOptionsToPB's inverse; nil is the zero value.
+func uploadOptionsFromPB(o *pb.UploadOptions) provider.UploadOptions {
+	if o == nil {
+		return provider.UploadOptions{}
+	}
+	out := provider.UploadOptions{Create: o.GetCreate()}
+	if ts := o.GetModified(); ts != nil {
+		out.Modified = ts.AsTime()
+	}
+	if r := o.GetReplaces(); r != nil {
+		f := fileFromPB(r)
+		out.Replaces = &f
+	}
+	return out
+}

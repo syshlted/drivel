@@ -46,6 +46,12 @@ func (full) Create(context.Context, string, io.Reader) (RemoteFile, error) {
 	return RemoteFile{}, nil
 }
 func (full) Trash(context.Context, string) error { return nil }
+func (full) Upload(context.Context, string, io.Reader, UploadOptions) (Uploaded, error) {
+	return Uploaded{}, nil
+}
+
+func (full) GetVersion(context.Context, string, string) (io.ReadCloser, error) { return nil, nil }
+
 func (full) Copy(context.Context, string, string) (RemoteFile, error) {
 	return RemoteFile{}, nil
 }
@@ -124,6 +130,7 @@ func TestUnknownCapabilityBitsAreMasked(t *testing.T) {
 func TestCapabilityNamesRoundTrip(t *testing.T) {
 	for _, c := range []Capability{
 		CapChangeSource, CapEnumerator, CapRangeGetter, CapRangePutter, CapContentHasher, CapCreator, CapTrasher, CapCopier,
+		CapUploader, CapVersionGetter,
 	} {
 		got, ok := CapabilityByName(c.String())
 		if !ok || got != c {
@@ -149,7 +156,8 @@ func TestCapabilitySetFromNamesIgnoresUnknowns(t *testing.T) {
 // capability for every plugin built against the old spelling. Pinning them here
 // makes a rename a test failure instead.
 func TestCapabilityNamesArePinned(t *testing.T) {
-	want := []string{"change-source", "enumerator", "range-getter", "range-putter", "content-hasher", "creator", "trasher", "copier"}
+	want := []string{"change-source", "enumerator", "range-getter", "range-putter", "content-hasher", "creator", "trasher", "copier",
+		"uploader", "version-getter"}
 	if got := AllCapabilities.Names(); !slices.Equal(got, want) {
 		t.Errorf("capability names = %v; want %v (these cross the plugin protocol)", got, want)
 	}

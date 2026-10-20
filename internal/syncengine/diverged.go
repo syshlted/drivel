@@ -62,7 +62,16 @@ type remoteView struct {
 // path has no baseline and nothing has looked at the remote yet, and a Create
 // that refuses is how the check is made without a round trip of its own.
 // pushContent comes back here with the Stat a refusal calls for.
-func (e *Engine) preserveDivergedRemote(ctx context.Context, p string, f *os.File, seen remoteView) (proceed, create bool, err error) {
+func (e *Engine) preserveDivergedRemote(ctx context.Context, p string, f *os.File, seen remoteView) (proceed, create bool, checked remoteView, err error) {
+	proceed, create, err = e.checkRemote(ctx, p, f, &seen)
+	return proceed, create, seen, err
+}
+
+// checkRemote is preserveDivergedRemote, leaving in *seen the remote it judged —
+// which the upload that follows expects to replace (Engine.replacing).
+func (e *Engine) checkRemote(ctx context.Context, p string, f *os.File, view *remoteView) (proceed, create bool, err error) {
+	seen := *view
+	defer func() { *view = seen }()
 	if e.state == nil {
 		return true, false, nil
 	}
@@ -88,7 +97,9 @@ func (e *Engine) preserveDivergedRemote(ctx context.Context, p string, f *os.Fil
 			if e.conflicts.action() == ConflictsOverwrite {
 				return true, false, nil
 			}
-			if _, can := provider.AsCreator(e.store); can {
+			_, canCreate := provider.AsCreator(e.store)
+			_, canUpload := provider.AsUploader(e.store)
+			if canCreate || canUpload {
 				return true, true, nil
 			}
 			// No Creator: one Stat buys the same answer.
@@ -192,10 +203,16 @@ func (e *Engine) localDigest(f *os.File) (string, bool) {
 // observe sees the Get's outcome and nothing else — reachability is a fact
 // about the provider, and a full local disk is not one (M14).
 func fetchTo(ctx context.Context, store provider.Store, path, dst string, modified time.Time, observe func(error)) (int64, error) {
+	return fetchFrom(func() (io.ReadCloser, error) { return store.Get(ctx, path) }, dst, modified, observe)
+}
+
+// fetchFrom is fetchTo for content from any source: open is called once, after
+// the destination directory exists.
+func fetchFrom(open func() (io.ReadCloser, error), dst string, modified time.Time, observe func(error)) (int64, error) {
 	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
 		return 0, err
 	}
-	rc, err := store.Get(ctx, path)
+	rc, err := open()
 	observe(err)
 	if err != nil {
 		return 0, err

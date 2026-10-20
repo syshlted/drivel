@@ -56,6 +56,11 @@ const (
 	// CapCopier is Copier: a server-side copy, used to keep a remote conflict
 	// loser on the remote without moving its bytes.
 	CapCopier
+	// CapUploader is Uploader: an upload that can carry a modification time and
+	// say what it expects to replace.
+	CapUploader
+	// CapVersionGetter is VersionGetter: reading a version an upload displaced.
+	CapVersionGetter
 
 	// capMax is one past the last defined bit. Everything at or above it is a
 	// capability this build does not know about.
@@ -75,6 +80,8 @@ var capNames = [...]string{
 	"creator",
 	"trasher",
 	"copier",
+	"uploader",
+	"version-getter",
 }
 
 // String names the capability, or reports the raw bit if it is one this build
@@ -210,6 +217,12 @@ func Capabilities(s Store) CapabilitySet {
 	if _, ok := s.(Copier); ok {
 		have = have.With(CapCopier)
 	}
+	if _, ok := s.(Uploader); ok {
+		have = have.With(CapUploader)
+	}
+	if _, ok := s.(VersionGetter); ok {
+		have = have.With(CapVersionGetter)
+	}
 	if d, ok := s.(Declarer); ok {
 		have &= d.Capabilities() & AllCapabilities
 	}
@@ -289,4 +302,22 @@ func AsCopier(s Store) (Copier, bool) {
 	}
 	c, ok := s.(Copier)
 	return c, ok
+}
+
+// AsUploader returns s as an Uploader if it offers that capability.
+func AsUploader(s Store) (Uploader, bool) {
+	if !Capabilities(s).Has(CapUploader) {
+		return nil, false
+	}
+	u, ok := s.(Uploader)
+	return u, ok
+}
+
+// AsVersionGetter returns s as a VersionGetter if it offers that capability.
+func AsVersionGetter(s Store) (VersionGetter, bool) {
+	if !Capabilities(s).Has(CapVersionGetter) {
+		return nil, false
+	}
+	v, ok := s.(VersionGetter)
+	return v, ok
 }

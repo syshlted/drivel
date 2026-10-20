@@ -52,6 +52,7 @@ const (
 	Error_KIND_NOT_EXIST      Error_Kind = 1 // provider.ErrNotExist
 	Error_KIND_CURSOR_EXPIRED Error_Kind = 2 // provider.ErrCursorExpired
 	Error_KIND_EXIST          Error_Kind = 3 // provider.ErrExist
+	Error_KIND_CHANGED        Error_Kind = 4 // provider.ErrChanged
 )
 
 // Enum value maps for Error_Kind.
@@ -61,12 +62,14 @@ var (
 		1: "KIND_NOT_EXIST",
 		2: "KIND_CURSOR_EXPIRED",
 		3: "KIND_EXIST",
+		4: "KIND_CHANGED",
 	}
 	Error_Kind_value = map[string]int32{
 		"KIND_UNSPECIFIED":    0,
 		"KIND_NOT_EXIST":      1,
 		"KIND_CURSOR_EXPIRED": 2,
 		"KIND_EXIST":          3,
+		"KIND_CHANGED":        4,
 	}
 )
 
@@ -94,7 +97,7 @@ func (x Error_Kind) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use Error_Kind.Descriptor instead.
 func (Error_Kind) EnumDescriptor() ([]byte, []int) {
-	return file_drivel_plugin_v1_provider_proto_rawDescGZIP(), []int{28, 0}
+	return file_drivel_plugin_v1_provider_proto_rawDescGZIP(), []int{31, 0}
 }
 
 type OpenRequest struct {
@@ -510,7 +513,10 @@ type PutRequest struct {
 	//
 	//	*PutRequest_Path
 	//	*PutRequest_Data
-	Msg           isPutRequest_Msg `protobuf_oneof:"msg"`
+	Msg isPutRequest_Msg `protobuf_oneof:"msg"`
+	// options is provider.UploadOptions, read from the first message by Upload
+	// and by nothing else.
+	Options       *UploadOptions `protobuf:"bytes,3,opt,name=options,proto3" json:"options,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -570,6 +576,13 @@ func (x *PutRequest) GetData() []byte {
 	return nil
 }
 
+func (x *PutRequest) GetOptions() *UploadOptions {
+	if x != nil {
+		return x.Options
+	}
+	return nil
+}
+
 type isPutRequest_Msg interface {
 	isPutRequest_Msg()
 }
@@ -586,6 +599,174 @@ func (*PutRequest_Path) isPutRequest_Msg() {}
 
 func (*PutRequest_Data) isPutRequest_Msg() {}
 
+// UploadOptions is provider.UploadOptions.
+type UploadOptions struct {
+	state  protoimpl.MessageState `protogen:"open.v1"`
+	Create bool                   `protobuf:"varint,1,opt,name=create,proto3" json:"create,omitempty"`
+	// modified is unset for the zero time: let the backend choose.
+	Modified *timestamppb.Timestamp `protobuf:"bytes,2,opt,name=modified,proto3" json:"modified,omitempty"`
+	// replaces is unset to replace whatever stands at the path.
+	Replaces      *File `protobuf:"bytes,3,opt,name=replaces,proto3" json:"replaces,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *UploadOptions) Reset() {
+	*x = UploadOptions{}
+	mi := &file_drivel_plugin_v1_provider_proto_msgTypes[8]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *UploadOptions) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*UploadOptions) ProtoMessage() {}
+
+func (x *UploadOptions) ProtoReflect() protoreflect.Message {
+	mi := &file_drivel_plugin_v1_provider_proto_msgTypes[8]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use UploadOptions.ProtoReflect.Descriptor instead.
+func (*UploadOptions) Descriptor() ([]byte, []int) {
+	return file_drivel_plugin_v1_provider_proto_rawDescGZIP(), []int{8}
+}
+
+func (x *UploadOptions) GetCreate() bool {
+	if x != nil {
+		return x.Create
+	}
+	return false
+}
+
+func (x *UploadOptions) GetModified() *timestamppb.Timestamp {
+	if x != nil {
+		return x.Modified
+	}
+	return nil
+}
+
+func (x *UploadOptions) GetReplaces() *File {
+	if x != nil {
+		return x.Replaces
+	}
+	return nil
+}
+
+// UploadResponse is provider.Uploaded.
+type UploadResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	File          *File                  `protobuf:"bytes,1,opt,name=file,proto3" json:"file,omitempty"`
+	Displaced     *File                  `protobuf:"bytes,2,opt,name=displaced,proto3" json:"displaced,omitempty"` // unset when nothing unexpected was replaced
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *UploadResponse) Reset() {
+	*x = UploadResponse{}
+	mi := &file_drivel_plugin_v1_provider_proto_msgTypes[9]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *UploadResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*UploadResponse) ProtoMessage() {}
+
+func (x *UploadResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_drivel_plugin_v1_provider_proto_msgTypes[9]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use UploadResponse.ProtoReflect.Descriptor instead.
+func (*UploadResponse) Descriptor() ([]byte, []int) {
+	return file_drivel_plugin_v1_provider_proto_rawDescGZIP(), []int{9}
+}
+
+func (x *UploadResponse) GetFile() *File {
+	if x != nil {
+		return x.File
+	}
+	return nil
+}
+
+func (x *UploadResponse) GetDisplaced() *File {
+	if x != nil {
+		return x.Displaced
+	}
+	return nil
+}
+
+type GetVersionRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Path          string                 `protobuf:"bytes,1,opt,name=path,proto3" json:"path,omitempty"`
+	Version       string                 `protobuf:"bytes,2,opt,name=version,proto3" json:"version,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *GetVersionRequest) Reset() {
+	*x = GetVersionRequest{}
+	mi := &file_drivel_plugin_v1_provider_proto_msgTypes[10]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GetVersionRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GetVersionRequest) ProtoMessage() {}
+
+func (x *GetVersionRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_drivel_plugin_v1_provider_proto_msgTypes[10]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GetVersionRequest.ProtoReflect.Descriptor instead.
+func (*GetVersionRequest) Descriptor() ([]byte, []int) {
+	return file_drivel_plugin_v1_provider_proto_rawDescGZIP(), []int{10}
+}
+
+func (x *GetVersionRequest) GetPath() string {
+	if x != nil {
+		return x.Path
+	}
+	return ""
+}
+
+func (x *GetVersionRequest) GetVersion() string {
+	if x != nil {
+		return x.Version
+	}
+	return ""
+}
+
 type FileResponse struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	File          *File                  `protobuf:"bytes,1,opt,name=file,proto3" json:"file,omitempty"`
@@ -595,7 +776,7 @@ type FileResponse struct {
 
 func (x *FileResponse) Reset() {
 	*x = FileResponse{}
-	mi := &file_drivel_plugin_v1_provider_proto_msgTypes[8]
+	mi := &file_drivel_plugin_v1_provider_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -607,7 +788,7 @@ func (x *FileResponse) String() string {
 func (*FileResponse) ProtoMessage() {}
 
 func (x *FileResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_drivel_plugin_v1_provider_proto_msgTypes[8]
+	mi := &file_drivel_plugin_v1_provider_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -620,7 +801,7 @@ func (x *FileResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use FileResponse.ProtoReflect.Descriptor instead.
 func (*FileResponse) Descriptor() ([]byte, []int) {
-	return file_drivel_plugin_v1_provider_proto_rawDescGZIP(), []int{8}
+	return file_drivel_plugin_v1_provider_proto_rawDescGZIP(), []int{11}
 }
 
 func (x *FileResponse) GetFile() *File {
@@ -639,7 +820,7 @@ type MkdirRequest struct {
 
 func (x *MkdirRequest) Reset() {
 	*x = MkdirRequest{}
-	mi := &file_drivel_plugin_v1_provider_proto_msgTypes[9]
+	mi := &file_drivel_plugin_v1_provider_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -651,7 +832,7 @@ func (x *MkdirRequest) String() string {
 func (*MkdirRequest) ProtoMessage() {}
 
 func (x *MkdirRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_drivel_plugin_v1_provider_proto_msgTypes[9]
+	mi := &file_drivel_plugin_v1_provider_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -664,7 +845,7 @@ func (x *MkdirRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use MkdirRequest.ProtoReflect.Descriptor instead.
 func (*MkdirRequest) Descriptor() ([]byte, []int) {
-	return file_drivel_plugin_v1_provider_proto_rawDescGZIP(), []int{9}
+	return file_drivel_plugin_v1_provider_proto_rawDescGZIP(), []int{12}
 }
 
 func (x *MkdirRequest) GetPath() string {
@@ -684,7 +865,7 @@ type MoveRequest struct {
 
 func (x *MoveRequest) Reset() {
 	*x = MoveRequest{}
-	mi := &file_drivel_plugin_v1_provider_proto_msgTypes[10]
+	mi := &file_drivel_plugin_v1_provider_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -696,7 +877,7 @@ func (x *MoveRequest) String() string {
 func (*MoveRequest) ProtoMessage() {}
 
 func (x *MoveRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_drivel_plugin_v1_provider_proto_msgTypes[10]
+	mi := &file_drivel_plugin_v1_provider_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -709,7 +890,7 @@ func (x *MoveRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use MoveRequest.ProtoReflect.Descriptor instead.
 func (*MoveRequest) Descriptor() ([]byte, []int) {
-	return file_drivel_plugin_v1_provider_proto_rawDescGZIP(), []int{10}
+	return file_drivel_plugin_v1_provider_proto_rawDescGZIP(), []int{13}
 }
 
 func (x *MoveRequest) GetOldPath() string {
@@ -735,7 +916,7 @@ type RemoveRequest struct {
 
 func (x *RemoveRequest) Reset() {
 	*x = RemoveRequest{}
-	mi := &file_drivel_plugin_v1_provider_proto_msgTypes[11]
+	mi := &file_drivel_plugin_v1_provider_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -747,7 +928,7 @@ func (x *RemoveRequest) String() string {
 func (*RemoveRequest) ProtoMessage() {}
 
 func (x *RemoveRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_drivel_plugin_v1_provider_proto_msgTypes[11]
+	mi := &file_drivel_plugin_v1_provider_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -760,7 +941,7 @@ func (x *RemoveRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RemoveRequest.ProtoReflect.Descriptor instead.
 func (*RemoveRequest) Descriptor() ([]byte, []int) {
-	return file_drivel_plugin_v1_provider_proto_rawDescGZIP(), []int{11}
+	return file_drivel_plugin_v1_provider_proto_rawDescGZIP(), []int{14}
 }
 
 func (x *RemoveRequest) GetPath() string {
@@ -778,7 +959,7 @@ type RemoveResponse struct {
 
 func (x *RemoveResponse) Reset() {
 	*x = RemoveResponse{}
-	mi := &file_drivel_plugin_v1_provider_proto_msgTypes[12]
+	mi := &file_drivel_plugin_v1_provider_proto_msgTypes[15]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -790,7 +971,7 @@ func (x *RemoveResponse) String() string {
 func (*RemoveResponse) ProtoMessage() {}
 
 func (x *RemoveResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_drivel_plugin_v1_provider_proto_msgTypes[12]
+	mi := &file_drivel_plugin_v1_provider_proto_msgTypes[15]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -803,7 +984,7 @@ func (x *RemoveResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RemoveResponse.ProtoReflect.Descriptor instead.
 func (*RemoveResponse) Descriptor() ([]byte, []int) {
-	return file_drivel_plugin_v1_provider_proto_rawDescGZIP(), []int{12}
+	return file_drivel_plugin_v1_provider_proto_rawDescGZIP(), []int{15}
 }
 
 type GetRequest struct {
@@ -815,7 +996,7 @@ type GetRequest struct {
 
 func (x *GetRequest) Reset() {
 	*x = GetRequest{}
-	mi := &file_drivel_plugin_v1_provider_proto_msgTypes[13]
+	mi := &file_drivel_plugin_v1_provider_proto_msgTypes[16]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -827,7 +1008,7 @@ func (x *GetRequest) String() string {
 func (*GetRequest) ProtoMessage() {}
 
 func (x *GetRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_drivel_plugin_v1_provider_proto_msgTypes[13]
+	mi := &file_drivel_plugin_v1_provider_proto_msgTypes[16]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -840,7 +1021,7 @@ func (x *GetRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetRequest.ProtoReflect.Descriptor instead.
 func (*GetRequest) Descriptor() ([]byte, []int) {
-	return file_drivel_plugin_v1_provider_proto_rawDescGZIP(), []int{13}
+	return file_drivel_plugin_v1_provider_proto_rawDescGZIP(), []int{16}
 }
 
 func (x *GetRequest) GetPath() string {
@@ -859,7 +1040,7 @@ type StatRequest struct {
 
 func (x *StatRequest) Reset() {
 	*x = StatRequest{}
-	mi := &file_drivel_plugin_v1_provider_proto_msgTypes[14]
+	mi := &file_drivel_plugin_v1_provider_proto_msgTypes[17]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -871,7 +1052,7 @@ func (x *StatRequest) String() string {
 func (*StatRequest) ProtoMessage() {}
 
 func (x *StatRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_drivel_plugin_v1_provider_proto_msgTypes[14]
+	mi := &file_drivel_plugin_v1_provider_proto_msgTypes[17]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -884,7 +1065,7 @@ func (x *StatRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StatRequest.ProtoReflect.Descriptor instead.
 func (*StatRequest) Descriptor() ([]byte, []int) {
-	return file_drivel_plugin_v1_provider_proto_rawDescGZIP(), []int{14}
+	return file_drivel_plugin_v1_provider_proto_rawDescGZIP(), []int{17}
 }
 
 func (x *StatRequest) GetPath() string {
@@ -907,7 +1088,7 @@ type StatResponse struct {
 
 func (x *StatResponse) Reset() {
 	*x = StatResponse{}
-	mi := &file_drivel_plugin_v1_provider_proto_msgTypes[15]
+	mi := &file_drivel_plugin_v1_provider_proto_msgTypes[18]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -919,7 +1100,7 @@ func (x *StatResponse) String() string {
 func (*StatResponse) ProtoMessage() {}
 
 func (x *StatResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_drivel_plugin_v1_provider_proto_msgTypes[15]
+	mi := &file_drivel_plugin_v1_provider_proto_msgTypes[18]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -932,7 +1113,7 @@ func (x *StatResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StatResponse.ProtoReflect.Descriptor instead.
 func (*StatResponse) Descriptor() ([]byte, []int) {
-	return file_drivel_plugin_v1_provider_proto_rawDescGZIP(), []int{15}
+	return file_drivel_plugin_v1_provider_proto_rawDescGZIP(), []int{18}
 }
 
 func (x *StatResponse) GetFile() *File {
@@ -957,7 +1138,7 @@ type StartCursorRequest struct {
 
 func (x *StartCursorRequest) Reset() {
 	*x = StartCursorRequest{}
-	mi := &file_drivel_plugin_v1_provider_proto_msgTypes[16]
+	mi := &file_drivel_plugin_v1_provider_proto_msgTypes[19]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -969,7 +1150,7 @@ func (x *StartCursorRequest) String() string {
 func (*StartCursorRequest) ProtoMessage() {}
 
 func (x *StartCursorRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_drivel_plugin_v1_provider_proto_msgTypes[16]
+	mi := &file_drivel_plugin_v1_provider_proto_msgTypes[19]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -982,7 +1163,7 @@ func (x *StartCursorRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StartCursorRequest.ProtoReflect.Descriptor instead.
 func (*StartCursorRequest) Descriptor() ([]byte, []int) {
-	return file_drivel_plugin_v1_provider_proto_rawDescGZIP(), []int{16}
+	return file_drivel_plugin_v1_provider_proto_rawDescGZIP(), []int{19}
 }
 
 type StartCursorResponse struct {
@@ -994,7 +1175,7 @@ type StartCursorResponse struct {
 
 func (x *StartCursorResponse) Reset() {
 	*x = StartCursorResponse{}
-	mi := &file_drivel_plugin_v1_provider_proto_msgTypes[17]
+	mi := &file_drivel_plugin_v1_provider_proto_msgTypes[20]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1006,7 +1187,7 @@ func (x *StartCursorResponse) String() string {
 func (*StartCursorResponse) ProtoMessage() {}
 
 func (x *StartCursorResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_drivel_plugin_v1_provider_proto_msgTypes[17]
+	mi := &file_drivel_plugin_v1_provider_proto_msgTypes[20]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1019,7 +1200,7 @@ func (x *StartCursorResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StartCursorResponse.ProtoReflect.Descriptor instead.
 func (*StartCursorResponse) Descriptor() ([]byte, []int) {
-	return file_drivel_plugin_v1_provider_proto_rawDescGZIP(), []int{17}
+	return file_drivel_plugin_v1_provider_proto_rawDescGZIP(), []int{20}
 }
 
 func (x *StartCursorResponse) GetCursor() string {
@@ -1038,7 +1219,7 @@ type ChangesRequest struct {
 
 func (x *ChangesRequest) Reset() {
 	*x = ChangesRequest{}
-	mi := &file_drivel_plugin_v1_provider_proto_msgTypes[18]
+	mi := &file_drivel_plugin_v1_provider_proto_msgTypes[21]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1050,7 +1231,7 @@ func (x *ChangesRequest) String() string {
 func (*ChangesRequest) ProtoMessage() {}
 
 func (x *ChangesRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_drivel_plugin_v1_provider_proto_msgTypes[18]
+	mi := &file_drivel_plugin_v1_provider_proto_msgTypes[21]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1063,7 +1244,7 @@ func (x *ChangesRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ChangesRequest.ProtoReflect.Descriptor instead.
 func (*ChangesRequest) Descriptor() ([]byte, []int) {
-	return file_drivel_plugin_v1_provider_proto_rawDescGZIP(), []int{18}
+	return file_drivel_plugin_v1_provider_proto_rawDescGZIP(), []int{21}
 }
 
 func (x *ChangesRequest) GetCursor() string {
@@ -1083,7 +1264,7 @@ type ChangesResponse struct {
 
 func (x *ChangesResponse) Reset() {
 	*x = ChangesResponse{}
-	mi := &file_drivel_plugin_v1_provider_proto_msgTypes[19]
+	mi := &file_drivel_plugin_v1_provider_proto_msgTypes[22]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1095,7 +1276,7 @@ func (x *ChangesResponse) String() string {
 func (*ChangesResponse) ProtoMessage() {}
 
 func (x *ChangesResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_drivel_plugin_v1_provider_proto_msgTypes[19]
+	mi := &file_drivel_plugin_v1_provider_proto_msgTypes[22]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1108,7 +1289,7 @@ func (x *ChangesResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ChangesResponse.ProtoReflect.Descriptor instead.
 func (*ChangesResponse) Descriptor() ([]byte, []int) {
-	return file_drivel_plugin_v1_provider_proto_rawDescGZIP(), []int{19}
+	return file_drivel_plugin_v1_provider_proto_rawDescGZIP(), []int{22}
 }
 
 func (x *ChangesResponse) GetChanges() []*Change {
@@ -1134,7 +1315,7 @@ type EnumerateRequest struct {
 
 func (x *EnumerateRequest) Reset() {
 	*x = EnumerateRequest{}
-	mi := &file_drivel_plugin_v1_provider_proto_msgTypes[20]
+	mi := &file_drivel_plugin_v1_provider_proto_msgTypes[23]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1146,7 +1327,7 @@ func (x *EnumerateRequest) String() string {
 func (*EnumerateRequest) ProtoMessage() {}
 
 func (x *EnumerateRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_drivel_plugin_v1_provider_proto_msgTypes[20]
+	mi := &file_drivel_plugin_v1_provider_proto_msgTypes[23]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1159,7 +1340,7 @@ func (x *EnumerateRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use EnumerateRequest.ProtoReflect.Descriptor instead.
 func (*EnumerateRequest) Descriptor() ([]byte, []int) {
-	return file_drivel_plugin_v1_provider_proto_rawDescGZIP(), []int{20}
+	return file_drivel_plugin_v1_provider_proto_rawDescGZIP(), []int{23}
 }
 
 func (x *EnumerateRequest) GetCursor() string {
@@ -1182,7 +1363,7 @@ type EnumerateResponse struct {
 
 func (x *EnumerateResponse) Reset() {
 	*x = EnumerateResponse{}
-	mi := &file_drivel_plugin_v1_provider_proto_msgTypes[21]
+	mi := &file_drivel_plugin_v1_provider_proto_msgTypes[24]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1194,7 +1375,7 @@ func (x *EnumerateResponse) String() string {
 func (*EnumerateResponse) ProtoMessage() {}
 
 func (x *EnumerateResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_drivel_plugin_v1_provider_proto_msgTypes[21]
+	mi := &file_drivel_plugin_v1_provider_proto_msgTypes[24]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1207,7 +1388,7 @@ func (x *EnumerateResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use EnumerateResponse.ProtoReflect.Descriptor instead.
 func (*EnumerateResponse) Descriptor() ([]byte, []int) {
-	return file_drivel_plugin_v1_provider_proto_rawDescGZIP(), []int{21}
+	return file_drivel_plugin_v1_provider_proto_rawDescGZIP(), []int{24}
 }
 
 func (x *EnumerateResponse) GetFiles() []*File {
@@ -1235,7 +1416,7 @@ type GetRangeRequest struct {
 
 func (x *GetRangeRequest) Reset() {
 	*x = GetRangeRequest{}
-	mi := &file_drivel_plugin_v1_provider_proto_msgTypes[22]
+	mi := &file_drivel_plugin_v1_provider_proto_msgTypes[25]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1247,7 +1428,7 @@ func (x *GetRangeRequest) String() string {
 func (*GetRangeRequest) ProtoMessage() {}
 
 func (x *GetRangeRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_drivel_plugin_v1_provider_proto_msgTypes[22]
+	mi := &file_drivel_plugin_v1_provider_proto_msgTypes[25]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1260,7 +1441,7 @@ func (x *GetRangeRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetRangeRequest.ProtoReflect.Descriptor instead.
 func (*GetRangeRequest) Descriptor() ([]byte, []int) {
-	return file_drivel_plugin_v1_provider_proto_rawDescGZIP(), []int{22}
+	return file_drivel_plugin_v1_provider_proto_rawDescGZIP(), []int{25}
 }
 
 func (x *GetRangeRequest) GetPath() string {
@@ -1295,7 +1476,7 @@ type Extent struct {
 
 func (x *Extent) Reset() {
 	*x = Extent{}
-	mi := &file_drivel_plugin_v1_provider_proto_msgTypes[23]
+	mi := &file_drivel_plugin_v1_provider_proto_msgTypes[26]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1307,7 +1488,7 @@ func (x *Extent) String() string {
 func (*Extent) ProtoMessage() {}
 
 func (x *Extent) ProtoReflect() protoreflect.Message {
-	mi := &file_drivel_plugin_v1_provider_proto_msgTypes[23]
+	mi := &file_drivel_plugin_v1_provider_proto_msgTypes[26]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1320,7 +1501,7 @@ func (x *Extent) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Extent.ProtoReflect.Descriptor instead.
 func (*Extent) Descriptor() ([]byte, []int) {
-	return file_drivel_plugin_v1_provider_proto_rawDescGZIP(), []int{23}
+	return file_drivel_plugin_v1_provider_proto_rawDescGZIP(), []int{26}
 }
 
 func (x *Extent) GetOff() int64 {
@@ -1354,7 +1535,7 @@ type PutRangeRequest struct {
 
 func (x *PutRangeRequest) Reset() {
 	*x = PutRangeRequest{}
-	mi := &file_drivel_plugin_v1_provider_proto_msgTypes[24]
+	mi := &file_drivel_plugin_v1_provider_proto_msgTypes[27]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1366,7 +1547,7 @@ func (x *PutRangeRequest) String() string {
 func (*PutRangeRequest) ProtoMessage() {}
 
 func (x *PutRangeRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_drivel_plugin_v1_provider_proto_msgTypes[24]
+	mi := &file_drivel_plugin_v1_provider_proto_msgTypes[27]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1379,7 +1560,7 @@ func (x *PutRangeRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PutRangeRequest.ProtoReflect.Descriptor instead.
 func (*PutRangeRequest) Descriptor() ([]byte, []int) {
-	return file_drivel_plugin_v1_provider_proto_rawDescGZIP(), []int{24}
+	return file_drivel_plugin_v1_provider_proto_rawDescGZIP(), []int{27}
 }
 
 func (x *PutRangeRequest) GetPath() string {
@@ -1419,7 +1600,7 @@ type HashContentResponse struct {
 
 func (x *HashContentResponse) Reset() {
 	*x = HashContentResponse{}
-	mi := &file_drivel_plugin_v1_provider_proto_msgTypes[25]
+	mi := &file_drivel_plugin_v1_provider_proto_msgTypes[28]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1431,7 +1612,7 @@ func (x *HashContentResponse) String() string {
 func (*HashContentResponse) ProtoMessage() {}
 
 func (x *HashContentResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_drivel_plugin_v1_provider_proto_msgTypes[25]
+	mi := &file_drivel_plugin_v1_provider_proto_msgTypes[28]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1444,7 +1625,7 @@ func (x *HashContentResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HashContentResponse.ProtoReflect.Descriptor instead.
 func (*HashContentResponse) Descriptor() ([]byte, []int) {
-	return file_drivel_plugin_v1_provider_proto_rawDescGZIP(), []int{25}
+	return file_drivel_plugin_v1_provider_proto_rawDescGZIP(), []int{28}
 }
 
 func (x *HashContentResponse) GetHash() string {
@@ -1466,7 +1647,7 @@ type ReadAtRequest struct {
 
 func (x *ReadAtRequest) Reset() {
 	*x = ReadAtRequest{}
-	mi := &file_drivel_plugin_v1_provider_proto_msgTypes[26]
+	mi := &file_drivel_plugin_v1_provider_proto_msgTypes[29]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1478,7 +1659,7 @@ func (x *ReadAtRequest) String() string {
 func (*ReadAtRequest) ProtoMessage() {}
 
 func (x *ReadAtRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_drivel_plugin_v1_provider_proto_msgTypes[26]
+	mi := &file_drivel_plugin_v1_provider_proto_msgTypes[29]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1491,7 +1672,7 @@ func (x *ReadAtRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ReadAtRequest.ProtoReflect.Descriptor instead.
 func (*ReadAtRequest) Descriptor() ([]byte, []int) {
-	return file_drivel_plugin_v1_provider_proto_rawDescGZIP(), []int{26}
+	return file_drivel_plugin_v1_provider_proto_rawDescGZIP(), []int{29}
 }
 
 func (x *ReadAtRequest) GetOff() int64 {
@@ -1527,7 +1708,7 @@ type ReadAtResponse struct {
 
 func (x *ReadAtResponse) Reset() {
 	*x = ReadAtResponse{}
-	mi := &file_drivel_plugin_v1_provider_proto_msgTypes[27]
+	mi := &file_drivel_plugin_v1_provider_proto_msgTypes[30]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1539,7 +1720,7 @@ func (x *ReadAtResponse) String() string {
 func (*ReadAtResponse) ProtoMessage() {}
 
 func (x *ReadAtResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_drivel_plugin_v1_provider_proto_msgTypes[27]
+	mi := &file_drivel_plugin_v1_provider_proto_msgTypes[30]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1552,7 +1733,7 @@ func (x *ReadAtResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ReadAtResponse.ProtoReflect.Descriptor instead.
 func (*ReadAtResponse) Descriptor() ([]byte, []int) {
-	return file_drivel_plugin_v1_provider_proto_rawDescGZIP(), []int{27}
+	return file_drivel_plugin_v1_provider_proto_rawDescGZIP(), []int{30}
 }
 
 func (x *ReadAtResponse) GetData() []byte {
@@ -1591,7 +1772,7 @@ type Error struct {
 
 func (x *Error) Reset() {
 	*x = Error{}
-	mi := &file_drivel_plugin_v1_provider_proto_msgTypes[28]
+	mi := &file_drivel_plugin_v1_provider_proto_msgTypes[31]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1603,7 +1784,7 @@ func (x *Error) String() string {
 func (*Error) ProtoMessage() {}
 
 func (x *Error) ProtoReflect() protoreflect.Message {
-	mi := &file_drivel_plugin_v1_provider_proto_msgTypes[28]
+	mi := &file_drivel_plugin_v1_provider_proto_msgTypes[31]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1616,7 +1797,7 @@ func (x *Error) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Error.ProtoReflect.Descriptor instead.
 func (*Error) Descriptor() ([]byte, []int) {
-	return file_drivel_plugin_v1_provider_proto_rawDescGZIP(), []int{28}
+	return file_drivel_plugin_v1_provider_proto_rawDescGZIP(), []int{31}
 }
 
 func (x *Error) GetKind() Error_Kind {
@@ -1668,12 +1849,23 @@ const file_drivel_plugin_v1_provider_proto_rawDesc = "" +
 	"\n" +
 	"moved_from\x18\x04 \x01(\tR\tmovedFrom\"\x1b\n" +
 	"\x05Chunk\x12\x12\n" +
-	"\x04data\x18\x01 \x01(\fR\x04data\"?\n" +
+	"\x04data\x18\x01 \x01(\fR\x04data\"z\n" +
 	"\n" +
 	"PutRequest\x12\x14\n" +
 	"\x04path\x18\x01 \x01(\tH\x00R\x04path\x12\x14\n" +
-	"\x04data\x18\x02 \x01(\fH\x00R\x04dataB\x05\n" +
-	"\x03msg\":\n" +
+	"\x04data\x18\x02 \x01(\fH\x00R\x04data\x129\n" +
+	"\aoptions\x18\x03 \x01(\v2\x1f.drivel.plugin.v1.UploadOptionsR\aoptionsB\x05\n" +
+	"\x03msg\"\x93\x01\n" +
+	"\rUploadOptions\x12\x16\n" +
+	"\x06create\x18\x01 \x01(\bR\x06create\x126\n" +
+	"\bmodified\x18\x02 \x01(\v2\x1a.google.protobuf.TimestampR\bmodified\x122\n" +
+	"\breplaces\x18\x03 \x01(\v2\x16.drivel.plugin.v1.FileR\breplaces\"r\n" +
+	"\x0eUploadResponse\x12*\n" +
+	"\x04file\x18\x01 \x01(\v2\x16.drivel.plugin.v1.FileR\x04file\x124\n" +
+	"\tdisplaced\x18\x02 \x01(\v2\x16.drivel.plugin.v1.FileR\tdisplaced\"A\n" +
+	"\x11GetVersionRequest\x12\x12\n" +
+	"\x04path\x18\x01 \x01(\tR\x04path\x12\x18\n" +
+	"\aversion\x18\x02 \x01(\tR\aversion\":\n" +
 	"\fFileResponse\x12*\n" +
 	"\x04file\x18\x01 \x01(\v2\x16.drivel.plugin.v1.FileR\x04file\"\"\n" +
 	"\fMkdirRequest\x12\x12\n" +
@@ -1725,18 +1917,18 @@ const file_drivel_plugin_v1_provider_proto_rawDesc = "" +
 	"\x06handle\x18\x03 \x01(\x04R\x06handle\"6\n" +
 	"\x0eReadAtResponse\x12\x12\n" +
 	"\x04data\x18\x01 \x01(\fR\x04data\x12\x10\n" +
-	"\x03eof\x18\x02 \x01(\bR\x03eof\"\xcc\x01\n" +
+	"\x03eof\x18\x02 \x01(\bR\x03eof\"\xde\x01\n" +
 	"\x05Error\x120\n" +
 	"\x04kind\x18\x01 \x01(\x0e2\x1c.drivel.plugin.v1.Error.KindR\x04kind\x12\x1c\n" +
 	"\tretryable\x18\x02 \x01(\bR\tretryable\x12\x18\n" +
-	"\amessage\x18\x03 \x01(\tR\amessage\"Y\n" +
+	"\amessage\x18\x03 \x01(\tR\amessage\"k\n" +
 	"\x04Kind\x12\x14\n" +
 	"\x10KIND_UNSPECIFIED\x10\x00\x12\x12\n" +
 	"\x0eKIND_NOT_EXIST\x10\x01\x12\x17\n" +
 	"\x13KIND_CURSOR_EXPIRED\x10\x02\x12\x0e\n" +
 	"\n" +
-	"KIND_EXIST\x10\x032\x8f\n" +
-	"\n" +
+	"KIND_EXIST\x10\x03\x12\x10\n" +
+	"\fKIND_CHANGED\x10\x042\xa9\v\n" +
 	"\bProvider\x12E\n" +
 	"\x04Open\x12\x1d.drivel.plugin.v1.OpenRequest\x1a\x1e.drivel.plugin.v1.OpenResponse\x12H\n" +
 	"\x05Close\x12\x1e.drivel.plugin.v1.CloseRequest\x1a\x1f.drivel.plugin.v1.CloseResponse\x12E\n" +
@@ -1754,7 +1946,10 @@ const file_drivel_plugin_v1_provider_proto_rawDesc = "" +
 	"\vHashContent\x12\x17.drivel.plugin.v1.Chunk\x1a%.drivel.plugin.v1.HashContentResponse(\x01\x12H\n" +
 	"\x06Create\x12\x1c.drivel.plugin.v1.PutRequest\x1a\x1e.drivel.plugin.v1.FileResponse(\x01\x12J\n" +
 	"\x05Trash\x12\x1f.drivel.plugin.v1.RemoveRequest\x1a .drivel.plugin.v1.RemoveResponse\x12E\n" +
-	"\x04Copy\x12\x1d.drivel.plugin.v1.MoveRequest\x1a\x1e.drivel.plugin.v1.FileResponse2V\n" +
+	"\x04Copy\x12\x1d.drivel.plugin.v1.MoveRequest\x1a\x1e.drivel.plugin.v1.FileResponse\x12J\n" +
+	"\x06Upload\x12\x1c.drivel.plugin.v1.PutRequest\x1a .drivel.plugin.v1.UploadResponse(\x01\x12L\n" +
+	"\n" +
+	"GetVersion\x12#.drivel.plugin.v1.GetVersionRequest\x1a\x17.drivel.plugin.v1.Chunk0\x012V\n" +
 	"\aContent\x12K\n" +
 	"\x06ReadAt\x12\x1f.drivel.plugin.v1.ReadAtRequest\x1a .drivel.plugin.v1.ReadAtResponseB2Z0github.com/syshlted/drivel/plugin/internal/pb;pbb\x06proto3"
 
@@ -1771,7 +1966,7 @@ func file_drivel_plugin_v1_provider_proto_rawDescGZIP() []byte {
 }
 
 var file_drivel_plugin_v1_provider_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
-var file_drivel_plugin_v1_provider_proto_msgTypes = make([]protoimpl.MessageInfo, 29)
+var file_drivel_plugin_v1_provider_proto_msgTypes = make([]protoimpl.MessageInfo, 32)
 var file_drivel_plugin_v1_provider_proto_goTypes = []any{
 	(Error_Kind)(0),               // 0: drivel.plugin.v1.Error.Kind
 	(*OpenRequest)(nil),           // 1: drivel.plugin.v1.OpenRequest
@@ -1782,79 +1977,91 @@ var file_drivel_plugin_v1_provider_proto_goTypes = []any{
 	(*Change)(nil),                // 6: drivel.plugin.v1.Change
 	(*Chunk)(nil),                 // 7: drivel.plugin.v1.Chunk
 	(*PutRequest)(nil),            // 8: drivel.plugin.v1.PutRequest
-	(*FileResponse)(nil),          // 9: drivel.plugin.v1.FileResponse
-	(*MkdirRequest)(nil),          // 10: drivel.plugin.v1.MkdirRequest
-	(*MoveRequest)(nil),           // 11: drivel.plugin.v1.MoveRequest
-	(*RemoveRequest)(nil),         // 12: drivel.plugin.v1.RemoveRequest
-	(*RemoveResponse)(nil),        // 13: drivel.plugin.v1.RemoveResponse
-	(*GetRequest)(nil),            // 14: drivel.plugin.v1.GetRequest
-	(*StatRequest)(nil),           // 15: drivel.plugin.v1.StatRequest
-	(*StatResponse)(nil),          // 16: drivel.plugin.v1.StatResponse
-	(*StartCursorRequest)(nil),    // 17: drivel.plugin.v1.StartCursorRequest
-	(*StartCursorResponse)(nil),   // 18: drivel.plugin.v1.StartCursorResponse
-	(*ChangesRequest)(nil),        // 19: drivel.plugin.v1.ChangesRequest
-	(*ChangesResponse)(nil),       // 20: drivel.plugin.v1.ChangesResponse
-	(*EnumerateRequest)(nil),      // 21: drivel.plugin.v1.EnumerateRequest
-	(*EnumerateResponse)(nil),     // 22: drivel.plugin.v1.EnumerateResponse
-	(*GetRangeRequest)(nil),       // 23: drivel.plugin.v1.GetRangeRequest
-	(*Extent)(nil),                // 24: drivel.plugin.v1.Extent
-	(*PutRangeRequest)(nil),       // 25: drivel.plugin.v1.PutRangeRequest
-	(*HashContentResponse)(nil),   // 26: drivel.plugin.v1.HashContentResponse
-	(*ReadAtRequest)(nil),         // 27: drivel.plugin.v1.ReadAtRequest
-	(*ReadAtResponse)(nil),        // 28: drivel.plugin.v1.ReadAtResponse
-	(*Error)(nil),                 // 29: drivel.plugin.v1.Error
-	(*timestamppb.Timestamp)(nil), // 30: google.protobuf.Timestamp
+	(*UploadOptions)(nil),         // 9: drivel.plugin.v1.UploadOptions
+	(*UploadResponse)(nil),        // 10: drivel.plugin.v1.UploadResponse
+	(*GetVersionRequest)(nil),     // 11: drivel.plugin.v1.GetVersionRequest
+	(*FileResponse)(nil),          // 12: drivel.plugin.v1.FileResponse
+	(*MkdirRequest)(nil),          // 13: drivel.plugin.v1.MkdirRequest
+	(*MoveRequest)(nil),           // 14: drivel.plugin.v1.MoveRequest
+	(*RemoveRequest)(nil),         // 15: drivel.plugin.v1.RemoveRequest
+	(*RemoveResponse)(nil),        // 16: drivel.plugin.v1.RemoveResponse
+	(*GetRequest)(nil),            // 17: drivel.plugin.v1.GetRequest
+	(*StatRequest)(nil),           // 18: drivel.plugin.v1.StatRequest
+	(*StatResponse)(nil),          // 19: drivel.plugin.v1.StatResponse
+	(*StartCursorRequest)(nil),    // 20: drivel.plugin.v1.StartCursorRequest
+	(*StartCursorResponse)(nil),   // 21: drivel.plugin.v1.StartCursorResponse
+	(*ChangesRequest)(nil),        // 22: drivel.plugin.v1.ChangesRequest
+	(*ChangesResponse)(nil),       // 23: drivel.plugin.v1.ChangesResponse
+	(*EnumerateRequest)(nil),      // 24: drivel.plugin.v1.EnumerateRequest
+	(*EnumerateResponse)(nil),     // 25: drivel.plugin.v1.EnumerateResponse
+	(*GetRangeRequest)(nil),       // 26: drivel.plugin.v1.GetRangeRequest
+	(*Extent)(nil),                // 27: drivel.plugin.v1.Extent
+	(*PutRangeRequest)(nil),       // 28: drivel.plugin.v1.PutRangeRequest
+	(*HashContentResponse)(nil),   // 29: drivel.plugin.v1.HashContentResponse
+	(*ReadAtRequest)(nil),         // 30: drivel.plugin.v1.ReadAtRequest
+	(*ReadAtResponse)(nil),        // 31: drivel.plugin.v1.ReadAtResponse
+	(*Error)(nil),                 // 32: drivel.plugin.v1.Error
+	(*timestamppb.Timestamp)(nil), // 33: google.protobuf.Timestamp
 }
 var file_drivel_plugin_v1_provider_proto_depIdxs = []int32{
-	30, // 0: drivel.plugin.v1.File.modified:type_name -> google.protobuf.Timestamp
+	33, // 0: drivel.plugin.v1.File.modified:type_name -> google.protobuf.Timestamp
 	5,  // 1: drivel.plugin.v1.Change.file:type_name -> drivel.plugin.v1.File
-	5,  // 2: drivel.plugin.v1.FileResponse.file:type_name -> drivel.plugin.v1.File
-	5,  // 3: drivel.plugin.v1.StatResponse.file:type_name -> drivel.plugin.v1.File
-	6,  // 4: drivel.plugin.v1.ChangesResponse.changes:type_name -> drivel.plugin.v1.Change
-	5,  // 5: drivel.plugin.v1.EnumerateResponse.files:type_name -> drivel.plugin.v1.File
-	24, // 6: drivel.plugin.v1.PutRangeRequest.extents:type_name -> drivel.plugin.v1.Extent
-	0,  // 7: drivel.plugin.v1.Error.kind:type_name -> drivel.plugin.v1.Error.Kind
-	1,  // 8: drivel.plugin.v1.Provider.Open:input_type -> drivel.plugin.v1.OpenRequest
-	3,  // 9: drivel.plugin.v1.Provider.Close:input_type -> drivel.plugin.v1.CloseRequest
-	8,  // 10: drivel.plugin.v1.Provider.Put:input_type -> drivel.plugin.v1.PutRequest
-	10, // 11: drivel.plugin.v1.Provider.Mkdir:input_type -> drivel.plugin.v1.MkdirRequest
-	11, // 12: drivel.plugin.v1.Provider.Move:input_type -> drivel.plugin.v1.MoveRequest
-	12, // 13: drivel.plugin.v1.Provider.Remove:input_type -> drivel.plugin.v1.RemoveRequest
-	14, // 14: drivel.plugin.v1.Provider.Get:input_type -> drivel.plugin.v1.GetRequest
-	15, // 15: drivel.plugin.v1.Provider.Stat:input_type -> drivel.plugin.v1.StatRequest
-	17, // 16: drivel.plugin.v1.Provider.StartCursor:input_type -> drivel.plugin.v1.StartCursorRequest
-	19, // 17: drivel.plugin.v1.Provider.Changes:input_type -> drivel.plugin.v1.ChangesRequest
-	21, // 18: drivel.plugin.v1.Provider.Enumerate:input_type -> drivel.plugin.v1.EnumerateRequest
-	23, // 19: drivel.plugin.v1.Provider.GetRange:input_type -> drivel.plugin.v1.GetRangeRequest
-	25, // 20: drivel.plugin.v1.Provider.PutRange:input_type -> drivel.plugin.v1.PutRangeRequest
-	7,  // 21: drivel.plugin.v1.Provider.HashContent:input_type -> drivel.plugin.v1.Chunk
-	8,  // 22: drivel.plugin.v1.Provider.Create:input_type -> drivel.plugin.v1.PutRequest
-	12, // 23: drivel.plugin.v1.Provider.Trash:input_type -> drivel.plugin.v1.RemoveRequest
-	11, // 24: drivel.plugin.v1.Provider.Copy:input_type -> drivel.plugin.v1.MoveRequest
-	27, // 25: drivel.plugin.v1.Content.ReadAt:input_type -> drivel.plugin.v1.ReadAtRequest
-	2,  // 26: drivel.plugin.v1.Provider.Open:output_type -> drivel.plugin.v1.OpenResponse
-	4,  // 27: drivel.plugin.v1.Provider.Close:output_type -> drivel.plugin.v1.CloseResponse
-	9,  // 28: drivel.plugin.v1.Provider.Put:output_type -> drivel.plugin.v1.FileResponse
-	9,  // 29: drivel.plugin.v1.Provider.Mkdir:output_type -> drivel.plugin.v1.FileResponse
-	9,  // 30: drivel.plugin.v1.Provider.Move:output_type -> drivel.plugin.v1.FileResponse
-	13, // 31: drivel.plugin.v1.Provider.Remove:output_type -> drivel.plugin.v1.RemoveResponse
-	7,  // 32: drivel.plugin.v1.Provider.Get:output_type -> drivel.plugin.v1.Chunk
-	16, // 33: drivel.plugin.v1.Provider.Stat:output_type -> drivel.plugin.v1.StatResponse
-	18, // 34: drivel.plugin.v1.Provider.StartCursor:output_type -> drivel.plugin.v1.StartCursorResponse
-	20, // 35: drivel.plugin.v1.Provider.Changes:output_type -> drivel.plugin.v1.ChangesResponse
-	22, // 36: drivel.plugin.v1.Provider.Enumerate:output_type -> drivel.plugin.v1.EnumerateResponse
-	7,  // 37: drivel.plugin.v1.Provider.GetRange:output_type -> drivel.plugin.v1.Chunk
-	9,  // 38: drivel.plugin.v1.Provider.PutRange:output_type -> drivel.plugin.v1.FileResponse
-	26, // 39: drivel.plugin.v1.Provider.HashContent:output_type -> drivel.plugin.v1.HashContentResponse
-	9,  // 40: drivel.plugin.v1.Provider.Create:output_type -> drivel.plugin.v1.FileResponse
-	13, // 41: drivel.plugin.v1.Provider.Trash:output_type -> drivel.plugin.v1.RemoveResponse
-	9,  // 42: drivel.plugin.v1.Provider.Copy:output_type -> drivel.plugin.v1.FileResponse
-	28, // 43: drivel.plugin.v1.Content.ReadAt:output_type -> drivel.plugin.v1.ReadAtResponse
-	26, // [26:44] is the sub-list for method output_type
-	8,  // [8:26] is the sub-list for method input_type
-	8,  // [8:8] is the sub-list for extension type_name
-	8,  // [8:8] is the sub-list for extension extendee
-	0,  // [0:8] is the sub-list for field type_name
+	9,  // 2: drivel.plugin.v1.PutRequest.options:type_name -> drivel.plugin.v1.UploadOptions
+	33, // 3: drivel.plugin.v1.UploadOptions.modified:type_name -> google.protobuf.Timestamp
+	5,  // 4: drivel.plugin.v1.UploadOptions.replaces:type_name -> drivel.plugin.v1.File
+	5,  // 5: drivel.plugin.v1.UploadResponse.file:type_name -> drivel.plugin.v1.File
+	5,  // 6: drivel.plugin.v1.UploadResponse.displaced:type_name -> drivel.plugin.v1.File
+	5,  // 7: drivel.plugin.v1.FileResponse.file:type_name -> drivel.plugin.v1.File
+	5,  // 8: drivel.plugin.v1.StatResponse.file:type_name -> drivel.plugin.v1.File
+	6,  // 9: drivel.plugin.v1.ChangesResponse.changes:type_name -> drivel.plugin.v1.Change
+	5,  // 10: drivel.plugin.v1.EnumerateResponse.files:type_name -> drivel.plugin.v1.File
+	27, // 11: drivel.plugin.v1.PutRangeRequest.extents:type_name -> drivel.plugin.v1.Extent
+	0,  // 12: drivel.plugin.v1.Error.kind:type_name -> drivel.plugin.v1.Error.Kind
+	1,  // 13: drivel.plugin.v1.Provider.Open:input_type -> drivel.plugin.v1.OpenRequest
+	3,  // 14: drivel.plugin.v1.Provider.Close:input_type -> drivel.plugin.v1.CloseRequest
+	8,  // 15: drivel.plugin.v1.Provider.Put:input_type -> drivel.plugin.v1.PutRequest
+	13, // 16: drivel.plugin.v1.Provider.Mkdir:input_type -> drivel.plugin.v1.MkdirRequest
+	14, // 17: drivel.plugin.v1.Provider.Move:input_type -> drivel.plugin.v1.MoveRequest
+	15, // 18: drivel.plugin.v1.Provider.Remove:input_type -> drivel.plugin.v1.RemoveRequest
+	17, // 19: drivel.plugin.v1.Provider.Get:input_type -> drivel.plugin.v1.GetRequest
+	18, // 20: drivel.plugin.v1.Provider.Stat:input_type -> drivel.plugin.v1.StatRequest
+	20, // 21: drivel.plugin.v1.Provider.StartCursor:input_type -> drivel.plugin.v1.StartCursorRequest
+	22, // 22: drivel.plugin.v1.Provider.Changes:input_type -> drivel.plugin.v1.ChangesRequest
+	24, // 23: drivel.plugin.v1.Provider.Enumerate:input_type -> drivel.plugin.v1.EnumerateRequest
+	26, // 24: drivel.plugin.v1.Provider.GetRange:input_type -> drivel.plugin.v1.GetRangeRequest
+	28, // 25: drivel.plugin.v1.Provider.PutRange:input_type -> drivel.plugin.v1.PutRangeRequest
+	7,  // 26: drivel.plugin.v1.Provider.HashContent:input_type -> drivel.plugin.v1.Chunk
+	8,  // 27: drivel.plugin.v1.Provider.Create:input_type -> drivel.plugin.v1.PutRequest
+	15, // 28: drivel.plugin.v1.Provider.Trash:input_type -> drivel.plugin.v1.RemoveRequest
+	14, // 29: drivel.plugin.v1.Provider.Copy:input_type -> drivel.plugin.v1.MoveRequest
+	8,  // 30: drivel.plugin.v1.Provider.Upload:input_type -> drivel.plugin.v1.PutRequest
+	11, // 31: drivel.plugin.v1.Provider.GetVersion:input_type -> drivel.plugin.v1.GetVersionRequest
+	30, // 32: drivel.plugin.v1.Content.ReadAt:input_type -> drivel.plugin.v1.ReadAtRequest
+	2,  // 33: drivel.plugin.v1.Provider.Open:output_type -> drivel.plugin.v1.OpenResponse
+	4,  // 34: drivel.plugin.v1.Provider.Close:output_type -> drivel.plugin.v1.CloseResponse
+	12, // 35: drivel.plugin.v1.Provider.Put:output_type -> drivel.plugin.v1.FileResponse
+	12, // 36: drivel.plugin.v1.Provider.Mkdir:output_type -> drivel.plugin.v1.FileResponse
+	12, // 37: drivel.plugin.v1.Provider.Move:output_type -> drivel.plugin.v1.FileResponse
+	16, // 38: drivel.plugin.v1.Provider.Remove:output_type -> drivel.plugin.v1.RemoveResponse
+	7,  // 39: drivel.plugin.v1.Provider.Get:output_type -> drivel.plugin.v1.Chunk
+	19, // 40: drivel.plugin.v1.Provider.Stat:output_type -> drivel.plugin.v1.StatResponse
+	21, // 41: drivel.plugin.v1.Provider.StartCursor:output_type -> drivel.plugin.v1.StartCursorResponse
+	23, // 42: drivel.plugin.v1.Provider.Changes:output_type -> drivel.plugin.v1.ChangesResponse
+	25, // 43: drivel.plugin.v1.Provider.Enumerate:output_type -> drivel.plugin.v1.EnumerateResponse
+	7,  // 44: drivel.plugin.v1.Provider.GetRange:output_type -> drivel.plugin.v1.Chunk
+	12, // 45: drivel.plugin.v1.Provider.PutRange:output_type -> drivel.plugin.v1.FileResponse
+	29, // 46: drivel.plugin.v1.Provider.HashContent:output_type -> drivel.plugin.v1.HashContentResponse
+	12, // 47: drivel.plugin.v1.Provider.Create:output_type -> drivel.plugin.v1.FileResponse
+	16, // 48: drivel.plugin.v1.Provider.Trash:output_type -> drivel.plugin.v1.RemoveResponse
+	12, // 49: drivel.plugin.v1.Provider.Copy:output_type -> drivel.plugin.v1.FileResponse
+	10, // 50: drivel.plugin.v1.Provider.Upload:output_type -> drivel.plugin.v1.UploadResponse
+	7,  // 51: drivel.plugin.v1.Provider.GetVersion:output_type -> drivel.plugin.v1.Chunk
+	31, // 52: drivel.plugin.v1.Content.ReadAt:output_type -> drivel.plugin.v1.ReadAtResponse
+	33, // [33:53] is the sub-list for method output_type
+	13, // [13:33] is the sub-list for method input_type
+	13, // [13:13] is the sub-list for extension type_name
+	13, // [13:13] is the sub-list for extension extendee
+	0,  // [0:13] is the sub-list for field type_name
 }
 
 func init() { file_drivel_plugin_v1_provider_proto_init() }
@@ -1872,7 +2079,7 @@ func file_drivel_plugin_v1_provider_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_drivel_plugin_v1_provider_proto_rawDesc), len(file_drivel_plugin_v1_provider_proto_rawDesc)),
 			NumEnums:      1,
-			NumMessages:   29,
+			NumMessages:   32,
 			NumExtensions: 0,
 			NumServices:   2,
 		},

@@ -59,6 +59,8 @@ const (
 	Provider_Create_FullMethodName      = "/drivel.plugin.v1.Provider/Create"
 	Provider_Trash_FullMethodName       = "/drivel.plugin.v1.Provider/Trash"
 	Provider_Copy_FullMethodName        = "/drivel.plugin.v1.Provider/Copy"
+	Provider_Upload_FullMethodName      = "/drivel.plugin.v1.Provider/Upload"
+	Provider_GetVersion_FullMethodName  = "/drivel.plugin.v1.Provider/GetVersion"
 )
 
 // ProviderClient is the client API for Provider service.
@@ -117,6 +119,15 @@ type ProviderClient interface {
 	// old_path is the source and new_path the copy. KIND_EXIST when the copy's
 	// path is occupied, KIND_NOT_EXIST when the source is gone.
 	Copy(ctx context.Context, in *MoveRequest, opts ...grpc.CallOption) (*FileResponse, error)
+	// provider.Uploader — optional. Put's stream, with UploadOptions on the first
+	// message beside the path. KIND_EXIST for a refused create, KIND_CHANGED when
+	// the object to be replaced was no longer the one expected. A call of its own
+	// for Create's reason: the capability gate means only a plugin that knows the
+	// options is ever sent them.
+	Upload(ctx context.Context, opts ...grpc.CallOption) (grpc.ClientStreamingClient[PutRequest, UploadResponse], error)
+	// provider.VersionGetter — optional. The content of a version an Upload
+	// reported displacing.
+	GetVersion(ctx context.Context, in *GetVersionRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[Chunk], error)
 }
 
 type providerClient struct {
@@ -324,6 +335,38 @@ func (c *providerClient) Copy(ctx context.Context, in *MoveRequest, opts ...grpc
 	return out, nil
 }
 
+func (c *providerClient) Upload(ctx context.Context, opts ...grpc.CallOption) (grpc.ClientStreamingClient[PutRequest, UploadResponse], error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	stream, err := c.cc.NewStream(ctx, &Provider_ServiceDesc.Streams[5], Provider_Upload_FullMethodName, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	x := &grpc.GenericClientStream[PutRequest, UploadResponse]{ClientStream: stream}
+	return x, nil
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type Provider_UploadClient = grpc.ClientStreamingClient[PutRequest, UploadResponse]
+
+func (c *providerClient) GetVersion(ctx context.Context, in *GetVersionRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[Chunk], error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	stream, err := c.cc.NewStream(ctx, &Provider_ServiceDesc.Streams[6], Provider_GetVersion_FullMethodName, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	x := &grpc.GenericClientStream[GetVersionRequest, Chunk]{ClientStream: stream}
+	if err := x.ClientStream.SendMsg(in); err != nil {
+		return nil, err
+	}
+	if err := x.ClientStream.CloseSend(); err != nil {
+		return nil, err
+	}
+	return x, nil
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type Provider_GetVersionClient = grpc.ServerStreamingClient[Chunk]
+
 // ProviderServer is the server API for Provider service.
 // All implementations must embed UnimplementedProviderServer
 // for forward compatibility.
@@ -380,6 +423,15 @@ type ProviderServer interface {
 	// old_path is the source and new_path the copy. KIND_EXIST when the copy's
 	// path is occupied, KIND_NOT_EXIST when the source is gone.
 	Copy(context.Context, *MoveRequest) (*FileResponse, error)
+	// provider.Uploader — optional. Put's stream, with UploadOptions on the first
+	// message beside the path. KIND_EXIST for a refused create, KIND_CHANGED when
+	// the object to be replaced was no longer the one expected. A call of its own
+	// for Create's reason: the capability gate means only a plugin that knows the
+	// options is ever sent them.
+	Upload(grpc.ClientStreamingServer[PutRequest, UploadResponse]) error
+	// provider.VersionGetter — optional. The content of a version an Upload
+	// reported displacing.
+	GetVersion(*GetVersionRequest, grpc.ServerStreamingServer[Chunk]) error
 	mustEmbedUnimplementedProviderServer()
 }
 
@@ -440,6 +492,12 @@ func (UnimplementedProviderServer) Trash(context.Context, *RemoveRequest) (*Remo
 }
 func (UnimplementedProviderServer) Copy(context.Context, *MoveRequest) (*FileResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method Copy not implemented")
+}
+func (UnimplementedProviderServer) Upload(grpc.ClientStreamingServer[PutRequest, UploadResponse]) error {
+	return status.Error(codes.Unimplemented, "method Upload not implemented")
+}
+func (UnimplementedProviderServer) GetVersion(*GetVersionRequest, grpc.ServerStreamingServer[Chunk]) error {
+	return status.Error(codes.Unimplemented, "method GetVersion not implemented")
 }
 func (UnimplementedProviderServer) mustEmbedUnimplementedProviderServer() {}
 func (UnimplementedProviderServer) testEmbeddedByValue()                  {}
@@ -721,6 +779,24 @@ func _Provider_Copy_Handler(srv interface{}, ctx context.Context, dec func(inter
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Provider_Upload_Handler(srv interface{}, stream grpc.ServerStream) error {
+	return srv.(ProviderServer).Upload(&grpc.GenericServerStream[PutRequest, UploadResponse]{ServerStream: stream})
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type Provider_UploadServer = grpc.ClientStreamingServer[PutRequest, UploadResponse]
+
+func _Provider_GetVersion_Handler(srv interface{}, stream grpc.ServerStream) error {
+	m := new(GetVersionRequest)
+	if err := stream.RecvMsg(m); err != nil {
+		return err
+	}
+	return srv.(ProviderServer).GetVersion(m, &grpc.GenericServerStream[GetVersionRequest, Chunk]{ServerStream: stream})
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type Provider_GetVersionServer = grpc.ServerStreamingServer[Chunk]
+
 // Provider_ServiceDesc is the grpc.ServiceDesc for Provider service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -802,6 +878,16 @@ var Provider_ServiceDesc = grpc.ServiceDesc{
 			StreamName:    "Create",
 			Handler:       _Provider_Create_Handler,
 			ClientStreams: true,
+		},
+		{
+			StreamName:    "Upload",
+			Handler:       _Provider_Upload_Handler,
+			ClientStreams: true,
+		},
+		{
+			StreamName:    "GetVersion",
+			Handler:       _Provider_GetVersion_Handler,
+			ServerStreams: true,
 		},
 	},
 	Metadata: "drivel/plugin/v1/provider.proto",

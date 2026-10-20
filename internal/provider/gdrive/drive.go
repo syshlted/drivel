@@ -348,7 +348,8 @@ func (d *Drive) Close() error {
 // verifyLocked re-checks name and parent before anything acts on one, and a
 // failed check drops the entry.
 func (d *Drive) Put(ctx context.Context, p string, r io.Reader) (provider.RemoteFile, error) {
-	return d.put(ctx, p, r, false)
+	up, err := d.upload(ctx, p, r, provider.UploadOptions{})
+	return up.File, err
 }
 
 // Create implements provider.Creator: Put, refusing an occupied path.
@@ -364,11 +365,12 @@ func (d *Drive) Put(ctx context.Context, p string, r io.Reader) (provider.Remote
 // client creating the same name between the resolve and the create makes the
 // same-name siblings MC-30 describes, exactly as two Puts would.
 func (d *Drive) Create(ctx context.Context, p string, r io.Reader) (provider.RemoteFile, error) {
-	return d.put(ctx, p, r, true)
+	up, err := d.upload(ctx, p, r, provider.UploadOptions{Create: true})
+	return up.File, err
 }
 
-// put is Put and Create; refuse makes an occupied path an ErrExist.
-func (d *Drive) put(ctx context.Context, p string, r io.Reader, refuse bool) (provider.RemoteFile, error) {
+// upload is Put, Create and Upload (upload.go).
+func (d *Drive) upload(ctx context.Context, p string, r io.Reader, opts provider.UploadOptions) (provider.Uploaded, error) {
 	release := d.lockPath(p)
 	defer release()
 
@@ -384,31 +386,43 @@ func (d *Drive) put(ctx context.Context, p string, r io.Reader, refuse bool) (pr
 	}
 	d.mu.Unlock()
 	if err != nil {
-		return provider.RemoteFile{}, classify(err)
+		return provider.Uploaded{}, classify(err)
 	}
-	if exists && refuse {
-		return provider.RemoteFile{}, fmt.Errorf("create %q: %w", p, provider.ErrExist)
+	if exists && opts.Create {
+		return provider.Uploaded{}, fmt.Errorf("create %q: %w", p, provider.ErrExist)
 	}
 
+	meta := &drive.File{}
+	if !opts.Modified.IsZero() {
+		// In the same request as the content, never after it: a second
+		// files.update would move the version, and the change feed would report
+		// the object under an identity no baseline records (provider.Uploader).
+		meta.ModifiedTime = opts.Modified.UTC().Format(time.RFC3339Nano)
+	}
 	var res *drive.File
 	if exists {
-		res, err = d.svc.Files.Update(id, &drive.File{}).
-			Media(r, mediaOptions()...).Fields(fileFields).Context(ctx).Do()
+		res, err = d.svc.Files.Update(id, meta).
+			Media(r, mediaOptions()...).Fields(fileFields + ",headRevisionId").Context(ctx).Do()
 	} else {
-		f := &drive.File{Name: path.Base(p)}
+		meta.Name = path.Base(p)
 		if parentID != "" {
-			f.Parents = []string{parentID}
+			meta.Parents = []string{parentID}
 		}
-		res, err = d.svc.Files.Create(f).
+		res, err = d.svc.Files.Create(meta).
 			Media(r, mediaOptions()...).Fields(fileFields).Context(ctx).Do()
 	}
 	if err != nil {
-		return provider.RemoteFile{}, classify(err)
+		return provider.Uploaded{}, classify(err)
+	}
+
+	var displaced *provider.RemoteFile
+	if exists && opts.Replaces != nil && !opts.Create {
+		displaced = d.displacedBy(ctx, p, res, *opts.Replaces)
 	}
 
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	return d.rememberLocked(ctx, p, res), nil
+	return provider.Uploaded{File: d.rememberLocked(ctx, p, res), Displaced: displaced}, nil
 }
 
 func (d *Drive) Mkdir(ctx context.Context, p string) (provider.RemoteFile, error) {

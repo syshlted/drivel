@@ -84,6 +84,9 @@ func encodeError(err error) error {
 	case errors.Is(err, provider.ErrExist):
 		detail.Kind = pb.Error_KIND_EXIST
 		code = codes.AlreadyExists
+	case errors.Is(err, provider.ErrChanged):
+		detail.Kind = pb.Error_KIND_CHANGED
+		code = codes.Aborted
 	}
 
 	st := status.New(code, err.Error())
@@ -145,6 +148,8 @@ func decodeError(err error) error {
 		out = fmt.Errorf("%w: %s", provider.ErrCursorExpired, detail.GetMessage())
 	case pb.Error_KIND_EXIST:
 		out = fmt.Errorf("%w: %s", provider.ErrExist, detail.GetMessage())
+	case pb.Error_KIND_CHANGED:
+		out = fmt.Errorf("%w: %s", provider.ErrChanged, detail.GetMessage())
 	default:
 		out = errors.New(detail.GetMessage())
 	}

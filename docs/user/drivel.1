@@ -1534,20 +1534,22 @@ node cannot be created through the mount at all: the attempt fails with
 .B EINVAL
 and creates nothing. Symlinks work normally there.
 .PP
-.B Permissions, modification times and the holes in a sparse file are not synced.
+.B Permissions and the holes in a sparse file are not synced.
 A file downloaded for the first time is created by the atomic write that protects
 a reader from a half\-finished one, so it lands
 .BR rw\-\-\-\-\-\-\- ;
 a download that replaces a file keeps that file's permission bits, without
 .BR setuid ,
 .B setgid
-or the sticky bit. A downloaded file is stamped with the time the upload reached
-the provider rather than the time the file was written \(em an executable bit, a
+or the sticky bit. An upload carries the file's modification time, and a
+download is stamped with it, so a file is dated to its last edit everywhere
+(whole seconds on SFTP); a block-wise SFTP update is dated to the upload. An
+executable bit and a
 .B setuid
-bit and an original date therefore reach no other client. A sparse file transfers
+bit reach no other client. A sparse file transfers
 its full apparent size, and a download leaves its all\-zero 4 KiB blocks
 unwritten, so it is sparse again on the receiving filesystem. The client that
-wrote the file keeps all three unchanged. Carrying POSIX
+wrote the file keeps its mode and holes unchanged. Carrying POSIX
 mode and ownership needs a record bound to the content it describes and is not
 implemented.
 .SH PROVIDER BACKENDS

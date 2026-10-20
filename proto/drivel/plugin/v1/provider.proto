@@ -89,6 +89,17 @@ service Provider {
   // old_path is the source and new_path the copy. KIND_EXIST when the copy's
   // path is occupied, KIND_NOT_EXIST when the source is gone.
   rpc Copy(MoveRequest) returns (FileResponse);
+
+  // provider.Uploader — optional. Put's stream, with UploadOptions on the first
+  // message beside the path. KIND_EXIST for a refused create, KIND_CHANGED when
+  // the object to be replaced was no longer the one expected. A call of its own
+  // for Create's reason: the capability gate means only a plugin that knows the
+  // options is ever sent them.
+  rpc Upload(stream PutRequest) returns (UploadResponse);
+
+  // provider.VersionGetter — optional. The content of a version an Upload
+  // reported displacing.
+  rpc GetVersion(GetVersionRequest) returns (stream Chunk);
 }
 
 // Content is served by the HOST and called by the plugin: random access to a
@@ -173,6 +184,29 @@ message PutRequest {
     string path = 1; // exactly once, first
     bytes data = 2;  // zero or more, after
   }
+  // options is provider.UploadOptions, read from the first message by Upload
+  // and by nothing else.
+  UploadOptions options = 3;
+}
+
+// UploadOptions is provider.UploadOptions.
+message UploadOptions {
+  bool create = 1;
+  // modified is unset for the zero time: let the backend choose.
+  google.protobuf.Timestamp modified = 2;
+  // replaces is unset to replace whatever stands at the path.
+  File replaces = 3;
+}
+
+// UploadResponse is provider.Uploaded.
+message UploadResponse {
+  File file = 1;
+  File displaced = 2; // unset when nothing unexpected was replaced
+}
+
+message GetVersionRequest {
+  string path = 1;
+  string version = 2;
 }
 
 message FileResponse {
@@ -293,6 +327,7 @@ message Error {
     KIND_NOT_EXIST = 1;      // provider.ErrNotExist
     KIND_CURSOR_EXPIRED = 2; // provider.ErrCursorExpired
     KIND_EXIST = 3;          // provider.ErrExist
+    KIND_CHANGED = 4;        // provider.ErrChanged
   }
   Kind kind = 1;
   // retryable is provider.IsRetryable's answer, computed on the plugin side

@@ -451,8 +451,90 @@ func TestPluginServesCopy(t *testing.T) {
 	}
 }
 
+// Upload's options cross the socket on the stream's first message: a time the
+// object carries afterwards, a create that refuses, and an expectation the
+// backend checks — refused before anything is written, as ErrChanged.
+func TestPluginServesUploadWithItsOptions(t *testing.T) {
+	store, _ := openFake(t, map[string]any{
+		"capabilities": []string{"uploader"},
+		"seed":         []string{"taken.txt=old"},
+	})
+	ctx := context.Background()
+	u, ok := provider.AsUploader(store)
+	if !ok {
+		t.Fatal("no uploader")
+	}
+	when := time.Date(2001, 2, 3, 4, 5, 6, 789000000, time.UTC)
+	up, err := u.Upload(ctx, "new.txt", strings.NewReader("hello"), provider.UploadOptions{Modified: when})
+	if err != nil {
+		t.Fatalf("Upload: %v", err)
+	}
+	if !up.File.Modified.Equal(when) || up.Displaced != nil {
+		t.Fatalf("Upload = %+v; want the modification time it was given, and nothing displaced", up)
+	}
+	big := bytes.Repeat([]byte("x"), 4<<20)
+	if _, err := u.Upload(ctx, "taken.txt", bytes.NewReader(big), provider.UploadOptions{Create: true}); !errors.Is(err, provider.ErrExist) {
+		t.Fatalf("a creating Upload over an occupied path = %v; want ErrExist", err)
+	}
+	stale := provider.RemoteFile{Path: "taken.txt", Hash: "len:99"}
+	if _, err := u.Upload(ctx, "taken.txt", bytes.NewReader(big), provider.UploadOptions{Replaces: &stale}); !errors.Is(err, provider.ErrChanged) {
+		t.Fatalf("an Upload replacing a stale view = %v; want ErrChanged", err)
+	}
+	rc, err := store.Get(ctx, "taken.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, _ := io.ReadAll(rc)
+	_ = rc.Close()
+	if string(got) != "old" {
+		t.Fatalf("a refused Upload changed the path: %q", got)
+	}
+}
+
+// A backend that can only tell afterwards reports what it displaced, and the
+// version reads back through GetVersion.
+func TestPluginReportsADisplacedVersion(t *testing.T) {
+	store, _ := openFake(t, map[string]any{
+		"capabilities": []string{"uploader", "version-getter"},
+		"seed":         []string{"doc.txt=someone else's edit"},
+		"displace":     true,
+	})
+	ctx := context.Background()
+	u, _ := provider.AsUploader(store)
+	expected := provider.RemoteFile{Path: "doc.txt", Hash: "len:4"}
+	up, err := u.Upload(ctx, "doc.txt", strings.NewReader("mine"), provider.UploadOptions{Replaces: &expected})
+	if err != nil {
+		t.Fatalf("Upload: %v", err)
+	}
+	if up.Displaced == nil {
+		t.Fatal("the displaced version was not reported across the socket")
+	}
+	v, ok := provider.AsVersionGetter(store)
+	if !ok {
+		t.Fatal("no version getter")
+	}
+	rc, err := v.GetVersion(ctx, "doc.txt", up.Displaced.Version)
+	if err != nil {
+		t.Fatalf("GetVersion: %v", err)
+	}
+	got, _ := io.ReadAll(rc)
+	_ = rc.Close()
+	if string(got) != "someone else's edit" {
+		t.Fatalf("GetVersion = %q; want the displaced content", got)
+	}
+	// A streamed call's refusal arrives with its first read, as Get's does.
+	rc, err = v.GetVersion(ctx, "doc.txt", "no-such-version")
+	if err == nil {
+		_, err = io.ReadAll(rc)
+		_ = rc.Close()
+	}
+	if !errors.Is(err, provider.ErrNotExist) {
+		t.Fatalf("reading an unknown version = %v; want ErrNotExist", err)
+	}
+}
+
 // None is reachable on a backend that did not offer it: the proxy has every
-// method, so this is rule 1 for the three newest capabilities.
+// method, so this is rule 1 for the newest capabilities.
 func TestPluginWithholdsUndeclaredCreateAndTrash(t *testing.T) {
 	store, _ := openFake(t, map[string]any{"capabilities": []string{"enumerator"}})
 	if _, ok := provider.AsCopier(store); ok {
@@ -463,6 +545,12 @@ func TestPluginWithholdsUndeclaredCreateAndTrash(t *testing.T) {
 	}
 	if _, ok := provider.AsTrasher(store); ok {
 		t.Error("AsTrasher succeeded for a backend that did not offer it")
+	}
+	if _, ok := provider.AsUploader(store); ok {
+		t.Error("AsUploader succeeded for a backend that did not offer it")
+	}
+	if _, ok := provider.AsVersionGetter(store); ok {
+		t.Error("AsVersionGetter succeeded for a backend that did not offer it")
 	}
 }
 
@@ -493,6 +581,11 @@ func TestPluginPreservesErrorClassification(t *testing.T) {
 		{"exist", "exist", func(t *testing.T, err error) {
 			if !errors.Is(err, provider.ErrExist) {
 				t.Errorf("errors.Is(ErrExist) = false for %v", err)
+			}
+		}},
+		{"changed", "changed", func(t *testing.T, err error) {
+			if !errors.Is(err, provider.ErrChanged) {
+				t.Errorf("errors.Is(ErrChanged) = false for %v", err)
 			}
 		}},
 		{"canceled", "canceled", func(t *testing.T, err error) {
