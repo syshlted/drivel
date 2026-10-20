@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -190,7 +191,12 @@ func TestShutdownWhilePausedDrainsWhatWasHeld(t *testing.T) {
 	ch <- fsevent.Event{Op: fsevent.OpWrite, Path: "a.txt"}
 	ch <- fsevent.Event{Op: fsevent.OpMkdir, Path: "d"}
 	stop()
-	assertCalls(t, store.calls, []string{"Mkdir(d)", "Put(create,a.txt,bytes=1)"})
+	// Both, in either order: they are two paths, so two workers, and nothing
+	// orders one worker against another. Comparing in sequence failed about one
+	// run in thirteen under -race.
+	got := append([]string(nil), store.calls...)
+	sort.Strings(got)
+	assertCalls(t, got, []string{"Mkdir(d)", "Put(create,a.txt,bytes=1)"})
 }
 
 // Held operations keep per-path order: content flushed by a structural op goes
