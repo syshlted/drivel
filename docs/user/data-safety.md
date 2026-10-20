@@ -287,19 +287,27 @@ The bytes of a file are what syncs. Three things about a file are not part of
 that, because Drive has nowhere to put them, and each is visible on your *other*
 machines rather than on the one you wrote from:
 
-- **Permissions.** A file Drivel downloads is created by the same atomic write
-  that stops you ever seeing a half-finished file, and that write creates it
-  `rw-------` (`0600`). So a script you made executable on one machine arrives
-  non-executable on the next, and a `setuid` bit does not survive at all. The
-  copy on the machine that wrote it keeps whatever mode you gave it.
+- **Permissions.** A file Drivel downloads for the first time is created by the
+  same atomic write that stops you ever seeing a half-finished file, and that
+  write creates it `rw-------` (`0600`). So a script you made executable on one
+  machine arrives non-executable on the next, and a `setuid` bit does not survive
+  at all. A download that *replaces* a file keeps that file's permissions, so
+  once you have made it executable here, an edit from elsewhere leaves it so —
+  minus `setuid`, `setgid` and the sticky bit, which content arriving from a
+  backend never carries. (Before 20 October 2026 every download reset the file
+  to `0600`.) The copy on the machine that wrote it keeps whatever mode you gave
+  it.
 - **Modification times.** A downloaded file is stamped with the time the upload
   reached the provider, not the time the file was written. Restore an archive
   through a mount and your other machines will date every file in it to the
   restore. Again, the machine that wrote it keeps the original.
-- **Holes in sparse files.** The *size* survives and the sparseness does not: an
-  8 MiB file holding 4 KiB of real data uploads 8 MiB, downloads 8 MiB, and
-  occupies 8 MiB on every other machine. Nothing is lost, but a sparse file is as
-  expensive as a dense one everywhere except where it started.
+- **Holes in sparse files** are restored on the way down, not carried: an 8 MiB
+  file holding 4 KiB of real data still uploads and downloads 8 MiB, because the
+  backends have no notion of a hole, but Drivel leaves every all-zero 4 KiB block
+  of a download unwritten, so on the other machine it occupies about 4 KiB again
+  (on a filesystem that supports holes). A file that was deliberately allocated
+  full of zeros comes back sparse too, which reads the same. Before 20 October
+  2026 such a file occupied its full size everywhere else.
 
 Carrying permissions and ownership properly needs somewhere to keep them that
 cannot drift away from the file it describes; it is planned and is not here yet.

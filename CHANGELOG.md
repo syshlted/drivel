@@ -13,6 +13,16 @@ from source with `make build`.
 
 ## Unreleased
 
+### Downloads keep a file's permissions, and come back sparse — 2026-10-20
+
+A download that replaces a file now keeps that file's permissions, so a script
+you made executable stays executable when it is edited on another machine (a
+`setuid`, `setgid` or sticky bit is dropped). A file arriving for the first time
+is still created owner-only. And a download leaves runs of zeros unwritten, so a
+sparse file — a disk image, a preallocated database — takes up its real size on
+your other machines rather than its full length. See
+[metadata](docs/user/data-safety.md#metadata-drivel-does-not-preserve).
+
 ### Two remote files differing only in case no longer overwrite each other — 2026-10-20
 
 On a filesystem that treats `Foo.txt` and `foo.txt` as one file — macOS's

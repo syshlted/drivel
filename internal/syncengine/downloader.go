@@ -943,6 +943,12 @@ func (d *Downloader) resolveConflict(ctx context.Context, rel, dst string, f *pr
 		if err := d.materialize(ctx, rel, dst, f); err != nil {
 			return err
 		}
+		// The path's file was moved away before the download, so the winner
+		// arrived as a new file; it takes the mode the path had, as any download
+		// over an existing file does (fetchTo).
+		if fi, err := os.Lstat(dst); err == nil && fi.Mode().IsRegular() && info.Mode().IsRegular() {
+			_ = os.Chmod(dst, info.Mode().Perm())
+		}
 		d.logf("[pull] conflict %s: remote newer, local edit kept in %s", rel, where)
 		d.conflicted(rel)
 		return d.rememberApplied(rel, dst, f)

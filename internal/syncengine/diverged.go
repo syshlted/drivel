@@ -183,6 +183,12 @@ func (e *Engine) localDigest(f *os.File) (string, bool) {
 // copy, because a conflict copy written any less carefully is the one file in
 // the tree nothing will ever re-fetch.
 //
+// All-zero blocks are left as holes (copySparse). A file it replaces keeps its
+// permission bits — a script edited on another machine stays executable here —
+// without setuid, setgid or sticky, which content from a remote must never
+// carry (DESIGN.md §10). A new file is 0600: nothing says what else it should
+// be, and the backend has no mode to tell.
+//
 // observe sees the Get's outcome and nothing else — reachability is a fact
 // about the provider, and a full local disk is not one (M14).
 func fetchTo(ctx context.Context, store provider.Store, path, dst string, modified time.Time, observe func(error)) (int64, error) {
@@ -203,10 +209,16 @@ func fetchTo(ctx context.Context, store provider.Store, path, dst string, modifi
 	tmpName := tmp.Name()
 	defer os.Remove(tmpName) // no-op after a successful rename
 
-	n, err := io.Copy(tmp, rc)
+	n, err := copySparse(tmp, rc)
 	if err != nil {
 		tmp.Close()
 		return n, err
+	}
+	if fi, err := os.Lstat(dst); err == nil && fi.Mode().IsRegular() {
+		if err := tmp.Chmod(fi.Mode().Perm()); err != nil {
+			tmp.Close()
+			return n, err
+		}
 	}
 	if err := tmp.Close(); err != nil {
 		return n, err

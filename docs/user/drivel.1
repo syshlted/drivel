@@ -1535,15 +1535,19 @@ node cannot be created through the mount at all: the attempt fails with
 and creates nothing. Symlinks work normally there.
 .PP
 .B Permissions, modification times and the holes in a sparse file are not synced.
-A downloaded file is created by the atomic write that protects a reader from a
-half\-finished one, so it lands
-.BR rw\-\-\-\-\-\-\- ,
-and it is stamped with the time the upload reached the provider rather than the
-time the file was written \(em an executable bit, a
+A file downloaded for the first time is created by the atomic write that protects
+a reader from a half\-finished one, so it lands
+.BR rw\-\-\-\-\-\-\- ;
+a download that replaces a file keeps that file's permission bits, without
+.BR setuid ,
+.B setgid
+or the sticky bit. A downloaded file is stamped with the time the upload reached
+the provider rather than the time the file was written \(em an executable bit, a
 .B setuid
-bit and an original date therefore reach no other client. A sparse file keeps its
-size and loses its holes: it transfers and occupies its apparent size everywhere
-else. The client that wrote the file keeps all three unchanged. Carrying POSIX
+bit and an original date therefore reach no other client. A sparse file transfers
+its full apparent size, and a download leaves its all\-zero 4 KiB blocks
+unwritten, so it is sparse again on the receiving filesystem. The client that
+wrote the file keeps all three unchanged. Carrying POSIX
 mode and ownership needs a record bound to the content it describes and is not
 implemented.
 .SH PROVIDER BACKENDS

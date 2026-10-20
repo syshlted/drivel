@@ -488,7 +488,12 @@ because Drive carries no `mode`/`uid`/`gid` at all and because putting permissio
 in a cloud API is a disclosure some users refuse; the record must name its path
 *and* carry a content digest, or a conflict copy grafts one file's ACL onto
 another's bytes. It is a milestone of its own and needs the provider-metadata
-capability first. **Symlinks are deferred on purpose** (item 5, and it needs item
+capability first. **Two of its symptoms are mitigated without it (2026-10-20),
+in `syncengine.fetchTo`**: a download over an existing file keeps that file's
+permission bits (never setuid/setgid/sticky — §10.4's mask), a new one stays
+`0600` by the owner's choice; and all-zero 4 KiB blocks are left unwritten
+(`copySparse`), so a sparse file is sparse again on the receiving side. Neither
+carries anything across the seam, which is why neither is item 4. **Symlinks are deferred on purpose** (item 5, and it needs item
 4): the human-readable pointer file is a good body and a bad *identity*, because
 content-as-identity forces the sweep to download every small file to classify it,
 and it is a symlink-injection channel. Cygwin and Git LFS both use two signals with
