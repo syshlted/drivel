@@ -15,6 +15,7 @@ import (
 
 	"github.com/syshlted/drivel/internal/fsevent"
 	"github.com/syshlted/drivel/internal/state"
+	"github.com/syshlted/drivel/internal/testenv"
 	"github.com/syshlted/drivel/provider"
 )
 
@@ -199,10 +200,7 @@ func TestProbeFoldingLeavesNothingBehind(t *testing.T) {
 // one to run it — on Linux a tmpfs mounted with -o casefold and a directory in it
 // given chattr +F; on macOS any directory on the default APFS volume.
 func TestOnARealFoldingFilesystem(t *testing.T) {
-	root := os.Getenv("DRIVEL_CASEFOLD_DIR")
-	if root == "" {
-		t.Skip("DRIVEL_CASEFOLD_DIR names no case-folding directory")
-	}
+	root := testenv.FoldingDir(t)
 	dir, err := os.MkdirTemp(root, "drivel-fold-")
 	if err != nil {
 		t.Fatal(err)

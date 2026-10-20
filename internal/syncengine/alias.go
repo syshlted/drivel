@@ -69,17 +69,17 @@ func ProbeFolding(dir string) (Folding, error) {
 	// "E" + U+0301 — one name for each question.
 	name := ".drivel-fold-" + tag + "-\u00c9"
 	p := filepath.Join(dir, name)
-	f, err := os.OpenFile(p, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600) //nolint:gosec // G703: the mount's own backing root and a name of ours
+	f, err := os.OpenFile(p, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 	if err != nil {
 		return Folding{}, err
 	}
 	f.Close()
 	defer os.Remove(p)
 	var out Folding
-	if _, err := os.Lstat(filepath.Join(dir, ".drivel-fold-"+tag+"-\u00e9")); err == nil { //nolint:gosec // G703: as above
+	if _, err := os.Lstat(filepath.Join(dir, ".drivel-fold-"+tag+"-\u00e9")); err == nil {
 		out.Case = true
 	}
-	if _, err := os.Lstat(filepath.Join(dir, ".drivel-fold-"+tag+"-E\u0301")); err == nil { //nolint:gosec // G703: as above
+	if _, err := os.Lstat(filepath.Join(dir, ".drivel-fold-"+tag+"-E\u0301")); err == nil {
 		out.Normalization = true
 	}
 	return out, nil
@@ -103,7 +103,7 @@ func aliasOf(root, rel string) (string, bool) {
 	dir := root
 	for i, part := range parts {
 		p := filepath.Join(dir, part)
-		fi, err := os.Lstat(p) //nolint:gosec // G703: rel passed relPathOK above, so p is inside root
+		fi, err := os.Lstat(p)
 		if err != nil {
 			return "", false
 		}
@@ -111,8 +111,14 @@ func aliasOf(root, rel string) (string, bool) {
 		if err != nil {
 			return "", false
 		}
+		// One name, never a path: Base makes that so whatever the lookup said.
+		stored = filepath.Base(stored)
 		if stored != part {
-			return strings.Join(append(append([]string(nil), parts[:i]...), stored), "/"), true
+			alias := strings.Join(append(append([]string(nil), parts[:i]...), stored), "/")
+			// One component the kernel or the listing named, under components rel
+			// already had: inside root by construction, and checked anyway, since
+			// callers go on to use it as a path.
+			return alias, relPathOK(alias)
 		}
 		dir = p
 	}
@@ -125,14 +131,14 @@ func aliasOf(root, rel string) (string, bool) {
 // tmpfs — so the entry goes through a temporary name in the same directory.
 func moveEntry(src, dst string, recase bool) error {
 	if !recase {
-		return os.Rename(src, dst) //nolint:gosec // G703: moveLocally's paths, which passed relPathOK there
+		return os.Rename(src, dst)
 	}
 	var b [6]byte
 	if _, err := rand.Read(b[:]); err != nil {
 		return err
 	}
 	tmp := filepath.Join(filepath.Dir(src), ".drivel-recase-"+hex.EncodeToString(b[:]))
-	if err := os.Rename(src, tmp); err != nil { //nolint:gosec // G703: as above
+	if err := os.Rename(src, tmp); err != nil {
 		return err
 	}
 	if err := os.Rename(tmp, dst); err != nil {
@@ -160,7 +166,7 @@ func storedNameByListing(dir, name string, fi os.FileInfo) (string, error) {
 		if match != "" {
 			continue
 		}
-		if efi, err := os.Lstat(filepath.Join(dir, e.Name())); err == nil && os.SameFile(efi, fi) { //nolint:gosec // G703: a name dir's own listing returned
+		if efi, err := os.Lstat(filepath.Join(dir, e.Name())); err == nil && os.SameFile(efi, fi) {
 			match = e.Name()
 		}
 	}

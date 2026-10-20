@@ -197,16 +197,12 @@ func (d *Downloader) Logger(lg *log.Logger) *Downloader {
 }
 
 // logf writes one line for this pull loop.
-//
-// gosec G706 sees a filename read back from the backing filesystem (alias.go)
-// reach here. Paths are logged verbatim by design, from every source, and this
-// is the seam a redaction filter would sit behind (CLAUDE.md, M25).
 func (d *Downloader) logf(format string, args ...any) {
 	if d.lg == nil {
-		log.Printf(format, args...) //nolint:gosec // G706: see above
+		log.Printf(format, args...)
 		return
 	}
-	d.lg.Printf(format, args...) //nolint:gosec // G706: see above
+	d.lg.Printf(format, args...)
 }
 
 // NewDownloader constructs the pull loop. cad zero-values fall back to

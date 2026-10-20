@@ -12,6 +12,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/syshlted/drivel/internal/testenv"
 )
 
 // A backing store that folds names is said so at open, once, before any of the
@@ -19,10 +21,7 @@ import (
 // in (see syncengine's TestOnARealFoldingFilesystem); the control below runs
 // everywhere.
 func TestOpenWarnsAboutAFoldingBackingStore(t *testing.T) {
-	root := os.Getenv("DRIVEL_CASEFOLD_DIR")
-	if root == "" {
-		t.Skip("DRIVEL_CASEFOLD_DIR names no case-folding directory")
-	}
+	root := testenv.FoldingDir(t)
 	dir, err := os.MkdirTemp(root, "drivel-open-")
 	if err != nil {
 		t.Fatal(err)

@@ -67,3 +67,31 @@ func Required(facility string) bool {
 	}
 	return false
 }
+
+// Folding is a directory on a filesystem that folds letter case — a casefold
+// tmpfs or ext4 directory on Linux, any directory on macOS's default volume —
+// which the case-insensitive backing store tests need and no ordinary test
+// machine has. It is named, not probed (FoldingDirVar), and "all" does not
+// cover it, because CI has no such directory; naming "folding" explicitly in
+// EnvVar does make its absence a failure.
+const Folding = "folding"
+
+// FoldingDirVar names the case-folding directory Folding's tests run in.
+const FoldingDirVar = "DRIVEL_CASEFOLD_DIR"
+
+// FoldingDir returns the directory FoldingDirVar names, or skips the test — or
+// fails it, when EnvVar names Folding itself.
+func FoldingDir(t TB) string {
+	t.Helper()
+	if d := os.Getenv(FoldingDirVar); d != "" {
+		return d
+	}
+	for _, f := range strings.Split(os.Getenv(EnvVar), ",") {
+		if strings.EqualFold(strings.TrimSpace(f), Folding) {
+			t.Fatalf("%s unavailable: %s names no case-folding directory (required by %s=%q)", Folding, FoldingDirVar, EnvVar, os.Getenv(EnvVar))
+			return ""
+		}
+	}
+	t.Skipf("%s unavailable: %s names no case-folding directory", Folding, FoldingDirVar)
+	return ""
+}
