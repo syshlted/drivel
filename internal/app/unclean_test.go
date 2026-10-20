@@ -49,6 +49,19 @@ func crashAfter(t *testing.T, p *peer, rel, body string, leaveMark bool) {
 	}
 }
 
+// sweptOnce waits for p's startup sweep to finish, which the tests here need
+// before they stop p: an interrupted sweep is resumed by the next start, and a
+// resumed sweep is then the reason the restart sweeps — or, for the control,
+// a sweep where none should run. The upload the tests wait for happens beside
+// that sweep, so it is no evidence of it; under a loaded -race suite the stop
+// won the race (a resume logged where "did not shut down cleanly" was wanted).
+func sweptOnce(t *testing.T, p *peer) {
+	t.Helper()
+	if !waitFor(10*time.Second, func() bool { return p.logw.saw("reconcile complete") }) {
+		t.Fatalf("%s: the startup sweep never completed", p.name)
+	}
+}
+
 func TestARestartAfterAnUncleanShutdownRepushesALostWrite(t *testing.T) {
 	f := newFleet(t, 1)
 	c1 := f.peers[0]
@@ -56,6 +69,7 @@ func TestARestartAfterAnUncleanShutdownRepushesALostWrite(t *testing.T) {
 	if !waitFor(10*time.Second, func() bool { b, _ := f.store.content("a.txt"); return string(b) == "old" }) {
 		t.Fatal("the first write never reached the remote")
 	}
+	sweptOnce(t, c1)
 	c1.stop()
 	crashAfter(t, c1, "a.txt", "new, and lost to the crash", true)
 
@@ -84,6 +98,7 @@ func TestARestartAfterACleanShutdownDoesNotSweep(t *testing.T) {
 	if !waitFor(10*time.Second, func() bool { b, _ := f.store.content("a.txt"); return string(b) == "old" }) {
 		t.Fatal("the first write never reached the remote")
 	}
+	sweptOnce(t, c1)
 	c1.stop()
 	crashAfter(t, c1, "a.txt", "written while the mount was down", false)
 
