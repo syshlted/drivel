@@ -66,7 +66,7 @@ func newRegistry() (*provider.Registry, error) {
 // inspected, not what any of it is.
 var mountShapingFlags = []string{
 	"mount", "data", "credentials", "token", "state", "index",
-	"drive-root", "drive-sweep-mode", "drive-delete", "lazy", "xattr", "resync",
+	"drive-root", "drive-sweep-mode", "drive-delete", "drive-overwrite-check", "lazy", "xattr", "resync",
 	"materialize", "max-deletes", "sweep-interval", "push-delay",
 	"upload-workers", "hydrate-workers", "conflicts", "conflicts-dir",
 }
@@ -139,6 +139,7 @@ func mountFlagSet(c *mountCLI) *flag.FlagSet {
 	fset.StringVar(&c.driveRoot, "drive-root", "root", "Drive folder ID mapped to the mount root")
 	fset.StringVar(&c.driveSweepMode, "drive-sweep-mode", "", "how the enumeration sweep walks Drive: \"scoped\" descends from -drive-root, \"flat\" lists the whole account, \"auto\" (default) descends unless -drive-root names the whole Drive")
 	fset.StringVar(&c.driveDelete, "drive-delete", "", "what removing a file does remotely: \"trash\" (default) moves it to the Drive trash, where it can be restored for 30 days but still counts against your quota; \"permanent\" unlinks it outright, with no undo")
+	fset.StringVar(&c.driveOverwriteCheck, "drive-overwrite-check", "", "which rewrites look afterwards for an edit made on Drive while they were uploading, and keep it as a conflict copy: \"large\" (default) checks files of 4 MiB or more, \"always\" every rewrite, \"off\" none; each check costs two requests")
 	fset.BoolVar(&c.lazy, "lazy", false, "lazy hydration (M5): materialise remote files as placeholders and fetch content on first read (requires -credentials)")
 	fset.BoolVar(&c.xattr, "xattr", false, "serve extended attributes through the mountpoint by passing them to the backing store; off by default because it exposes drivel's own placeholder marker to anything that can write to the mount")
 	fset.BoolVar(&c.resync, "resync", false, "enumerate the whole remote tree and reconcile it against the backing dir at startup, even if a baseline already exists")
@@ -251,6 +252,8 @@ type specFlags struct {
 	driveRoot      string
 	driveSweepMode string
 	driveDelete    string
+
+	driveOverwriteCheck string
 
 	lazy          bool
 	xattr         bool
@@ -513,6 +516,8 @@ func mountSpecs(fset *flag.FlagSet, given map[string]bool, f specFlags) ([]app.M
 			SweepMode:   gdconf.SweepMode(f.driveSweepMode),
 			Delete:      gdconf.DeleteMode(f.driveDelete),
 			IndexPath:   f.indexDB,
+
+			OverwriteCheck: gdconf.OverwriteMode(f.driveOverwriteCheck),
 		})
 	}
 	return []app.MountSpec{spec}, nil

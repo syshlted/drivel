@@ -13,6 +13,25 @@ from source with `make build`.
 
 ## Unreleased
 
+### Google Drive's check for an edit made during an upload is fixed, and adjustable — 2026-10-21
+
+The check added on 20 October could keep an old version of a file as a conflict
+copy when nobody else had touched the file. It could also miss a real edit if
+that edit carried an earlier date than yours, and two machines' file dates can
+be in any order. It now compares the file's revision history from before the
+upload with after it, which does not depend on dates. Every edit it finds is
+kept, not just one.
+
+Reading the other edit back no longer marks that version "keep forever" in
+Drive. Drive does not let a program remove that mark, so each version read that
+way went on counting against your storage.
+
+Each check costs two extra requests, so by default only uploads of 4 MiB or more
+are checked. Smaller files are no longer checked unless you ask:
+`-drive-overwrite-check always` checks every upload, and `off` checks none. See
+[configuration](docs/user/configuration.md#-drive-overwrite-check) and
+[when both machines upload](docs/user/data-safety.md#when-both-machines-upload).
+
 ### A conflict copy is no longer kept as a conflict of itself — 2026-10-20
 
 When a remote change met a local edit, the copy Drivel kept could be uploaded

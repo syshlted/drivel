@@ -1421,20 +1421,48 @@ are both lossy and racy.
   retries — the retry's divergence check keeps the newer remote as a copy and
   replaces *that* — leaving one round trip of the upload's whole duration open.
   Drive has no conditional update in v3 (v2's `etag`/`If-Match` did not
-  survive), so `gdrive` checks after the fact: a new `version` exactly one past
-  the checked one means nothing intervened and costs nothing; any larger step
-  lists revisions, and the one before the upload's own head is the content it
-  replaced. If that is not the checked hash, it comes back as
-  `Uploaded.Displaced`, and the engine reads it through
-  `provider.VersionGetter` — which marks the revision keep-forever, downloads
-  it, and unmarks it, since the guide says Drive serves a non-head blob
-  revision only while kept — and keeps it as the conflict's loser. Whether
-  Drive's own update moves `version` by exactly one is unmeasured: if it moves
-  by more, every rewrite pays one `revisions.list`, which is cost, not
-  correctness. The same capability carries the local mtime (`Modified`), in the
-  request that carries the content, so a file is dated to its last edit
-  everywhere — and so §6's last-writer-wins now compares two edit times rather
-  than an edit time and an upload time.
+  survive), so `gdrive` checks after the fact, **by revision set**: it lists
+  the file's revisions before the upload and again after, and every revision
+  new in between that is neither its own nor the checked hash comes back in
+  `Uploaded.Displaced`, oldest first. The engine reads each through
+  `provider.VersionGetter` — a plain download of the revision — and keeps it as
+  a conflict's loser. The same capability carries the local mtime
+  (`Modified`), in the request that carries the content, so a file is dated to
+  its last edit everywhere — and so §6's last-writer-wins now compares two edit
+  times rather than an edit time and an upload time.
+
+  **The first version of the Drive half was wrong three ways, and the live rig
+  found all three on 2026-10-21** (`TestLiveUpload`; nothing in the fake could,
+  because the fake encoded the same three beliefs). It read the revision
+  *listed* before the upload's own as the one replaced, but `revisions.list` is
+  ordered by modifiedTime, which `Modified` now sets from the writer's clock:
+  five rewrites dated out of order produced a "displaced" report with nobody
+  else writing (a spurious conflict copy of an old version), and an edit
+  carrying an older date than ours would have sorted ahead of the checked
+  revision and gone unreported. It skipped the listing when `version` moved by
+  exactly one, but one update moved it by 1, 2, 3 or 4 and an idle file moved
+  by 2–3 in ten seconds, so the shortcut was rare and meant nothing. And it
+  marked the revision keep-forever before reading it, on the belief that Drive
+  serves only kept revisions: Drive served the unmarked revision, and refused
+  to clear the mark afterwards (`illegalKeepForeverModification`), so each
+  read pinned a revision against quota for good. The set comparison needs no
+  order and no counter; the download needs no mark.
+
+  **Which rewrites pay the two listings is the user's** (`-drive-overwrite-check`,
+  `gdconf.OverwriteMode`, decided 2026-10-21): `large`, the default, checks
+  uploads of 4 MiB or more (`gdconf.OverwriteCheckMinSize`, decided by reading
+  the start of the content, not by a size crossing the seam); `always` checks
+  every rewrite with a baseline, for heavily shared folders; `off` none. The
+  reasoning for the default is the window each one leaves: a check narrows it
+  from "the engine's `Stat` to the end of the upload" to "the engine's `Stat`
+  to the first listing", one round trip — so for a small upload, which is
+  itself about a round trip, it buys little for two requests, and for a large
+  one it buys the whole transfer. An edit landing in an unchecked window is
+  overwritten with no copy and survives in Drive's revision history (30 days).
+  Two edits landing in one window are two copies, which is why `Displaced` is a
+  list; the proto moved it to a new field number rather than making the old
+  one repeated, because a decoder expecting one message merges several into
+  one.
 - **Where the loser goes is configurable (2026-10-18)**, and who wins is not.
   `syncengine.Conflicts` is one value per mount, shared by the engine, the pull
   loop and the status reader, and every resolution calls its `keepLocal` (the

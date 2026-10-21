@@ -491,13 +491,14 @@ func TestPluginServesUploadWithItsOptions(t *testing.T) {
 	}
 }
 
-// A backend that can only tell afterwards reports what it displaced, and the
-// version reads back through GetVersion.
+// A backend that can only tell afterwards reports what it displaced, every
+// version of it in order, and each reads back through GetVersion.
 func TestPluginReportsADisplacedVersion(t *testing.T) {
 	store, _ := openFake(t, map[string]any{
-		"capabilities": []string{"uploader", "version-getter"},
-		"seed":         []string{"doc.txt=someone else's edit"},
-		"displace":     true,
+		"capabilities":  []string{"uploader", "version-getter"},
+		"seed":          []string{"doc.txt=someone else's edit"},
+		"displace":      true,
+		"displace-also": "an earlier edit",
 	})
 	ctx := context.Background()
 	u, _ := provider.AsUploader(store)
@@ -506,24 +507,26 @@ func TestPluginReportsADisplacedVersion(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Upload: %v", err)
 	}
-	if up.Displaced == nil {
-		t.Fatal("the displaced version was not reported across the socket")
+	if len(up.Displaced) != 2 {
+		t.Fatalf("%d displaced version(s) reported across the socket; want both", len(up.Displaced))
 	}
 	v, ok := provider.AsVersionGetter(store)
 	if !ok {
 		t.Fatal("no version getter")
 	}
-	rc, err := v.GetVersion(ctx, "doc.txt", up.Displaced.Version)
-	if err != nil {
-		t.Fatalf("GetVersion: %v", err)
-	}
-	got, _ := io.ReadAll(rc)
-	_ = rc.Close()
-	if string(got) != "someone else's edit" {
-		t.Fatalf("GetVersion = %q; want the displaced content", got)
+	for i, want := range []string{"an earlier edit", "someone else's edit"} {
+		rc, err := v.GetVersion(ctx, "doc.txt", up.Displaced[i].Version)
+		if err != nil {
+			t.Fatalf("GetVersion %d: %v", i, err)
+		}
+		got, _ := io.ReadAll(rc)
+		_ = rc.Close()
+		if string(got) != want {
+			t.Fatalf("displaced version %d = %q; want %q", i, got, want)
+		}
 	}
 	// A streamed call's refusal arrives with its first read, as Get's does.
-	rc, err = v.GetVersion(ctx, "doc.txt", "no-such-version")
+	rc, err := v.GetVersion(ctx, "doc.txt", "no-such-version")
 	if err == nil {
 		_, err = io.ReadAll(rc)
 		_ = rc.Close()

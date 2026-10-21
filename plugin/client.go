@@ -112,9 +112,8 @@ func (s *remoteStore) Upload(ctx context.Context, path string, r io.Reader, opts
 		return provider.Uploaded{}, err
 	}
 	out := provider.Uploaded{File: fileFromPB(resp.GetFile())}
-	if d := resp.GetDisplaced(); d != nil {
-		f := fileFromPB(d)
-		out.Displaced = &f
+	for _, d := range resp.GetDisplaced() {
+		out.Displaced = append(out.Displaced, fileFromPB(d))
 	}
 	return out, nil
 }

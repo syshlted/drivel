@@ -327,6 +327,7 @@ and in the file they live in an account table or `[mount.provider]`.
 | `-index FILE` | `index` | `drivel-index.db` | The persistent path↔file-ID cache. `""` disables persistence, which costs API round trips and nothing else. |
 | `-drive-sweep-mode M` | `sweep-mode` | `auto` | How the enumeration sweep walks Drive: see below. |
 | `-drive-delete M` | `delete` | `trash` | What removing a file does remotely: see below. |
+| `-drive-overwrite-check M` | `overwrite-check` | `large` | Which uploads check afterwards for an edit made on Drive while they ran: see below. |
 | — | `scope` | `drive` | The OAuth scope the token was granted, as `login` recorded it. |
 
 ### `-drive-sweep-mode`
@@ -373,6 +374,26 @@ ones a sweep infers alike. It does not affect deletions made *to* you: a file
 another client removes is deleted from your backing directory whichever mode you
 run, as long as it still holds what was last synced — an edit you have not
 uploaded yet is kept (see [data safety](data-safety.md#deletion)).
+
+### `-drive-overwrite-check`
+
+Google Drive cannot refuse an upload because the file changed while it was being
+sent, so Drivel checks afterwards. It compares the file's revision history from
+just before the upload with just after, and keeps any edit that arrived in
+between as a conflict copy. Each check costs two extra requests. See
+[when both machines upload](data-safety.md#when-both-machines-upload) for what is
+caught and what is left open.
+
+- **`large`** (the default) checks uploads of 4 MiB or more, where the transfer
+  takes long enough for another edit to land during it.
+- **`always`** checks every upload of a file this mount has synced before. Worth
+  it for a folder where several people edit the same small files at once.
+- **`off`** checks nothing. An edit that lands during an upload is overwritten
+  with no conflict copy. It is still in the file's revision history on
+  [drive.google.com](https://drive.google.com), for as long as Drive keeps old
+  versions (30 days).
+
+An unknown value is refused at startup.
 
 ## SFTP options
 

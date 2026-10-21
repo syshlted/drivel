@@ -8,6 +8,8 @@ package syncengine
 import (
 	"bytes"
 	"context"
+	"crypto/md5"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"strings"
@@ -28,10 +30,13 @@ import (
 // content has been read and before the expectation is checked — another
 // client's write landing during the upload. With displace the store behaves
 // like Drive (no conditional write: it replaces, then reports what it
-// displaced); without, like SFTP (it refuses with ErrChanged).
+// displaced); without, like SFTP (it refuses with ErrChanged). earlier, with
+// displace, is one more edit displaced by the same upload, dated before the
+// other: two that landed during one transfer.
 type uploadStore struct {
 	*patchStore
 	displace  bool
+	earlier   []byte
 	meanwhile func(s *uploadStore, p string)
 
 	omu      sync.Mutex
@@ -68,13 +73,22 @@ func (s *uploadStore) Upload(_ context.Context, p string, r io.Reader, opts prov
 			s.record("Upload(%s) refused: changed", p)
 			return provider.Uploaded{}, fmt.Errorf("upload %s: %w", p, provider.ErrChanged)
 		}
+		s.omu.Lock()
+		if s.earlier != nil {
+			sum := md5.Sum(s.earlier)
+			e := provider.RemoteFile{
+				Path: p, Size: int64(len(s.earlier)), Hash: hex.EncodeToString(sum[:]),
+				Version: "earlier", Modified: time.Date(2026, 10, 20, 9, 29, 0, 0, time.UTC),
+			}
+			s.versions[e.Version] = s.earlier
+			out.Displaced = append(out.Displaced, e)
+		}
 		d := s.file(p)
 		d.Version = fmt.Sprintf("was-%d", len(s.versions))
 		d.Modified = time.Date(2026, 10, 20, 9, 30, 0, 0, time.UTC)
-		s.omu.Lock()
 		s.versions[d.Version] = append([]byte(nil), cur...)
 		s.omu.Unlock()
-		out.Displaced = &d
+		out.Displaced = append(out.Displaced, d)
 	}
 	s.content[p] = b
 	s.record("Upload(%s,bytes=%d)", p, len(b))
@@ -183,6 +197,25 @@ func TestADisplacedEditIsKeptAsAConflictCopy(t *testing.T) {
 	}
 	if !strings.Contains(logs.String(), "an edit made on the remote during this upload was replaced by it") {
 		t.Fatalf("the displaced edit was not reported:\n%s", logs)
+	}
+}
+
+// Two edits that landed during one upload are two conflict copies: keeping
+// only one of what the store reported would lose the other as surely as not
+// checking at all.
+func TestEveryDisplacedEditIsKept(t *testing.T) {
+	store := newUploadStore()
+	store.displace = true
+	store.earlier = []byte("an edit before theirs")
+	store.meanwhile = func(s *uploadStore, p string) { s.seed(p, []byte("their edit, made meanwhile")) }
+	dir, _, mk := divergedFixtureWith(t, store, "base", "base", "ours")
+	e := mk()
+
+	e.handle(context.Background(), fsevent.Event{Op: fsevent.OpWrite, Path: "a.txt"})
+
+	copies := conflictCopies(t, dir)
+	if len(copies) != 2 || !containsValue(copies, "their edit, made meanwhile") || !containsValue(copies, "an edit before theirs") {
+		t.Fatalf("conflict copies = %v; want both displaced edits kept", copies)
 	}
 }
 

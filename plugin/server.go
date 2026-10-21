@@ -160,8 +160,8 @@ func (s *server) Upload(stream pb.Provider_UploadServer) error {
 			return nil, err
 		}
 		out := &pb.UploadResponse{File: fileToPB(up.File)}
-		if up.Displaced != nil {
-			out.Displaced = fileToPB(*up.Displaced)
+		for _, d := range up.Displaced {
+			out.Displaced = append(out.Displaced, fileToPB(d))
 		}
 		return out, nil
 	})

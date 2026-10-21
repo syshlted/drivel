@@ -293,9 +293,11 @@ rule. Then do one of three things:
   retries, keeps the newer remote as a conflict copy, and uploads again. SFTP
   `Stat`s the destination just before its rename.
 - **Report afterwards** if it can only tell then. Fill `Uploaded.Displaced` with
-  the version your upload replaced, and implement `GetVersion` so the engine can
-  read it back and keep it. Drive lists revisions when its version counter moved
-  by more than one.
+  every version your upload replaced, oldest first, and implement `GetVersion`
+  so the engine can read each back and keep it. Identify them by something that
+  does not depend on order or dates: Drive lists the file's revisions before and
+  after the upload and takes what is new, because its listing is sorted by a
+  modification time the writer sets.
 - **Ignore it** if you can do neither. That is exactly as safe as `Put`, no less.
 
 Without `Upload`, files are dated to their upload on every other client, and an

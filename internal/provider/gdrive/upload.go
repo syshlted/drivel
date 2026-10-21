@@ -6,15 +6,18 @@
 package gdrive
 
 import (
+	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
-	"strconv"
+	"sort"
 	"strings"
 	"time"
 
 	"google.golang.org/api/drive/v3"
 
+	"github.com/syshlted/drivel/internal/provider/gdrive/gdconf"
 	"github.com/syshlted/drivel/provider"
 )
 
@@ -25,8 +28,9 @@ import (
 // conditional update — v2's etag and If-Match did not survive into v3 — so the
 // engine's Stat before the upload was the last look anybody got, and a write
 // landing during a long upload was replaced unseen. What Drive does keep is
-// every revision, so the check is made afterwards instead (displacedBy), and a
-// displaced edit is reported for the engine to keep as the conflict's loser.
+// every revision, so a rewrite the mount's overwrite-check covers compares the
+// file's revisions before and after it (checkBefore, displacedBy), and reports
+// any edit it replaced for the engine to keep as a conflict copy.
 func (d *Drive) Upload(ctx context.Context, p string, r io.Reader, opts provider.UploadOptions) (provider.Uploaded, error) {
 	return d.upload(ctx, p, r, opts)
 }
@@ -35,63 +39,102 @@ func (d *Drive) Upload(ctx context.Context, p string, r io.Reader, opts provider
 // file's version counter, which is what GetVersion accepts.
 const revisionVersion = "rev:"
 
-// displacedBy reports the revision an update of p replaced, when that was not
-// the content the caller expected (want), or nil.
+// checkBefore decides whether a rewrite of p (file id) is checked for an edit it
+// replaces, and if so lists the revisions the file has before the upload
+// begins. It returns the reader the upload must use, because deciding by size
+// reads the start of r.
 //
-// Every change to a file moves its version counter by at least one, so a new
-// version exactly one past the one the caller saw means nothing else touched
-// the file in between and no request is needed — the common case. Any larger
-// step lists the revisions and looks at the one just before the update's own:
-// if it holds what want describes, whatever moved the counter was not content.
-// A failure to look is logged and reported as nothing displaced, which is no
-// worse than the Put this replaces; the upload itself has succeeded.
-func (d *Drive) displacedBy(ctx context.Context, p string, res *drive.File, want provider.RemoteFile) *provider.RemoteFile {
-	if before, err := strconv.ParseInt(want.Version, 10, 64); err == nil && res.Version == before+1 {
-		return nil
-	}
-	if res.HeadRevisionId == "" {
-		d.logf("[drive] %s: no head revision reported, so whether this upload replaced somebody else's edit is unknown", p)
-		return nil
-	}
-	revs, err := d.revisions(ctx, res.Id)
-	if err != nil {
-		d.logf("[drive] %s: listing revisions to check for an edit this upload replaced: %v", p, err)
-		return nil
-	}
-	head := -1
-	for i, r := range revs {
-		if r.Id == res.HeadRevisionId {
-			head = i
+// A listing that fails leaves the rewrite unchecked, which is no worse than the
+// Put it replaces; the upload goes ahead.
+func (d *Drive) checkBefore(ctx context.Context, p, id string, r io.Reader) (io.Reader, []*drive.Revision, bool, error) {
+	switch d.overwriteMode {
+	case OverwriteOff:
+		return r, nil, false, nil
+	case OverwriteAlways:
+	default:
+		// Read up to the threshold and put it back in front: a rewrite that ends
+		// before it is a small one. A buffer grown to what was read, not one of
+		// the threshold's size, because most rewrites are small.
+		var head bytes.Buffer
+		n, err := io.CopyN(&head, r, gdconf.OverwriteCheckMinSize)
+		r = io.MultiReader(&head, r)
+		if errors.Is(err, io.EOF) || (err == nil && n < gdconf.OverwriteCheckMinSize) {
+			return r, nil, false, nil
+		}
+		if err != nil {
+			return nil, nil, false, err
 		}
 	}
-	if head < 1 {
-		// Ours is missing, or nothing precedes it that Drive still keeps.
-		return nil
+	revs, err := d.revisions(ctx, id)
+	if err != nil {
+		d.logf("[drive] %s: listing revisions before the upload, to find an edit it might replace: %v (this upload is not checked)", p, err)
+		return r, nil, false, nil
 	}
-	prev := revs[head-1]
-	if prev.Md5Checksum == "" || prev.Md5Checksum == want.Hash || prev.Md5Checksum == res.Md5Checksum {
-		return nil
-	}
-	var modified time.Time
-	if prev.ModifiedTime != "" {
-		modified, _ = time.Parse(time.RFC3339, prev.ModifiedTime)
-	}
-	return &provider.RemoteFile{
-		Path:     p,
-		Size:     prev.Size,
-		Hash:     prev.Md5Checksum,
-		Version:  revisionVersion + prev.Id,
-		Modified: modified,
-	}
+	return r, revs, true, nil
 }
 
-// revisions lists every revision Drive keeps for fileID, oldest first.
+// displacedBy reports the edits an update of p (file id) replaced: revisions
+// that exist now and did not when the upload began (before), other than the
+// update's own, holding neither its content nor what the caller expected to
+// replace (want). Oldest first. A failure to look is logged and reported as
+// nothing displaced; the upload itself has succeeded.
+//
+// By set and never by position, because Drive lists revisions by modifiedTime,
+// and an upload sets that from the writer's clock (Upload's Modified): the
+// revision listed before ours is whichever was dated earlier, not the one ours
+// replaced. Reading the list that way reported an old revision of the file as
+// somebody's edit, and would have missed a real edit dated before ours. Nor by
+// the file's version counter, which one update moves by anything from one to
+// four and which moves again with nobody writing — both measured on the live
+// rig (TestLiveUpload).
+//
+// What the set cannot tell apart is an edit that landed after ours but before
+// the second listing: it is reported too, and kept as a copy of what the file
+// now holds anyway, which duplicates and loses nothing.
+func (d *Drive) displacedBy(ctx context.Context, p, id string, res *drive.File, before []*drive.Revision, want provider.RemoteFile) []provider.RemoteFile {
+	after, err := d.revisions(ctx, id)
+	if err != nil {
+		d.logf("[drive] %s: listing revisions to find an edit this upload replaced: %v (if one landed during it, it is in the file's revision history)", p, err)
+		return nil
+	}
+	known := make(map[string]bool, len(before))
+	for _, r := range before {
+		known[r.Id] = true
+	}
+	var out []provider.RemoteFile
+	for _, r := range after {
+		if known[r.Id] || r.Id == res.HeadRevisionId {
+			continue
+		}
+		// The same bytes as ours or as what we meant to replace: nobody's work
+		// is lost with it.
+		if r.Md5Checksum == "" || r.Md5Checksum == want.Hash || r.Md5Checksum == res.Md5Checksum {
+			continue
+		}
+		var modified time.Time
+		if r.ModifiedTime != "" {
+			modified, _ = time.Parse(time.RFC3339Nano, r.ModifiedTime)
+		}
+		out = append(out, provider.RemoteFile{
+			Path:     p,
+			Size:     r.Size,
+			Hash:     r.Md5Checksum,
+			Version:  revisionVersion + r.Id,
+			Modified: modified,
+		})
+	}
+	sort.SliceStable(out, func(i, j int) bool { return out[i].Modified.Before(out[j].Modified) })
+	return out
+}
+
+// revisions lists every revision Drive keeps for fileID, in Drive's order,
+// which is by modifiedTime and not by when each was made.
 func (d *Drive) revisions(ctx context.Context, fileID string) ([]*drive.Revision, error) {
 	var out []*drive.Revision
 	token := ""
 	for {
 		call := d.svc.Revisions.List(fileID).PageSize(1000).
-			Fields("nextPageToken,revisions(id,md5Checksum,size,modifiedTime,keepForever)").Context(ctx)
+			Fields("nextPageToken,revisions(id,md5Checksum,size,modifiedTime)").Context(ctx)
 		if token != "" {
 			call = call.PageToken(token)
 		}
@@ -107,13 +150,14 @@ func (d *Drive) revisions(ctx context.Context, fileID string) ([]*drive.Revision
 }
 
 // GetVersion implements provider.VersionGetter for the revisions displacedBy
-// names.
+// names: a download of that revision, while Drive still keeps it (a revision
+// that is not the head is purged 30 days after it was replaced).
 //
-// Drive serves a blob revision's content only once it is marked keep-forever,
-// so the revision is marked first and unmarked when the reader is closed: kept,
-// it would count against the user's quota for good and use one of the 200
-// marks a file can carry. A failure to unmark is logged and left; the revision
-// then simply stays.
+// Nothing is marked keep-forever to read it. Drive serves a superseded
+// revision without the mark, and a mark cannot be taken back — Drive refuses
+// to set keepForever false again (illegalKeepForeverModification) — so marking
+// one would hold it against the user's quota for good and spend one of the 200
+// marks a file can carry. Both measured on the live rig (TestLiveUpload).
 func (d *Drive) GetVersion(ctx context.Context, p, version string) (io.ReadCloser, error) {
 	revID, ok := strings.CutPrefix(version, revisionVersion)
 	if !ok || revID == "" {
@@ -125,52 +169,12 @@ func (d *Drive) GetVersion(ctx context.Context, p, version string) (io.ReadClose
 	if !exists {
 		return nil, fmt.Errorf("version %q of %s: %w", version, p, provider.ErrNotExist)
 	}
-	keep := func(on bool) error {
-		_, err := d.svc.Revisions.Update(fileID, revID, &drive.Revision{KeepForever: on, ForceSendFields: []string{"KeepForever"}}).
-			Fields("id,keepForever").Context(ctx).Do()
-		return err
-	}
-	marked := keep(true) == nil
-	resp, err := d.svc.Revisions.Get(fileID, revID).Context(ctx).Download() //nolint:bodyclose // closed by revisionBody.Close
+	resp, err := d.svc.Revisions.Get(fileID, revID).Context(ctx).Download() //nolint:bodyclose // the caller closes it
 	if err != nil {
-		if marked {
-			_ = keep(false)
-		}
 		if isNotFound(err) {
 			return nil, fmt.Errorf("version %q of %s: %w", version, p, provider.ErrNotExist)
 		}
 		return nil, classify(err)
 	}
-	return &revisionBody{ReadCloser: resp.Body, unmark: func() error {
-		if !marked {
-			return nil
-		}
-		// Not the caller's context: it may be cancelled by the time the body has
-		// been read, and an unmark that cannot run keeps the revision forever.
-		uctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancel()
-		_, err := d.svc.Revisions.Update(fileID, revID, &drive.Revision{KeepForever: false, ForceSendFields: []string{"KeepForever"}}).
-			Fields("id,keepForever").Context(uctx).Do()
-		return err
-	}, logf: d.logf, what: p}, nil
-}
-
-// revisionBody is a revision's content that unmarks the revision when closed.
-type revisionBody struct {
-	io.ReadCloser
-	unmark func() error
-	logf   func(string, ...any)
-	what   string
-	done   bool
-}
-
-func (b *revisionBody) Close() error {
-	err := b.ReadCloser.Close()
-	if !b.done {
-		b.done = true
-		if uerr := b.unmark(); uerr != nil {
-			b.logf("[drive] %s: unmarking the displaced revision after reading it: %v (it stays kept)", b.what, uerr)
-		}
-	}
-	return err
+	return resp.Body, nil
 }

@@ -666,7 +666,7 @@ func (x *UploadOptions) GetReplaces() *File {
 type UploadResponse struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	File          *File                  `protobuf:"bytes,1,opt,name=file,proto3" json:"file,omitempty"`
-	Displaced     *File                  `protobuf:"bytes,2,opt,name=displaced,proto3" json:"displaced,omitempty"` // unset when nothing unexpected was replaced
+	Displaced     []*File                `protobuf:"bytes,3,rep,name=displaced,proto3" json:"displaced,omitempty"` // oldest first; empty when nothing unexpected was replaced
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -708,7 +708,7 @@ func (x *UploadResponse) GetFile() *File {
 	return nil
 }
 
-func (x *UploadResponse) GetDisplaced() *File {
+func (x *UploadResponse) GetDisplaced() []*File {
 	if x != nil {
 		return x.Displaced
 	}
@@ -1859,10 +1859,10 @@ const file_drivel_plugin_v1_provider_proto_rawDesc = "" +
 	"\rUploadOptions\x12\x16\n" +
 	"\x06create\x18\x01 \x01(\bR\x06create\x126\n" +
 	"\bmodified\x18\x02 \x01(\v2\x1a.google.protobuf.TimestampR\bmodified\x122\n" +
-	"\breplaces\x18\x03 \x01(\v2\x16.drivel.plugin.v1.FileR\breplaces\"r\n" +
+	"\breplaces\x18\x03 \x01(\v2\x16.drivel.plugin.v1.FileR\breplaces\"x\n" +
 	"\x0eUploadResponse\x12*\n" +
 	"\x04file\x18\x01 \x01(\v2\x16.drivel.plugin.v1.FileR\x04file\x124\n" +
-	"\tdisplaced\x18\x02 \x01(\v2\x16.drivel.plugin.v1.FileR\tdisplaced\"A\n" +
+	"\tdisplaced\x18\x03 \x03(\v2\x16.drivel.plugin.v1.FileR\tdisplacedJ\x04\b\x02\x10\x03\"A\n" +
 	"\x11GetVersionRequest\x12\x12\n" +
 	"\x04path\x18\x01 \x01(\tR\x04path\x12\x18\n" +
 	"\aversion\x18\x02 \x01(\tR\aversion\":\n" +

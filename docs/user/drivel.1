@@ -66,6 +66,8 @@ drivel \- cloud-backed FUSE interceptor filesystem
 .IR mode ]
 .RB [ -drive-delete
 .IR mode ]
+.RB [ -drive-overwrite-check
+.IR mode ]
 .RB [ -lazy ]
 .RB [ -xattr ]
 .RB [ -resync ]
@@ -619,6 +621,19 @@ when the mount is how storage gets reclaimed \(em a trashed file still counts
 against the account's quota until the trash is emptied. An unknown value is
 refused at startup.
 .TP
+.BI -drive-overwrite-check " mode"
+Which uploads check, once they finish, for an edit made on Drive while they ran.
+Drive cannot refuse an upload over a changed file, so a checked upload compares
+the file's revision history from before it with after, and keeps any edit that
+arrived in between as a conflict copy, at the cost of two extra requests.
+.B large
+(the default) checks uploads of 4 MiB or more;
+.B always
+checks every upload of a file the mount has synced before;
+.B off
+checks none, leaving an overwritten edit only in the file's Drive revision
+history. An unknown value is refused at startup.
+.TP
 .B -lazy
 Enable lazy hydration. Remote files are materialised in the backing directory as
 .IR placeholders :
@@ -1054,7 +1069,7 @@ flags. Paths must be absolute, or begin with
 .RB \(dq ~/ \(dq
 for the mounting account's home.
 .TP
-.BR drive-root= ", " drive-delete= ", " drive-sweep-mode=
+.BR drive-root= ", " drive-delete= ", " drive-sweep-mode= ", " drive-overwrite-check=
 As the corresponding
 .B mount
 flags. Note

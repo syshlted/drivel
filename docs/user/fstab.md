@@ -100,6 +100,7 @@ would leave a mount nothing can address.
 | `drive-root=ID` | `-drive-root` | |
 | `drive-delete=MODE` | `-drive-delete` | `trash` (default) or `permanent`. See [data safety](data-safety.md#where-a-deleted-file-goes). |
 | `drive-sweep-mode=MODE` | `-drive-sweep-mode` | `auto` (default), `scoped` or `flat`. |
+| `drive-overwrite-check=MODE` | `-drive-overwrite-check` | `large` (default), `always` or `off`. See [configuration](configuration.md#-drive-overwrite-check). |
 | `name=NAME` | — | Overrides the device field. |
 | `lazy` | `-lazy` | Needs `account=` or `credentials=`. |
 | `xattr` | `-xattr` | Off by default, and [that default is a safety property](lazy-mode.md#why--xattr-is-off-by-default). |

@@ -201,7 +201,12 @@ message UploadOptions {
 // UploadResponse is provider.Uploaded.
 message UploadResponse {
   File file = 1;
-  File displaced = 2; // unset when nothing unexpected was replaced
+  // 2 was a single displaced File, for one day before any release. A repeated
+  // field on the same number would be merged into one File by a decoder that
+  // still expects a single one, so it moved instead: across the change, either
+  // side sees nothing displaced, which is what it saw before the field existed.
+  reserved 2;
+  repeated File displaced = 3; // oldest first; empty when nothing unexpected was replaced
 }
 
 message GetVersionRequest {

@@ -51,6 +51,11 @@ type Config struct {
 	// See DeleteMode — the default is the recoverable one because not every
 	// deletion drivel performs was asked for by a user.
 	Delete DeleteMode `toml:"delete"`
+	// OverwriteCheck selects which rewrites look, once they have finished, for
+	// an edit somebody else made while they were uploading: "large" (or "", the
+	// default) checks rewrites of OverwriteCheckMinSize or more, "always" every
+	// rewrite of a synced file, "off" none. See OverwriteMode.
+	OverwriteCheck OverwriteMode `toml:"overwrite-check"`
 	// Scope is the OAuth scope the token was granted, as `drivel login` recorded
 	// it. Empty means gauth.ScopeDrive.
 	//
@@ -122,4 +127,46 @@ var DeleteModes = []DeleteMode{DeleteTrash, DeletePermanent}
 // means DeleteTrash.
 func (m DeleteMode) Valid() bool {
 	return m == "" || m == DeleteTrash || m == DeletePermanent
+}
+
+// OverwriteMode selects which rewrites of a file look afterwards for an edit
+// they replaced.
+//
+// Drive cannot make an upload conditional on what it replaces, so an edit that
+// reaches a file between the engine's last look and the end of a rewrite is
+// overwritten unseen. A checked rewrite lists the file's revisions before it
+// starts and after it ends, and any revision that appeared in between and is
+// not its own is somebody's edit, which the engine keeps as a conflict copy.
+// Each check costs two requests. What an unchecked rewrite leaves open is the
+// time from the engine's look to the end of the upload: about two round trips
+// for a small file, the whole transfer for a large one.
+type OverwriteMode string
+
+const (
+	// OverwriteLarge checks rewrites of OverwriteCheckMinSize or more, where the
+	// transfer is long enough for an edit to land during it. The default, and
+	// what "" means.
+	OverwriteLarge OverwriteMode = "large"
+	// OverwriteAlways checks every rewrite of a file this mount has synced
+	// before, for a folder where several people edit the same small files.
+	OverwriteAlways OverwriteMode = "always"
+	// OverwriteOff checks nothing. An edit that lands during an upload is
+	// replaced with no conflict copy, and survives only in the file's Drive
+	// revision history, for as long as Drive keeps it (30 days).
+	OverwriteOff OverwriteMode = "off"
+)
+
+// OverwriteModes is every OverwriteMode, in the order the docs list them.
+var OverwriteModes = []OverwriteMode{OverwriteLarge, OverwriteAlways, OverwriteOff}
+
+// OverwriteCheckMinSize is the size from which OverwriteLarge checks a rewrite.
+// Below it the two listings cost about what the upload does, to narrow a window
+// that is already about one upload's round trip; the engine draws the same line
+// for the same reason (its unchanged-content gate).
+const OverwriteCheckMinSize = 4 << 20
+
+// Valid reports whether m is a mode the backend will accept. "" is valid and
+// means OverwriteLarge.
+func (m OverwriteMode) Valid() bool {
+	return m == "" || m == OverwriteLarge || m == OverwriteAlways || m == OverwriteOff
 }

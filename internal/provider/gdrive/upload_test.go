@@ -15,6 +15,7 @@ import (
 
 	"google.golang.org/api/drive/v3"
 
+	"github.com/syshlted/drivel/internal/provider/gdrive/gdconf"
 	"github.com/syshlted/drivel/provider"
 )
 
@@ -49,36 +50,23 @@ func TestUploadCarriesTheModificationTime(t *testing.T) {
 }
 
 // Drive has no conditional update, so a write landing during ours is found
-// afterwards, in the revision history, and reported with a version GetVersion
-// reads — which it can only do once the revision is kept, and it un-keeps it
-// after.
+// afterwards, as a revision that appeared while the upload ran, and reported
+// with a version GetVersion reads — without marking anything kept forever,
+// which Drive will not let it take back.
 func TestUploadReportsAnEditItReplaced(t *testing.T) {
 	d, fake := newFakeDrive(t)
-	if _, err := d.Put(ctx, "doc.txt", strings.NewReader("as last synced")); err != nil {
-		t.Fatal(err)
-	}
-	seen, _, err := d.Stat(ctx, "doc.txt")
-	if err != nil {
-		t.Fatal(err)
-	}
-	fake.mu.Lock()
-	fake.interloper = func(f *fakeDrive, file *drive.File) {
-		f.interloper = nil
-		f.writeBodyLocked(file, []byte("their edit, made meanwhile"))
-	}
-	fake.mu.Unlock()
+	d.overwriteMode = OverwriteAlways
+	seen := synced(t, d, "doc.txt", "as last synced")
+	interlope(fake, "their edit, made meanwhile", "")
 
 	up, err := d.Upload(ctx, "doc.txt", strings.NewReader("my edit"), provider.UploadOptions{Replaces: &seen})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if up.Displaced == nil {
-		t.Fatal("an edit replaced during the upload was not reported")
-	}
-	if up.Displaced.Hash != md5Of("their edit, made meanwhile") {
+	if len(up.Displaced) != 1 || up.Displaced[0].Hash != md5Of("their edit, made meanwhile") {
 		t.Fatalf("displaced = %+v; want their edit", up.Displaced)
 	}
-	rc, err := d.GetVersion(ctx, "doc.txt", up.Displaced.Version)
+	rc, err := d.GetVersion(ctx, "doc.txt", up.Displaced[0].Version)
 	if err != nil {
 		t.Fatalf("GetVersion: %v", err)
 	}
@@ -94,62 +82,170 @@ func TestUploadReportsAnEditItReplaced(t *testing.T) {
 	}
 	fake.mu.Lock()
 	defer fake.mu.Unlock()
-	id := d.idByPath["doc.txt"]
-	for _, rev := range fake.revs[id] {
-		if rev.KeepForever {
-			t.Errorf("revision %s is still kept forever after it was read", rev.Id)
+	if fake.revUpd != 0 {
+		t.Fatalf("%d revision update(s) to read a displaced version; want none", fake.revUpd)
+	}
+}
+
+// The edit is found whatever it is dated. A writer carrying an old local
+// modification time — an edit made offline yesterday, a `cp -p` — makes a
+// revision Drive lists ahead of the one we replaced, so "the revision before
+// ours" was what we expected to replace and the edit went unreported.
+func TestAnEditDatedBeforeOursIsFound(t *testing.T) {
+	d, fake := newFakeDrive(t)
+	d.overwriteMode = OverwriteAlways
+	seen := synced(t, d, "doc.txt", "as last synced")
+	interlope(fake, "an edit made offline last year", "2025-01-01T00:00:00Z")
+
+	up, err := d.Upload(ctx, "doc.txt", strings.NewReader("my edit"), provider.UploadOptions{Replaces: &seen, Modified: time.Now()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(up.Displaced) != 1 || up.Displaced[0].Hash != md5Of("an edit made offline last year") {
+		t.Fatalf("displaced = %+v; want the back-dated edit", up.Displaced)
+	}
+}
+
+// And nothing is found where nothing happened, however the history is dated.
+// A file whose last rewrite carried an old time (restored from a backup, say)
+// has that revision listed first, and the revision listed before the next
+// rewrite's is then some older one — which was reported as somebody's edit,
+// and became a conflict copy of a version nobody had just written. The live
+// rig did exactly that.
+func TestARewriteOverABackDatedOneDisplacesNothing(t *testing.T) {
+	d, fake := newFakeDrive(t)
+	d.overwriteMode = OverwriteAlways
+	synced(t, d, "doc.txt", "first")
+	restored := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
+	if _, err := d.Upload(ctx, "doc.txt", strings.NewReader("restored"), provider.UploadOptions{Modified: restored}); err != nil {
+		t.Fatal(err)
+	}
+	seen, _, _ := d.Stat(ctx, "doc.txt")
+
+	up, err := d.Upload(ctx, "doc.txt", strings.NewReader("edited"), provider.UploadOptions{Replaces: &seen})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(up.Displaced) != 0 {
+		t.Fatalf("displaced = %+v; nobody else wrote the file", up.Displaced)
+	}
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	if fake.revList != 2 {
+		t.Fatalf("%d revision listing(s) for a checked rewrite; want 2", fake.revList)
+	}
+}
+
+// An edit during the upload that wrote what we expected to replace, or what we
+// were writing, loses nobody's work, so it is no conflict.
+func TestAnEditOfTheSameBytesIsNoConflict(t *testing.T) {
+	for _, same := range []string{"as last synced", "my edit"} {
+		d, fake := newFakeDrive(t)
+		d.overwriteMode = OverwriteAlways
+		seen := synced(t, d, "doc.txt", "as last synced")
+		interlope(fake, same, "")
+		up, err := d.Upload(ctx, "doc.txt", strings.NewReader("my edit"), provider.UploadOptions{Replaces: &seen})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(up.Displaced) != 0 {
+			t.Errorf("an edit writing %q during the upload was reported displaced: %+v", same, up.Displaced)
 		}
 	}
 }
 
-// The common case costs nothing: nobody wrote in between, the version moved by
-// exactly one, and no revision listing is made.
-func TestAnUncontestedUploadListsNoRevisions(t *testing.T) {
-	d, fake := newFakeDrive(t)
-	if _, err := d.Put(ctx, "doc.txt", strings.NewReader("old")); err != nil {
-		t.Fatal(err)
-	}
-	seen, _, _ := d.Stat(ctx, "doc.txt")
-	up, err := d.Upload(ctx, "doc.txt", strings.NewReader("new"), provider.UploadOptions{Replaces: &seen})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if up.Displaced != nil {
-		t.Fatalf("displaced = %+v; nothing was written in between", up.Displaced)
-	}
-	fake.mu.Lock()
-	defer fake.mu.Unlock()
-	if fake.revList != 0 {
-		t.Fatalf("%d revision listing(s) for an uncontested upload; want none", fake.revList)
-	}
-}
-
-// A change in between that was not content — a rename, a share — moves the
-// version too. The revision before ours still holds what was expected, so
-// nothing is reported displaced.
+// A change in between that was not content — a rename, a share, or Drive's own
+// bookkeeping, which moves the version with nobody writing — makes no revision,
+// so nothing is reported.
 func TestAMetadataChangeInBetweenDisplacesNothing(t *testing.T) {
 	d, fake := newFakeDrive(t)
-	if _, err := d.Put(ctx, "doc.txt", strings.NewReader("old")); err != nil {
-		t.Fatal(err)
-	}
-	seen, _, _ := d.Stat(ctx, "doc.txt")
+	d.overwriteMode = OverwriteAlways
+	seen := synced(t, d, "doc.txt", "old")
 	fake.mu.Lock()
 	fake.interloper = func(f *fakeDrive, file *drive.File) {
 		f.interloper = nil
-		file.Version++ // metadata only
+		file.Version += 3 // metadata only
 	}
 	fake.mu.Unlock()
 	up, err := d.Upload(ctx, "doc.txt", strings.NewReader("new"), provider.UploadOptions{Replaces: &seen})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if up.Displaced != nil {
+	if len(up.Displaced) != 0 {
 		t.Fatalf("displaced = %+v after a metadata-only change", up.Displaced)
+	}
+}
+
+// overwrite-check decides which rewrites pay the two listings. Each case has an
+// edit landing during the upload, so whether it was found is whether the
+// rewrite was checked.
+func TestOverwriteCheckFollowsTheMode(t *testing.T) {
+	small, large := "a small rewrite", strings.Repeat("x", gdconf.OverwriteCheckMinSize)
+	for _, tc := range []struct {
+		mode    OverwriteMode
+		body    string
+		checked bool
+	}{
+		{"", small, false},
+		{"", large, true},
+		{OverwriteLarge, small, false},
+		{OverwriteLarge, large[:len(large)-1], false},
+		{OverwriteLarge, large, true},
+		{OverwriteAlways, small, true},
+		{OverwriteOff, small, false},
+		{OverwriteOff, large, false},
+	} {
+		d, fake := newFakeDrive(t)
+		d.overwriteMode = tc.mode
+		seen := synced(t, d, "doc.txt", "as last synced")
+		interlope(fake, "their edit", "")
+		up, err := d.Upload(ctx, "doc.txt", strings.NewReader(tc.body), provider.UploadOptions{Replaces: &seen})
+		if err != nil {
+			t.Fatal(err)
+		}
+		id := d.idByPath["doc.txt"]
+		fake.mu.Lock()
+		got, lists := fake.content[id], fake.revList
+		fake.mu.Unlock()
+		if string(got) != tc.body {
+			t.Fatalf("mode %q, %d bytes: the remote holds %d bytes, not the upload", tc.mode, len(tc.body), len(got))
+		}
+		if want := map[bool]int{true: 2, false: 0}[tc.checked]; lists != want {
+			t.Errorf("mode %q, %d bytes: %d revision listing(s); want %d", tc.mode, len(tc.body), lists, want)
+		}
+		if found := len(up.Displaced) == 1; found != tc.checked {
+			t.Errorf("mode %q, %d bytes: the edit made during the upload found = %v; want %v", tc.mode, len(tc.body), found, tc.checked)
+		}
+	}
+}
+
+// A first upload and a Put expect nothing, so neither is checked.
+func TestOnlyARewriteWithAnExpectationIsChecked(t *testing.T) {
+	d, fake := newFakeDrive(t)
+	d.overwriteMode = OverwriteAlways
+	if _, err := d.Upload(ctx, "doc.txt", strings.NewReader("new"), provider.UploadOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.Put(ctx, "doc.txt", strings.NewReader("newer")); err != nil {
+		t.Fatal(err)
 	}
 	fake.mu.Lock()
 	defer fake.mu.Unlock()
-	if fake.revList != 1 {
-		t.Fatalf("%d revision listing(s); the moved version should have cost exactly one", fake.revList)
+	if fake.revList != 0 {
+		t.Fatalf("%d revision listing(s) for uploads that expected nothing; want none", fake.revList)
+	}
+}
+
+// An unreadable overwrite-check is refused at open (M8 rule 6): a misspelled
+// "off" would go on paying for checks, and a misspelled "always" would leave
+// unchecked the small files it was set for.
+func TestOpenRejectsAnUnknownOverwriteCheck(t *testing.T) {
+	_, err := Open(ctx, Config{Credentials: "unused.json", OverwriteCheck: "sometimes"})
+	if err == nil {
+		t.Fatal("open accepted overwrite-check \"sometimes\"")
+	}
+	if !strings.Contains(err.Error(), "overwrite-check") {
+		t.Fatalf("error %q does not name the option that was wrong", err)
 	}
 }
 
@@ -160,5 +256,31 @@ func TestGetVersionRefusesAVersionItNeverReported(t *testing.T) {
 	}
 	if _, err := d.GetVersion(ctx, "doc.txt", "17"); err == nil {
 		t.Fatal("GetVersion accepted a file version counter as a revision")
+	}
+}
+
+// synced writes body to p and returns what a Stat then reports, as the engine
+// holds it before a rewrite.
+func synced(t *testing.T, d *Drive, p, body string) provider.RemoteFile {
+	t.Helper()
+	if _, err := d.Put(ctx, p, strings.NewReader(body)); err != nil {
+		t.Fatal(err)
+	}
+	seen, _, err := d.Stat(ctx, p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return seen
+}
+
+// interlope lands another client's write of body inside the next update with a
+// body, dated as given ("" for the server's clock).
+func interlope(fake *fakeDrive, body, dated string) {
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	fake.interloper = func(f *fakeDrive, file *drive.File) {
+		f.interloper = nil
+		f.writeBodyLocked(file, []byte(body))
+		f.datedLocked(file, dated)
 	}
 }

@@ -348,9 +348,9 @@ type Copier interface {
 // Replaces asks the store to make that check as late as it can. A store that
 // can refuse before replacing returns ErrChanged and leaves the path alone. One
 // that can only find out afterwards — Drive has no conditional write — reports
-// the version it displaced in Uploaded.Displaced, readable through
-// VersionGetter for as long as the backend keeps it, and the engine keeps it as
-// the conflict's losing side. A store that can do neither ignores Replaces, and
+// the versions it displaced in Uploaded.Displaced, readable through
+// VersionGetter for as long as the backend keeps them, and the engine keeps
+// each as a conflict's losing side. A store that can do neither ignores Replaces, and
 // is then exactly as safe as Put.
 type Uploader interface {
 	Upload(ctx context.Context, path string, r io.Reader, opts UploadOptions) (Uploaded, error)
@@ -397,11 +397,12 @@ func Matches(want, got RemoteFile) bool {
 type Uploaded struct {
 	File RemoteFile
 
-	// Displaced is the version this upload replaced when that was not
-	// Replaces, for a store that can tell only after the fact. Its Version is a
-	// name VersionGetter.GetVersion accepts. Nil when nothing unexpected was
-	// replaced, or when the store cannot say.
-	Displaced *RemoteFile
+	// Displaced are the versions this upload replaced that were not Replaces —
+	// edits that reached the store during it — for a store that can tell only
+	// after the fact. Oldest first; more than one when several landed during one
+	// upload. Each Version is a name VersionGetter.GetVersion accepts. Empty when
+	// nothing unexpected was replaced, or when the store cannot say.
+	Displaced []RemoteFile
 }
 
 // VersionGetter is an OPTIONAL capability: reading a version of an object

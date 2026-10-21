@@ -1120,12 +1120,25 @@ on Drive since 2026-10-20** (`provider.Uploader`, `UploadOptions.Replaces`):
 SFTP re-`Stat`s right before its rename and refuses with `provider.ErrChanged`,
 which `Engine.sendWhole` turns into a retry whose divergence check keeps the
 newer remote first; Drive, with no conditional update in v3, checks afterwards
-— a `version` exactly one past the checked one is free, any larger step lists
-revisions — and reports the replaced revision in `Uploaded.Displaced`, which
-`keepDisplaced` reads back through `provider.VersionGetter` (keep-forever, read,
-unmark) and keeps as the loser. What remains is SFTP's one round trip between
-the re-`Stat` and the rename, and two *first* pushes on Drive (MC-30's siblings;
-SFTP's hard link closes those). The same capability carries the local mtime,
+by **revision set**: list before the upload, list after, and every revision new
+in between that is neither ours nor the checked hash comes back in
+`Uploaded.Displaced` (a list since 2026-10-21), which `keepDisplaced` reads back
+through `provider.VersionGetter` — a plain download — and keeps as a loser.
+**Three facts the live rig settled on 2026-10-21 decide that shape, and each
+broke the first version** (`TestLiveUpload`): `revisions.list` is ordered by
+*modifiedTime*, which `Upload` sets from the writer's clock, so "the revision
+before ours" was an arbitrary old one — a spurious conflict copy with nobody
+else writing, and a miss for an edit dated earlier than ours; `version` moves 1
+to 4 per update and again while idle, so it says nothing about other writers;
+and a superseded revision downloads *without* keep-forever while a mark, once
+set, **cannot be cleared** (`illegalKeepForeverModification`), so marking it
+pinned every displaced revision against quota for good. Which rewrites pay the
+two listings is the mount's `-drive-overwrite-check` (`large` default, from 4
+MiB; `always`; `off`), the user's choice. What remains is the round trip
+between the engine's `Stat` and the first listing on Drive (and below 4 MiB by
+default, the whole small upload), SFTP's one round trip between the re-`Stat`
+and the rename, and two *first* pushes on Drive (MC-30's siblings; SFTP's hard
+link closes those). The same capability carries the local mtime,
 in the content's own request, so remote mtimes are edit times now. It costs one `Stat` per
 small-file rewrite, which `TestSmallFileChecksTheRemoteOnlyWhenItHasABaseline`
 pins. **A path with no baseline is guarded at every size since 2026-10-18**,

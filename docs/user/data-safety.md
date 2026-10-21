@@ -150,17 +150,32 @@ while yours is still being sent. Since 20 October 2026 that is caught too:
   What is left is the moment between that last look and the move, a single round
   trip to the server.
 - On **Google Drive**, which has no way to refuse an upload over a changed file,
-  Drivel checks the file's revision history straight after its upload. If its
-  upload replaced somebody else's edit, that edit is downloaded from the
-  history and kept as a conflict copy:
+  Drivel lists the file's revisions just before an upload and again just after
+  it. A revision that appeared in between and is not Drivel's own is somebody
+  else's edit. It is downloaded from the history and kept as a conflict copy,
+  one copy per edit if several arrived:
 
   ```
   [sync] conflict report.txt: an edit made on the remote during this upload was replaced by it; kept it in .drivel-conflicts/report (conflict 2026-10-20 09-30-00).txt (here and on the remote)
   ```
 
-  This costs nothing when nobody else touched the file. If something did — even
-  just renaming it or changing who it is shared with — it costs one extra
-  request to list the revisions.
+  Each check costs two extra requests, so by default only uploads of 4 MiB or
+  more are checked: those take long enough for an edit to land during them.
+  A smaller upload is over within about two round trips of Drivel's last look
+  at the file, and an edit landing in that moment is overwritten. It survives
+  only in the file's revision history, as one does with the check turned off.
+  [`-drive-overwrite-check`](configuration.md#-drive-overwrite-check) changes
+  which uploads are checked: `always` checks every one, `off` none. Even a
+  checked upload leaves open the moment between Drivel's last look and the first
+  listing, about one round trip, as on SFTP.
+
+  Before 21 October 2026 the check looked at the revision listed just before the
+  upload's own. Drive lists revisions by their modification date, and uploads
+  carry your files' own dates. So that check could keep an old version of a file
+  as a conflict copy when nobody else had touched it, and could miss an edit
+  dated earlier than yours. It also marked each edit it read back "keep forever"
+  in Drive, a mark Drive does not let a program undo, so those versions went on
+  counting against your storage.
 
 Two first uploads of a new file can still both succeed on Google Drive, as two
 files of the same name (see [same-name siblings](#same-name-siblings)). On an

@@ -65,36 +65,37 @@ type hint struct {
 // Fields in order: summary, kind, enum values, zsh argument label.
 var completionHints = map[string]hint{
 	// --- mount ---------------------------------------------------------------
-	"mount/config":             {"TOML file describing one or more mounts", completion.File, nil, "config file"},
-	"mount/mount":              {"path to mount the filesystem (required unless -config)", completion.Dir, nil, "mountpoint"},
-	"mount/name":               {"serve only the mount with this name from the config file", completion.Opaque, nil, "mount name"},
-	"mount/account":            {"serve only the mounts belonging to this account", completion.Opaque, nil, "account name"},
-	"mount/list":               {"print the mounts the config file describes, and exit", completion.None, nil, ""},
-	"mount/full":               {"with -list, also show backing dir, state DB, mode, sweep and delete cap", completion.None, nil, ""},
-	"mount/data":               {"backing directory (source of truth); omit for in-place mode", completion.Dir, nil, "backing dir"},
-	"mount/credentials":        {"OAuth client secret JSON; enables Drive sync", completion.File, nil, "credentials file"},
-	"mount/token":              {"cached OAuth token from drivel login", completion.File, nil, "token file"},
-	"mount/state":              {"sync-state DB (cursor + echo records)", completion.File, nil, "state db"},
-	"mount/index":              {"provider path<->ID index; a cache, safe to delete", completion.File, nil, "index db"},
-	"mount/drive-root":         {"Drive folder ID mapped to the mount root", completion.Opaque, nil, "folder id"},
-	"mount/drive-sweep-mode":   {"how the enumeration sweep walks Drive", completion.Enum, sweepModes, "mode"},
-	"mount/drive-delete":       {"what removing a file does remotely: trash it, or delete it outright", completion.Enum, deleteModes, "mode"},
-	"mount/lazy":               {"materialise remote files as placeholders; fetch content on first read", completion.None, nil, ""},
-	"mount/xattr":              {"serve extended attributes through the mountpoint (off by default)", completion.None, nil, ""},
-	"mount/resync":             {"enumerate the remote tree and reconcile it at startup", completion.None, nil, ""},
-	"mount/materialize":        {"eager mode: download remote files that have no local copy", completion.None, nil, ""},
-	"mount/max-deletes":        {"cap on deletions one reconcile may infer; 0 for no limit", completion.Opaque, nil, "count"},
-	"mount/sweep-interval":     {"re-enumerate this often, from the last completed sweep; 0 disables", completion.Opaque, nil, "duration"},
-	"mount/push-delay":         {"how long a file must go unchanged before it is uploaded", completion.Opaque, nil, "duration"},
-	"mount/upload-workers":     {"how many files this mount uploads at once", completion.Opaque, nil, "count"},
-	"mount/hydrate-workers":    {"how many placeholders this mount fetches at once under -lazy", completion.Opaque, nil, "count"},
-	"mount/conflicts":          {"where the losing side of a conflict goes", completion.Enum, conflictActions, "action"},
-	"mount/conflicts-dir":      {"with -conflicts dir, where the .drivel-conflicts folders live", completion.Enum, conflictPlaces, "place"},
-	"mount/debug":              {"enable FUSE debug logging", completion.None, nil, ""},
-	"mount/pprof":              {"serve net/http/pprof on this address, e.g. localhost:6060", completion.Opaque, nil, "address"},
-	"mount/pprof-allow-remote": {"let -pprof bind a non-loopback address, publishing this process's heap", completion.None, nil, ""},
-	"mount/control":            {"serve the control & status API on a unix socket", completion.None, nil, ""},
-	"mount/control-socket":     {"with -control, the socket path to serve on", completion.File, nil, "socket"},
+	"mount/config":                {"TOML file describing one or more mounts", completion.File, nil, "config file"},
+	"mount/mount":                 {"path to mount the filesystem (required unless -config)", completion.Dir, nil, "mountpoint"},
+	"mount/name":                  {"serve only the mount with this name from the config file", completion.Opaque, nil, "mount name"},
+	"mount/account":               {"serve only the mounts belonging to this account", completion.Opaque, nil, "account name"},
+	"mount/list":                  {"print the mounts the config file describes, and exit", completion.None, nil, ""},
+	"mount/full":                  {"with -list, also show backing dir, state DB, mode, sweep and delete cap", completion.None, nil, ""},
+	"mount/data":                  {"backing directory (source of truth); omit for in-place mode", completion.Dir, nil, "backing dir"},
+	"mount/credentials":           {"OAuth client secret JSON; enables Drive sync", completion.File, nil, "credentials file"},
+	"mount/token":                 {"cached OAuth token from drivel login", completion.File, nil, "token file"},
+	"mount/state":                 {"sync-state DB (cursor + echo records)", completion.File, nil, "state db"},
+	"mount/index":                 {"provider path<->ID index; a cache, safe to delete", completion.File, nil, "index db"},
+	"mount/drive-root":            {"Drive folder ID mapped to the mount root", completion.Opaque, nil, "folder id"},
+	"mount/drive-sweep-mode":      {"how the enumeration sweep walks Drive", completion.Enum, sweepModes, "mode"},
+	"mount/drive-delete":          {"what removing a file does remotely: trash it, or delete it outright", completion.Enum, deleteModes, "mode"},
+	"mount/drive-overwrite-check": {"which rewrites check Drive for an edit they replaced", completion.Enum, overwriteModes, "mode"},
+	"mount/lazy":                  {"materialise remote files as placeholders; fetch content on first read", completion.None, nil, ""},
+	"mount/xattr":                 {"serve extended attributes through the mountpoint (off by default)", completion.None, nil, ""},
+	"mount/resync":                {"enumerate the remote tree and reconcile it at startup", completion.None, nil, ""},
+	"mount/materialize":           {"eager mode: download remote files that have no local copy", completion.None, nil, ""},
+	"mount/max-deletes":           {"cap on deletions one reconcile may infer; 0 for no limit", completion.Opaque, nil, "count"},
+	"mount/sweep-interval":        {"re-enumerate this often, from the last completed sweep; 0 disables", completion.Opaque, nil, "duration"},
+	"mount/push-delay":            {"how long a file must go unchanged before it is uploaded", completion.Opaque, nil, "duration"},
+	"mount/upload-workers":        {"how many files this mount uploads at once", completion.Opaque, nil, "count"},
+	"mount/hydrate-workers":       {"how many placeholders this mount fetches at once under -lazy", completion.Opaque, nil, "count"},
+	"mount/conflicts":             {"where the losing side of a conflict goes", completion.Enum, conflictActions, "action"},
+	"mount/conflicts-dir":         {"with -conflicts dir, where the .drivel-conflicts folders live", completion.Enum, conflictPlaces, "place"},
+	"mount/debug":                 {"enable FUSE debug logging", completion.None, nil, ""},
+	"mount/pprof":                 {"serve net/http/pprof on this address, e.g. localhost:6060", completion.Opaque, nil, "address"},
+	"mount/pprof-allow-remote":    {"let -pprof bind a non-loopback address, publishing this process's heap", completion.None, nil, ""},
+	"mount/control":               {"serve the control & status API on a unix socket", completion.None, nil, ""},
+	"mount/control-socket":        {"with -control, the socket path to serve on", completion.File, nil, "socket"},
 
 	// --- status / pause / resume / stop --------------------------------------
 	"status/socket": {"control socket of the drivel to ask", completion.File, nil, "socket"},
@@ -128,6 +129,8 @@ var completionHints = map[string]hint{
 var (
 	sweepModes  = modeStrings(gdconf.SweepModes)
 	deleteModes = modeStrings(gdconf.DeleteModes)
+
+	overwriteModes = modeStrings(gdconf.OverwriteModes)
 
 	conflictActions = modeStrings(syncengine.ConflictActions)
 	conflictPlaces  = modeStrings(syncengine.ConflictPlaces)

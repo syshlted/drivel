@@ -48,10 +48,11 @@ type fakeDrive struct {
 	// about content, not about IDs.
 	content map[string][]byte
 
-	// revs is each file's revision history, oldest first, as revisions.list
-	// returns it: one per content write. Drive serves a non-head revision's bytes
-	// only while it is marked keep-forever, and this fake enforces that, so a
-	// test that reads one proves the provider marked it first.
+	// revs is each file's revision history in the order the revisions were
+	// made: one per content write. revisions.list does NOT return them in this
+	// order — Drive sorts by modifiedTime, which an upload may set to anything —
+	// and serves any revision's bytes whether or not it is kept forever, but
+	// refuses to un-keep one. All three as the live rig showed (TestLiveUpload).
 	revs map[string][]*fakeRevision
 
 	// interloper, when set, runs inside an update with a body, before the update
@@ -71,6 +72,7 @@ type fakeDrive struct {
 	copies  int // Files.Copy
 	deletes int // Files.Delete
 	revList int // Revisions.List
+	revUpd  int // Revisions.Update
 
 	// nextID mints an opaque ID per create, as Drive does. It is what makes a
 	// same-name sibling possible at all: keying a created object by its name
@@ -405,6 +407,11 @@ func (f *fakeDrive) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			cp := rev.Revision
 			list.Revisions = append(list.Revisions, &cp)
 		}
+		sort.SliceStable(list.Revisions, func(i, j int) bool {
+			a, _ := time.Parse(time.RFC3339Nano, list.Revisions[i].ModifiedTime)
+			b, _ := time.Parse(time.RFC3339Nano, list.Revisions[j].ModifiedTime)
+			return a.Before(b)
+		})
 		writeJSON(w, list)
 
 	case reRevision.MatchString(fileIDPath):
@@ -422,15 +429,16 @@ func (f *fakeDrive) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		switch {
 		case r.Method == http.MethodPatch:
+			f.revUpd++
 			var in drive.Revision
 			_ = json.NewDecoder(r.Body).Decode(&in)
+			if rev.KeepForever && !in.KeepForever {
+				writeErr(w, http.StatusBadRequest, "Bad Request. Cannot update a revision to false that is marked as keepForever.")
+				return
+			}
 			rev.KeepForever = in.KeepForever
 			writeJSON(w, rev.Revision)
 		case r.Method == http.MethodGet && r.URL.Query().Get("alt") == "media":
-			if revs := f.revs[id]; !rev.KeepForever && rev != revs[len(revs)-1] {
-				writeErr(w, http.StatusForbidden, "Only revisions marked keepForever can be downloaded")
-				return
-			}
 			w.Header().Set("Content-Type", "application/octet-stream")
 			_, _ = w.Write(rev.body)
 		default:
@@ -566,9 +574,7 @@ func (f *fakeDrive) serveUpload(w http.ResponseWriter, r *http.Request) {
 		got.Name = in.Name
 	}
 	f.writeBodyLocked(got, body)
-	if in.ModifiedTime != "" {
-		got.ModifiedTime = in.ModifiedTime
-	}
+	f.datedLocked(got, in.ModifiedTime)
 	writeJSON(w, got)
 }
 
@@ -634,10 +640,21 @@ func (f *fakeDrive) createLocked(in *drive.File, body []byte) *drive.File {
 	f.files[in.Id] = in
 	asked := in.ModifiedTime
 	f.writeBodyLocked(in, body)
-	if asked != "" {
-		in.ModifiedTime = asked
-	}
+	f.datedLocked(in, asked)
 	return in
+}
+
+// datedLocked applies a modifiedTime the write asked for, to the file and to
+// the revision the write just made, as Drive does — which is what puts that
+// revision wherever the time says in revisions.list.
+func (f *fakeDrive) datedLocked(file *drive.File, asked string) {
+	if asked == "" {
+		return
+	}
+	file.ModifiedTime = asked
+	if revs := f.revs[file.Id]; len(revs) > 0 && revs[len(revs)-1].Id == file.HeadRevisionId {
+		revs[len(revs)-1].ModifiedTime = asked
+	}
 }
 
 // writeBodyLocked stores content and restamps the object, as a write does

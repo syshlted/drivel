@@ -1389,8 +1389,8 @@ func (e *Engine) sendWhole(ctx context.Context, p string, f *os.File, create boo
 		if err != nil {
 			return provider.RemoteFile{}, counted.n, err
 		}
-		if up.Displaced != nil {
-			e.keepDisplaced(ctx, p, *up.Displaced)
+		for _, d := range up.Displaced {
+			e.keepDisplaced(ctx, p, d)
 		}
 		return up.File, counted.n, nil
 	}

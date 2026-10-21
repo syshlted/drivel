@@ -200,6 +200,7 @@ type helperOptions struct {
 	driveRoot     string
 	driveDelete   string
 	driveSweep    string
+	driveCheck    string
 	lazy          bool
 	xattr         bool
 	resync        bool
@@ -331,6 +332,8 @@ func (h *helperArgs) resolve() (*helperOptions, error) {
 			c.driveDelete, err = stringValue(o)
 		case "drive-sweep-mode":
 			c.driveSweep, err = stringValue(o)
+		case "drive-overwrite-check":
+			c.driveCheck, err = stringValue(o)
 		case "lazy":
 			c.lazy, err = boolValue(o)
 		case "xattr":
@@ -729,6 +732,8 @@ func helperOptionSpec(h *helperArgs, c *helperOptions) (app.MountSpec, error) {
 		Delete:      gdconf.DeleteMode(c.driveDelete),
 		SweepMode:   gdconf.SweepMode(c.driveSweep),
 		IndexPath:   index,
+
+		OverwriteCheck: gdconf.OverwriteMode(c.driveCheck),
 	})
 	return spec, nil
 }

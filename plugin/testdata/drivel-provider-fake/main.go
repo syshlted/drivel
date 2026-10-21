@@ -76,6 +76,10 @@ type config struct {
 	// reports it in Uploaded.Displaced, readable through GetVersion, instead of
 	// refusing with ErrChanged first.
 	Displace bool `toml:"displace"`
+	// DisplaceAlso, with Displace, reports one more displaced version holding
+	// these bytes, older than the first: two edits that landed during one
+	// upload, which is a list across the socket and not one value.
+	DisplaceAlso string `toml:"displace-also"`
 }
 
 func factory(_ context.Context, p provider.Params) (provider.Store, error) {
@@ -243,10 +247,15 @@ func (f *fake) Upload(_ context.Context, path string, r io.Reader, opts provider
 	defer f.mu.Unlock()
 	var out provider.Uploaded
 	if moved {
+		if f.cfg.DisplaceAlso != "" {
+			e := provider.RemoteFile{Path: path, Size: int64(len(f.cfg.DisplaceAlso)), Hash: fmt.Sprintf("len:%d", len(f.cfg.DisplaceAlso)), Version: "also-" + current.Version}
+			f.versions[e.Version] = []byte(f.cfg.DisplaceAlso)
+			out.Displaced = append(out.Displaced, e)
+		}
 		d := current
 		d.Version = "was-" + current.Version
 		f.versions[d.Version] = f.files[path]
-		out.Displaced = &d
+		out.Displaced = append(out.Displaced, d)
 	}
 	f.files[path] = body
 	if !opts.Modified.IsZero() {

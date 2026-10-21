@@ -101,6 +101,9 @@ type Drive struct {
 	// deleteMode selects whether Remove trashes or permanently deletes. Fixed at
 	// open time; "" means DeleteTrash.
 	deleteMode DeleteMode
+	// overwriteMode selects which rewrites look for an edit they replaced.
+	// Fixed at open time; "" means OverwriteLarge.
+	overwriteMode OverwriteMode
 	// fanout overrides how many folder listings a scoped sweep issues at once.
 	// Zero means enumFanout. It exists as a field rather than a constant so a test
 	// can run the same fixture at one and at eight and compare, which is the only
@@ -245,6 +248,9 @@ type (
 	// DeleteMode selects what Remove does to an object remotely: the Drive trash,
 	// which is recoverable and is the default, or an outright unlink.
 	DeleteMode = gdconf.DeleteMode
+	// OverwriteMode selects which rewrites look afterwards for an edit they
+	// replaced (upload.go).
+	OverwriteMode = gdconf.OverwriteMode
 )
 
 const (
@@ -261,6 +267,14 @@ const (
 	DeleteTrash = gdconf.DeleteTrash
 	// DeletePermanent unlinks the object outright, with no undo.
 	DeletePermanent = gdconf.DeletePermanent
+
+	// OverwriteLarge checks rewrites of gdconf.OverwriteCheckMinSize or more. The
+	// default, and what "" means.
+	OverwriteLarge = gdconf.OverwriteLarge
+	// OverwriteAlways checks every rewrite of a synced file.
+	OverwriteAlways = gdconf.OverwriteAlways
+	// OverwriteOff checks none.
+	OverwriteOff = gdconf.OverwriteOff
 )
 
 // Open authenticates and returns a Drive provider that logs to the default
@@ -284,6 +298,12 @@ func open(ctx context.Context, cfg Config, lg *log.Logger) (*Drive, error) {
 	if !cfg.Delete.Valid() {
 		return nil, fmt.Errorf("delete %q: want \"trash\" or \"permanent\"", cfg.Delete)
 	}
+	// And here a misspelling of "off" would go on paying for checks, while one of
+	// "always" would leave small files unchecked — the setting asked for exactly
+	// because they are not.
+	if !cfg.OverwriteCheck.Valid() {
+		return nil, fmt.Errorf("overwrite-check %q: want \"large\", \"always\" or \"off\"", cfg.OverwriteCheck)
+	}
 	client, closer, err := buildHTTPClient(ctx, cfg.Credentials, cfg.Token, cfg.Scope)
 	if err != nil {
 		return nil, err
@@ -294,15 +314,16 @@ func open(ctx context.Context, cfg Config, lg *log.Logger) (*Drive, error) {
 		return nil, fmt.Errorf("creating drive service: %w", err)
 	}
 	d := &Drive{
-		svc:        svc,
-		close:      closer,
-		lg:         lg,
-		root:       cfg.RootID,
-		sweepMode:  cfg.SweepMode,
-		deleteMode: cfg.Delete,
-		idByPath:   map[string]string{"": cfg.RootID},
-		pathByID:   map[string]string{cfg.RootID: ""},
-		kids:       map[string]map[string]struct{}{},
+		svc:           svc,
+		close:         closer,
+		lg:            lg,
+		root:          cfg.RootID,
+		sweepMode:     cfg.SweepMode,
+		deleteMode:    cfg.Delete,
+		overwriteMode: cfg.OverwriteCheck,
+		idByPath:      map[string]string{"": cfg.RootID},
+		pathByID:      map[string]string{cfg.RootID: ""},
+		kids:          map[string]map[string]struct{}{},
 	}
 	if cfg.IndexPath != "" {
 		// A failure here is not fatal: the index only ever saves work, so we log it
@@ -399,6 +420,13 @@ func (d *Drive) upload(ctx context.Context, p string, r io.Reader, opts provider
 		// the object under an identity no baseline records (provider.Uploader).
 		meta.ModifiedTime = opts.Modified.UTC().Format(time.RFC3339Nano)
 	}
+	var before []*drive.Revision
+	checked := false
+	if exists && opts.Replaces != nil && !opts.Create {
+		if r, before, checked, err = d.checkBefore(ctx, p, id, r); err != nil {
+			return provider.Uploaded{}, err
+		}
+	}
 	var res *drive.File
 	if exists {
 		res, err = d.svc.Files.Update(id, meta).
@@ -415,9 +443,9 @@ func (d *Drive) upload(ctx context.Context, p string, r io.Reader, opts provider
 		return provider.Uploaded{}, classify(err)
 	}
 
-	var displaced *provider.RemoteFile
-	if exists && opts.Replaces != nil && !opts.Create {
-		displaced = d.displacedBy(ctx, p, res, *opts.Replaces)
+	var displaced []provider.RemoteFile
+	if checked {
+		displaced = d.displacedBy(ctx, p, id, res, before, *opts.Replaces)
 	}
 
 	d.mu.Lock()
