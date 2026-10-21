@@ -965,6 +965,17 @@ wait that returns on the first poll and assertions that race the new process.
 `mark`/`sawSince` is the fix; it was written twice before being noticed, once as a
 test that failed for the wrong reason and once as a test that passed for one.
 
+**A test that serves a mount in its own process waits for `Ready`, never for a
+probe file through the mountpoint** (2026-10-21; `docs/dev/testing.md` §"Tests
+that serve a mount in their own process" is the authority). The probe is visible
+before go-fuse's poll hack has run, and a file opened in that gap is registered
+with epoll by a raw syscall that sends FUSE `POLL` while holding a P — so a GC
+starting then deadlocks the process past its own `-timeout`, unkillable. That was
+the "unexplained" mount-setup hang: reproduced 5 of 5 at the earliest open, 0 of
+1000 after `Ready`, and a zombie from it had sat on the machine for three days.
+mmap through the mount (bbolt) and exec with a working directory inside it reach
+the same deadlock with no window at all.
+
 DESIGN.md §10 is a design note on carrying POSIX metadata (mode, ACLs, xattrs,
 SELinux) over Drive — unscheduled. If you touch it, the rule is that permission
 metadata from a remote source is *executable trust*: authenticate it, bind it to

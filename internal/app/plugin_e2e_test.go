@@ -47,6 +47,7 @@ func TestEndToEndOverAPluginBackend(t *testing.T) {
 		"seed":         []string{"existing.txt=was here first"},
 		"journal":      journal,
 	})
+	live := readyOn(&spec)
 
 	m, err := Open(t.Context(), spec, pluginRegistry(t))
 	if err != nil {
@@ -78,6 +79,10 @@ func TestEndToEndOverAPluginBackend(t *testing.T) {
 	}
 
 	// Outbound: a write through the mountpoint has to reach the other process.
+	// The sweep having run says nothing about the mount, which comes up apart.
+	if !liveWithin(live, 20*time.Second) {
+		t.Fatalf("the filesystem never came up at %s", spec.Mountpoint)
+	}
 	if err := os.WriteFile(filepath.Join(spec.Mountpoint, "written.txt"), []byte("through the mount"), 0o644); err != nil {
 		t.Fatalf("writing through the mount: %v", err)
 	}
@@ -108,6 +113,7 @@ func TestPluginBackendWithNoCapabilitiesStillMounts(t *testing.T) {
 	spec.ProviderConfig = provider.MustEncodeConfig(map[string]any{
 		"journal": journal,
 	})
+	live := readyOn(&spec)
 
 	m, err := Open(t.Context(), spec, pluginRegistry(t))
 	if err != nil {
@@ -127,7 +133,9 @@ func TestPluginBackendWithNoCapabilitiesStillMounts(t *testing.T) {
 		}
 	}()
 
-	waitMounted(t, spec)
+	if !liveWithin(live, 20*time.Second) {
+		t.Fatalf("the filesystem never came up at %s", spec.Mountpoint)
+	}
 	if err := os.WriteFile(filepath.Join(spec.Mountpoint, "x.txt"), []byte("hi"), 0o644); err != nil {
 		t.Fatalf("writing through the mount: %v", err)
 	}
@@ -140,27 +148,6 @@ func TestPluginBackendWithNoCapabilitiesStillMounts(t *testing.T) {
 	// pull loop at all is the first thing an operator needs from the log.
 	if !strings.Contains(out.String(), "capabilities: none") {
 		t.Errorf("the mount did not report the backend's capabilities:\n%s", out.String())
-	}
-}
-
-// waitMounted blocks until the filesystem is actually serving.
-//
-// Without it a test that writes to the mountpoint too early writes to the
-// *directory underneath* it instead — the write succeeds, no event is emitted,
-// and the assertion fails for a reason that has nothing to do with what is being
-// tested. The probe goes into the backing dir and is looked for through the
-// mount, because that pair can only both be true once the mount is up.
-func waitMounted(t *testing.T, spec MountSpec) {
-	t.Helper()
-	probe := ".mount-probe"
-	if err := os.WriteFile(filepath.Join(spec.DataDir, probe), []byte("x"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if !waitFor(20*time.Second, func() bool {
-		_, err := os.Stat(filepath.Join(spec.Mountpoint, probe))
-		return err == nil
-	}) {
-		t.Fatalf("the filesystem never came up at %s", spec.Mountpoint)
 	}
 }
 

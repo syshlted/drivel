@@ -127,36 +127,26 @@ func mountTest(t *testing.T, backing string, hyd mount.Hydrator, opts ...func(*m
 	for _, apply := range opts {
 		apply(&o)
 	}
+	// Wait for the mount to come live: until it does, the mountpoint is just an
+	// empty temp dir, so readiness has to be observed rather than assumed. By
+	// Ready, never by a probe file showing up through the mountpoint: the probe
+	// is visible before go-fuse's poll hack has run, and a file this process
+	// opens through its own mount in that gap can deadlock it against the GC
+	// (TestReadyComesAfterThePollHack).
+	ready := make(chan struct{})
+	o.Ready = func() { close(ready) }
 
 	served := make(chan error, 1)
 	go func() {
 		served <- NewBackend().Serve(ctx, o)
 	}()
 
-	// Wait for the mount to come live: until it does, the mountpoint is just an
-	// empty temp dir, so readiness has to be observed rather than assumed.
-	probe := filepath.Join(backing, ".mount-probe")
-	if err := os.WriteFile(probe, []byte("x"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	defer os.Remove(probe)
-
-	deadline := time.Now().Add(10 * time.Second)
-	ready := false
-	for time.Now().Before(deadline) {
-		if _, err := os.Stat(filepath.Join(mnt, ".mount-probe")); err == nil {
-			ready = true
-			break
-		}
-		select {
-		case err := <-served:
-			cancel()
-			testenv.Unavailable(t, testenv.FUSE, fmt.Sprintf("Serve returned before the mount came up: %v", err))
-		default:
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
-	if !ready {
+	select {
+	case <-ready:
+	case err := <-served:
+		cancel()
+		testenv.Unavailable(t, testenv.FUSE, fmt.Sprintf("Serve returned before the mount came up: %v", err))
+	case <-time.After(10 * time.Second):
 		cancel()
 		testenv.Unavailable(t, testenv.FUSE, "mount did not become ready within 10s")
 	}

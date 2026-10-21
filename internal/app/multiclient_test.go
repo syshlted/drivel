@@ -41,13 +41,6 @@ import (
 // scripts/multiclient.
 
 const (
-	// mountProbe is written into a peer's backing dir and then looked for through
-	// its mountpoint. Readiness has to be observed rather than assumed: until the
-	// mount is live the mountpoint is an ordinary directory and every assertion
-	// would pass against nothing. The ".drivel-" prefix is the one reconcile.skip
-	// already ignores, so the probe can never become test data.
-	mountProbe = ".drivel-mount-probe"
-
 	// fanoutWait bounds one change reaching every other peer: a 300ms debounce,
 	// then the 2s fast poll, then the apply. Generous, because a -race build on a
 	// loaded machine is not a quiet one.
@@ -261,6 +254,10 @@ func (p *peer) start() {
 	if p.running {
 		return
 	}
+	// Readiness has to be observed rather than assumed: until the mount is live
+	// the mountpoint is an ordinary directory and every assertion would pass
+	// against nothing. Ready, and not a probe file, for the reason on readyOn.
+	live := readyOn(&p.spec)
 	m, err := Open(p.t.Context(), p.spec, p.reg)
 	if err != nil {
 		p.t.Fatalf("%s: Open: %v", p.name, err)
@@ -270,13 +267,7 @@ func (p *peer) start() {
 	go func() { done <- m.Run(ctx) }()
 	p.mount, p.cancel, p.done, p.running = m, cancel, done, true
 
-	if err := os.WriteFile(p.data(mountProbe), []byte("x"), 0o644); err != nil {
-		p.t.Fatalf("%s: probe: %v", p.name, err)
-	}
-	if !waitFor(15*time.Second, func() bool {
-		_, err := os.Stat(p.mnt(mountProbe))
-		return err == nil
-	}) {
+	if !liveWithin(live, 15*time.Second) {
 		p.stop()
 		testenv.Unavailable(p.t, testenv.FUSE, p.name+": mount did not come up within 15s")
 	}

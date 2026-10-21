@@ -34,6 +34,43 @@ and install the `fuse3` package; without that the job tests less than it looks
 like it does. On a machine that genuinely cannot mount, leave the variable unset
 and expect the skips.
 
+## Tests that serve a mount in their own process
+
+`internal/vfs` and the fleet in `internal/app` mount a filesystem and then use it
+from the same process. That is safe only on three conditions, and breaking any of
+them produces a hang no timeout ends: the test binary sits in an unkillable state,
+`-timeout` never fires, and the process stays a zombie until its FUSE connection is
+aborted by hand.
+
+- **Wait for `Ready` before touching the mount** — `mount.Options.Ready`, or
+  `MountSpec.Ready` through `readyOn`/`liveWithin` in `internal/app`. Never poll
+  for a probe file through the mountpoint. On Linux, Go registers every regular
+  file it opens with epoll, by a raw syscall that keeps its goroutine running and
+  makes FUSE send a `POLL` request. go-fuse answers the first one with `ENOSYS`
+  from a file of its own, after which the kernel never asks again, and `Ready`
+  comes after that. A probe becomes visible before it does. Open a file inside
+  that gap while a GC is starting, and the GC cannot stop the world, the server
+  goroutines that would answer the `POLL` are parked behind it, and nothing
+  moves. The earliest possible open hung in 5 of 5 trials within 20 mounts; an
+  open straight after `Ready` ran 1000 of 1000.
+  `TestReadyComesAfterThePollHack` pins the ordering.
+- **Never mmap a file through the mount** — bbolt does, so no test opens a
+  database through one. A page fault on it is the same wait with no window at
+  all. A test that needs a database there needs a second process.
+- **Never start a process with its working directory inside the mount.** Go's
+  `fork`+`exec` suspends the parent goroutine, unpreemptibly, until the child
+  has `exec`ed, and a child that `chdir`s into the mount first is waiting on that
+  parent's FUSE server. Arguments that name files in the mount are fine; the
+  child only uses them after `exec`.
+
+The production mount never reaches any of these, because it never uses its own
+mountpoint (DESIGN.md §2.7's cardinal rule).
+
+To free a hung test: read the connection number from `/proc/self/mountinfo`
+(the device field's minor number) without touching the mount — `stat` on it blocks
+too — then `echo 1 | sudo tee /sys/fs/fuse/connections/N/abort`, mounting
+`fusectl` there first if the directory is empty.
+
 ## Tests that launch a real plugin process
 
 The `plugin` package and two tests in `internal/app` build a backend and run it as

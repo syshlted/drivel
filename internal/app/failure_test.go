@@ -621,7 +621,7 @@ func strays(t *testing.T, p *peer) []string {
 			return skipVanished(err)
 		}
 		// The claim marker is drivel's too, and permanent by design: not a stray.
-		if e.IsDir() || e.Name() == mountProbe || e.Name() == claim.Name {
+		if e.IsDir() || e.Name() == claim.Name {
 			return nil
 		}
 		if strings.HasPrefix(e.Name(), ".drivel-") {

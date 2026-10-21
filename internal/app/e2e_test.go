@@ -36,6 +36,7 @@ func TestEndToEndPushPullReconcile(t *testing.T) {
 	spec := baseSpec(t)
 	spec.Provider = "mem"
 	spec.Materialize = true // eager mode: materialising is a real download
+	live := readyOn(&spec)
 
 	m, err := Open(t.Context(), spec, registryWith(t, "mem", store))
 	if err != nil {
@@ -55,14 +56,7 @@ func TestEndToEndPushPullReconcile(t *testing.T) {
 		}
 	}()
 
-	probe := ".mount-probe"
-	if err := os.WriteFile(filepath.Join(spec.DataDir, probe), []byte("x"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if !waitFor(10*time.Second, func() bool {
-		_, err := os.Stat(filepath.Join(spec.Mountpoint, probe))
-		return err == nil
-	}) {
+	if !liveWithin(live, 10*time.Second) {
 		testenv.Unavailable(t, testenv.FUSE, "mount did not come up within 10s")
 	}
 

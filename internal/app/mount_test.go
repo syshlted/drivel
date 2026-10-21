@@ -277,6 +277,7 @@ func TestRunServesAndDrainsToProvider(t *testing.T) {
 	spec := baseSpec(t)
 	spec.Provider = "fake"
 	store := newFakeStore()
+	live := readyOn(&spec)
 
 	m, err := Open(t.Context(), spec, registryWith(t, "fake", store))
 	if err != nil {
@@ -290,15 +291,8 @@ func TestRunServesAndDrainsToProvider(t *testing.T) {
 
 	// Readiness has to be observed, not assumed: until the mount is live the
 	// mountpoint is an ordinary directory, and a write to it would succeed
-	// without ever touching FUSE. Probe from the backing side instead.
-	probe := ".mount-probe"
-	if err := os.WriteFile(filepath.Join(spec.DataDir, probe), []byte("x"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if !waitFor(10*time.Second, func() bool {
-		_, err := os.Stat(filepath.Join(spec.Mountpoint, probe))
-		return err == nil
-	}) {
+	// without ever touching FUSE.
+	if !liveWithin(live, 10*time.Second) {
 		cancel()
 		<-done
 		testenv.Unavailable(t, testenv.FUSE, "mount did not come up within 10s")
@@ -341,6 +335,37 @@ func waitFor(d time.Duration, cond func() bool) bool {
 		time.Sleep(20 * time.Millisecond)
 	}
 	return false
+}
+
+// readyOn sets spec.Ready and returns what liveWithin waits on. Set it before
+// Open, which copies the spec, and afresh for every Run.
+//
+// A test touches a mount it is serving only once this says so, and never on
+// the strength of a probe file showing up through the mountpoint. The probe
+// answers as soon as the kernel's INIT is done, which is before go-fuse has run
+// its poll hack — and inside that gap the first file this process opens through
+// its own mount is registered with epoll by a raw syscall that makes FUSE send
+// POLL and holds a P while it waits for the answer. A GC that starts then can
+// never stop the world, the server goroutines that would answer are parked
+// behind it, and the test hangs past its own -timeout, unkillable. Ready is
+// called after the hack (vfs.TestReadyComesAfterThePollHack). The same deadlock
+// is reached at any time by mmapping a file through the mount, which is why no
+// test opens a bbolt database through one.
+func readyOn(spec *MountSpec) <-chan struct{} {
+	live := make(chan struct{})
+	var once sync.Once
+	spec.Ready = func() { once.Do(func() { close(live) }) }
+	return live
+}
+
+// liveWithin reports whether a mount set up with readyOn came up within d.
+func liveWithin(live <-chan struct{}, d time.Duration) bool {
+	select {
+	case <-live:
+		return true
+	case <-time.After(d):
+		return false
+	}
 }
 
 // The two pool sizes must reach the two different components. Asserted with

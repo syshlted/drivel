@@ -43,6 +43,7 @@ func TestAnAPIShutdownDrainsLikeASignal(t *testing.T) {
 			spec.PushDelay = time.Hour         // nothing goes out until the drain sends it
 			logs := &testLog{t: t, done: true} // kept, not printed
 			spec.Logger = log.New(logs, "", 0)
+			live := readyOn(&spec)
 
 			a, err := New(t.Context(), []MountSpec{spec}, registryWith(t, "mem", store))
 			if err != nil {
@@ -71,14 +72,7 @@ func TestAnAPIShutdownDrainsLikeASignal(t *testing.T) {
 			done := make(chan error, 1)
 			go func() { done <- a.Run(ctx) }()
 
-			probe := ".mount-probe"
-			if err := os.WriteFile(filepath.Join(spec.DataDir, probe), []byte("x"), 0o644); err != nil {
-				t.Fatal(err)
-			}
-			if !waitFor(10*time.Second, func() bool {
-				_, err := os.Stat(filepath.Join(spec.Mountpoint, probe))
-				return err == nil
-			}) {
+			if !liveWithin(live, 10*time.Second) {
 				cancel()
 				testenv.Unavailable(t, testenv.FUSE, "mount did not come up within 10s")
 			}
