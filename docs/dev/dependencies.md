@@ -236,7 +236,7 @@ It is needed only when the artwork is redrawn, so it is not installed by
 
 ## Upgrading
 
-`make vuln` (govulncheck) runs weekly in CI, on a schedule independent of commits,
+`make vuln` (govulncheck) runs nightly in CI, on a schedule independent of commits,
 because new CVEs land against unchanged code. Most of what it reports is the
 standard library, and a toolchain bump clears it in one move — see [Building →
 upgrading the Go toolchain](building.md#upgrading-the-go-toolchain).

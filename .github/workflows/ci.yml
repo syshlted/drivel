@@ -13,10 +13,12 @@ on:
   push:
     branches: [master]
   pull_request:
-  # New CVEs land without anyone touching the code, so the vuln job needs a
-  # heartbeat of its own.
+  # Nightly, and every job rather than just govulncheck: new CVEs land without
+  # anyone touching the code, and so do new runner images and the fuse3/attr
+  # packages the test job installs from them. Off the hour, because GitHub
+  # delays scheduled runs most at :00.
   schedule:
-    - cron: "0 6 * * 1"
+    - cron: "17 6 * * *"
   workflow_dispatch:
 
 permissions:

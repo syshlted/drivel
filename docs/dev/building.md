@@ -343,8 +343,12 @@ act --privileged                 # whole workflow
 act --privileged -j test         # one job
 ```
 
-Weekly `schedule:` runs exist for `govulncheck`: new CVEs land against unchanged
-code, so that job needs a heartbeat independent of commits.
+A nightly `schedule:` run (06:17 UTC) runs every job against unchanged code: new
+CVEs reach `govulncheck`, and a new runner image or apt package reaches the build
+and the test job, without anyone committing. On a public repository GitHub
+disables a scheduled workflow after 60 days with no repository activity, and a
+later push does not turn it back on — `gh workflow enable CI` does, and `gh
+workflow list --all` shows the state.
 
 ## Running the binary
 
