@@ -5,7 +5,7 @@ Google setup.
 
 ## 1. Install
 
-You need Go 1.27+ and a FUSE mount helper.
+You need Go and a FUSE mount helper ([versions](install.md#requirements)).
 
 ```sh
 # Linux: the mount helper (fusermount3)

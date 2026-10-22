@@ -4,7 +4,7 @@
 
 | | |
 | --- | --- |
-| **Go** | 1.27 or newer, to build. There are no pre-built binaries yet. |
+| **Go** | 1.27.3 or newer, to build. Any Go from 1.21 on downloads it for you unless `GOTOOLCHAIN=local` is set. There are no pre-built binaries yet. |
 | **A FUSE mount helper** | `fusermount3` on Linux (the `fuse3` package), macFUSE on macOS, the `fusefs` kernel module on FreeBSD. |
 | **A Google account** | And your own OAuth client — see [Google credentials](google-cloud-setup.md). |
 

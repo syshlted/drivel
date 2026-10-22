@@ -13,6 +13,13 @@ from source with `make build`.
 
 ## Unreleased
 
+### Building needs Go 1.27.3 — 2026-10-22
+
+Go 1.27.3 stops trusting a set of compromised intermediate certificates
+([GO-2026-6809](https://pkg.go.dev/vuln/GO-2026-6809)). Drivel checks Google
+Drive's certificate with Go's own code, so it is built with that release now. If you build with Go 1.21 or newer it is downloaded for
+you; with `GOTOOLCHAIN=local` and an older Go the build stops and says so.
+
 ### Google Drive's check for an edit made during an upload is fixed, and adjustable — 2026-10-21
 
 The check added on 20 October could keep an old version of a file as a conflict
