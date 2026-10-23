@@ -1,0 +1,102 @@
+# Builds a release when a v* tag is pushed: the CI gates on the tagged commit,
+# then `make dist`, then build-provenance attestations, then a DRAFT GitHub
+# release carrying the artefacts. A draft is deliberate: nothing is public until
+# someone has read the notes and the file list and pressed Publish. The tag is
+# public the moment it is pushed, which is why `make dist RELEASE_TAG=…` refuses
+# a build whose binaries do not say exactly that version.
+#
+# Pushed to master with a change to the recipe, or run by hand, it is a trial:
+# the same build, uploaded as a workflow artifact rather than released, so the
+# recipe is exercised before a tag depends on it. See docs/dev/releasing.md.
+
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+    branches: [master]
+    # Ignored for a tag push, which always runs; these limit the master trials.
+    paths:
+      - "packaging/**"
+      - "scripts/dist.sh"
+      - "scripts/release-notes.sh"
+      - "Makefile"
+      - ".github/workflows/release.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# One release at a time per ref, and never cancelled halfway: a cancelled run
+# can leave a draft with half its files attached.
+#
+# Not "release-<ref>": the called ci.yml takes "${{ github.workflow }}-<ref>",
+# and github.workflow inside a called workflow is the CALLER's name, Release.
+# Group names compare case-insensitively, so the two would be one group, which
+# the call would then wait on forever — GitHub cancels that as a deadlock.
+concurrency:
+  group: dist-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  # The whole of ci.yml, on the commit being released. CI has already run on it
+  # if it went through master, but a tag can name any commit, and this is the
+  # only point at which "the release passed the gates" is checked rather than
+  # assumed. A trial skips it: ci.yml runs on that push in its own right.
+  gates:
+    if: github.ref_type == 'tag'
+    uses: ./.github/workflows/ci.yml
+
+  dist:
+    needs: gates
+    # Run when the gates passed, or were skipped for a trial; never after they failed.
+    if: ${{ !failure() && !cancelled() }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write     # create the draft release
+      id-token: write     # sign the attestations with this workflow's identity
+      attestations: write
+    steps:
+      # The whole history and every tag: Go reads the version it stamps into the
+      # binary from the tag on HEAD, and a shallow checkout may not have it.
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+
+      - name: build the artefacts
+        run: make dist RELEASE_TAG=${{ github.ref_type == 'tag' && github.ref_name || '' }}
+
+      # One attestation per file in SHA256SUMS. `gh attestation verify FILE
+      # --repo syshlted/drivel` then proves the file was built by this workflow
+      # from this repository, which a checksum alone cannot.
+      - name: attest
+        if: github.ref_type == 'tag'
+        uses: actions/attest@v4
+        with:
+          subject-checksums: dist/SHA256SUMS
+
+      - name: write the release notes
+        if: github.ref_type == 'tag'
+        run: scripts/release-notes.sh "$GITHUB_REF_NAME" > "$RUNNER_TEMP/notes.md"
+
+      - name: create the draft release
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/* \
+            --draft --verify-tag \
+            --title "drivel $GITHUB_REF_NAME" \
+            --notes-file "$RUNNER_TEMP/notes.md"
+
+      - name: keep the trial's artefacts
+        if: github.ref_type != 'tag'
+        uses: actions/upload-artifact@v7
+        with:
+          name: dist
+          path: dist/
+          retention-days: 7

@@ -20,6 +20,9 @@ on:
   schedule:
     - cron: "17 6 * * *"
   workflow_dispatch:
+  # The release workflow runs these gates on the tagged commit before it builds
+  # anything from it.
+  workflow_call:
 
 permissions:
   contents: read

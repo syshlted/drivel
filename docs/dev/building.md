@@ -324,7 +324,8 @@ machines where skipping is the correct behaviour.
 [.github/workflows/ci.yml](../../.github/workflows/ci.yml) is a thin scheduler
 around the same make targets. Three jobs, all blocking: `static` (tidy, format,
 vet, build, lint), `test` (`test-full` on a runner with `fuse3` installed), and
-`govulncheck`.
+`govulncheck`. It is also a reusable workflow: the release workflow runs it on a
+tagged commit before building anything from it — see [releasing](releasing.md).
 
 CI takes its Go version from the `go` directive in `go.mod`, so that directive —
 not whatever is on your machine — is what CI builds and scans with. Bump it when

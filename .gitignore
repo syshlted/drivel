@@ -27,3 +27,6 @@ token.json
 /site/resources/
 /site/.hugo_build.lock
 /site/_vendor/
+
+# Release artefacts from `make dist`.
+/dist/

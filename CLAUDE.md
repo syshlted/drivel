@@ -129,7 +129,7 @@ Two published collections, split by audience, plus repo housekeeping:
   restating either.
 - `docs/dev/` — architecture (structure), workflows (sequence/decision diagrams),
   schema (the two bbolt DBs), dependencies (why each one), conventions (the
-  load-bearing rules), building, testing, new-provider, glossary, and the
+  load-bearing rules), building, testing, releasing, new-provider, glossary, and the
   multiclient test plan. These *do* cite `DESIGN.md §N`, for reasoning.
 - `docs/project/` — publishing to pkg.go.dev, marketing copy, the mascot's lore
   and drawing brief, and `licensing.md` (why MPL-2.0; the decision record).

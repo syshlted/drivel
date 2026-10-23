@@ -20,6 +20,10 @@ BUF_VERSION                ?= v1.58.0
 PROTOC_GEN_GO_VERSION      ?= v1.36.11
 PROTOC_GEN_GO_GRPC_VERSION ?= v1.6.0
 
+# The release packager (make dist): builds the .deb and .rpm, and like the rest
+# is pure Go, so a release needs no dpkg-deb or rpmbuild on the build machine.
+NFPM_VERSION ?= v2.47.0
+
 # Branch that lint-new measures "new" against.
 MAIN_BRANCH ?= master
 
@@ -56,6 +60,7 @@ GOVERSION := $(shell go env GOVERSION)
 GOLANGCI_LINT := $(BIN)/golangci-lint-$(GOLANGCI_LINT_VERSION)-$(GOVERSION)
 GOVULNCHECK   := $(BIN)/govulncheck-$(GOVULNCHECK_VERSION)-$(GOVERSION)
 BUF           := $(BIN)/buf-$(BUF_VERSION)-$(GOVERSION)
+NFPM          := $(BIN)/nfpm-$(NFPM_VERSION)-$(GOVERSION)
 
 # buf runs the two generators as `protoc-gen-go` and `protoc-gen-go-grpc` from
 # bin/, so these two keep their plain names. The stamped copies beside them are
@@ -243,10 +248,32 @@ proto-check: $(BUF) $(PROTOC_GEN_GO) $(PROTOC_GEN_GO_GRPC)
 		exit 1; \
 	}
 
-## clean: remove build output, installed tools and the test cache
+# --------------------------------------------------------------------- release
+
+# What a release ships, built by scripts/dist.sh, which says what each artefact
+# contains. The release workflow runs this target, so a trial here builds what CI
+# would.
+#
+# The platform list is the support claim, which is why it is short. A platform
+# goes in once its tests have run on it, not once it compiles: Linux and FreeBSD
+# on amd64 have; arm64 waits for a run on arm64 hardware, and macOS (darwin) for
+# a run on macOS. See docs/user/platforms.md.
+DIST           ?= $(CURDIR)/dist
+DIST_PLATFORMS ?= linux/amd64 freebsd/amd64
+RELEASE_TAG    ?=
+
+#> make dist                        # release artefacts into dist/, at this checkout's version
+#> make dist RELEASE_TAG=v0.1.0     # ...and refuse unless every binary says it is v0.1.0
+## dist: build the release tarballs, .deb and .rpm packages, and SHA256SUMS into dist/
+.PHONY: dist
+dist: $(NFPM)
+	DIST='$(DIST)' PLATFORMS='$(DIST_PLATFORMS)' NFPM='$(NFPM)' RELEASE_TAG='$(RELEASE_TAG)' \
+		scripts/dist.sh
+
+## clean: remove build output, release artefacts, installed tools and the test cache
 .PHONY: clean
 clean:
-	rm -rf $(BIN)
+	rm -rf $(BIN) $(DIST)
 	go clean -testcache
 
 ## install: binary, man page, shell completions + the mount(8) helper symlinks (Linux)
@@ -443,7 +470,7 @@ precommit: fmt-check license-check lint build
 #> make clean tools                 # reinstall the tools after a version bump
 ## tools: install the pinned tool binaries into bin/
 .PHONY: tools
-tools: $(GOLANGCI_LINT) $(GOVULNCHECK) $(BUF) $(PROTOC_GEN_GO) $(PROTOC_GEN_GO_GRPC)
+tools: $(GOLANGCI_LINT) $(GOVULNCHECK) $(BUF) $(PROTOC_GEN_GO) $(PROTOC_GEN_GO_GRPC) $(NFPM)
 
 # lefthook is the one tool this repo does not build: it is a hook runner rather
 # than a source-processing tool, so nothing about a gate depends on its version,
@@ -472,6 +499,11 @@ $(BUF):
 	@mkdir -p $(BIN)
 	GOBIN=$(BIN) go install github.com/bufbuild/buf/cmd/buf@$(BUF_VERSION)
 	@mv $(BIN)/buf $@
+
+$(NFPM):
+	@mkdir -p $(BIN)
+	GOBIN=$(BIN) go install github.com/goreleaser/nfpm/v2/cmd/nfpm@$(NFPM_VERSION)
+	@mv $(BIN)/nfpm $@
 
 # buf invokes these by their plain names, so each rule installs the plain binary
 # and copies it to the stamped path the dependency is expressed against.
