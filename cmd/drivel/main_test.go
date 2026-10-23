@@ -34,6 +34,9 @@ func TestParseCommand(t *testing.T) {
 		// its options. Only a bare help flag is a question about the program.
 		{"help after a subcommand stays with it", []string{"mount", "-h"}, "mount", []string{"-h"}},
 		{"help after login stays with it", []string{"login", "--help"}, "login", []string{"--help"}},
+		{"version word", []string{"version"}, "version", []string{}},
+		{"single dash version flag", []string{"-version"}, "version", []string{}},
+		{"double dash version flag", []string{"--version"}, "version", []string{}},
 		// Not a help flag: -hydrate-workers shares its first two characters.
 		{"a flag that merely starts with -h", []string{"-hydrate-workers", "2"}, "", []string{"-hydrate-workers", "2"}},
 	} {

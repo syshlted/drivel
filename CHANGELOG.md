@@ -13,6 +13,12 @@ from source with `make build`.
 
 ## Unreleased
 
+### `drivel version` — 2026-10-23
+
+`drivel version` (or `drivel --version`) prints which version you have, the commit
+it was built from, the Go version and platform, and the backends built in.
+Include it when you report a bug. See [install](docs/user/install.md).
+
 ### Building needs Go 1.27.3 — 2026-10-22
 
 Go 1.27.3 stops trusting a set of compromised intermediate certificates

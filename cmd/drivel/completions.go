@@ -183,6 +183,7 @@ func completionApp() (completion.App, error) {
 		Extra: []completion.Command{
 			{Name: "help", Summary: "Show top-level usage"},
 			{Name: "completion", Summary: "Print the completion script for bash or zsh"},
+			{Name: "version", Summary: "Print the version and build details"},
 		},
 	}
 	if err := checkHintsAreSpent(app); err != nil {

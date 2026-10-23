@@ -51,11 +51,13 @@ the backend a mount asked for. That is not a detail you have to manage, but it i
 why nothing that goes wrong inside a backend takes your filesystem down. If it
 crashes, the mount stays up and Drivel starts it again.
 
-To see which backends a `drivel` has:
+To see which version you have, and which backends it carries:
 
 ```sh
-drivel mount -h        # errors from a mount name the backends available
+drivel version
 ```
+
+Include that output when you report a bug.
 
 ### Backends that do not ship with Drivel
 

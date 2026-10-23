@@ -1,6 +1,6 @@
 .\" Manpage for drivel.
 .\" Render with:  man ./docs/drivel.1     or     mandoc -a docs/drivel.1
-.TH DRIVEL 1 "2026-10-17" "drivel" "User Commands"
+.TH DRIVEL 1 "2026-10-23" "drivel" "User Commands"
 .SH NAME
 drivel \- cloud-backed FUSE interceptor filesystem
 .SH SYNOPSIS
@@ -10,6 +10,8 @@ drivel \- cloud-backed FUSE interceptor filesystem
 .br
 .B drivel completion
 .RB { bash | zsh }
+.br
+.B drivel version
 .br
 .B drivel login
 .RB [ -account
@@ -375,6 +377,19 @@ or
 The protocol is HTTP and JSON over the socket, documented for other tools in
 .I docs/dev/control-api.md
 in the source tree.
+.TP
+.B version
+Print the version, the commit it was built from, the Go toolchain and platform,
+and the backends built in, then exit. The first line is
+.B drivel
+and the version alone, for scripts. A release prints its tag; a build from a
+source checkout prints a version derived from its commit, ending in
+.B +dirty
+if the tree had uncommitted changes. The flag spellings
+.B -version
+and
+.B --version
+do the same when they are the first argument.
 .TP
 .B help
 Print top-level usage and exit. The flag spellings

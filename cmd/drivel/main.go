@@ -12,6 +12,7 @@
 //	drivel mount  [flags]   # mount and sync (default if no subcommand given)
 //	drivel status [flags] [PATH...]  # ask a running drivel (mount -control) what it is doing
 //	drivel pause | resume | stop     # ...and tell it to stop doing it
+//	drivel version                   # what this binary is, for a bug report
 //
 // It is also the mount(8) helper for /etc/fstab, when invoked through the
 // /sbin/mount.fuse.drivel symlink or as `drivel mount-helper` (Linux only), and
@@ -69,6 +70,8 @@ func main() {
 		fail(runResume(args))
 	case "stop":
 		fail(runStop(args))
+	case "version":
+		fail(runVersion(args))
 	case plugin.ServeCommand:
 		// This program as one of the backends it carries (M23). Hidden on purpose
 		// — it is not a command anyone has a reason to run, and it is absent from
@@ -101,6 +104,10 @@ func parseCommand(args []string) (string, []string) {
 	switch args[0] {
 	case "-h", "-help", "--help":
 		return "help", args[1:]
+	case "-version", "--version":
+		// The spelling most programs answer, so it is the one typed first. Left to
+		// mount, it would be "flag provided but not defined: -version".
+		return "version", args[1:]
 	}
 	if strings.HasPrefix(args[0], "-") {
 		return "", args
@@ -140,6 +147,7 @@ Usage:
   drivel pause | resume    Hold a running drivel's syncing for a while, or end the hold
   drivel stop              Unmount and drain a running drivel, as SIGTERM would
   drivel completion SHELL  Print the completion script for bash or zsh
+  drivel version           Print the version and build details
 
 Run 'drivel COMMAND -h' for a command's flags.
 
