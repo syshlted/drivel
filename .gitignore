@@ -30,3 +30,6 @@ token.json
 
 # Release artefacts from `make dist`.
 /dist/
+
+# The release list the website renders, written by the Pages workflow.
+/site/data/releases.json

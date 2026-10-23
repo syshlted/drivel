@@ -1,0 +1,17 @@
+{{- /*
+  One download link on the releases page, and its size. See
+  _shortcodes/releases.html.
+
+  @param {map}    asset  One entry of a GitHub release's "assets" list.
+  @param {string} label  The link text. Default: the file's name. The download
+                         table passes the format alone, since its row and column
+                         already say the rest; the full name stays as the title.
+*/ -}}
+{{- $a := .asset -}}
+{{- $size := float $a.size -}}
+<a href="{{ $a.browser_download_url }}" title="{{ $a.name }}">{{ .label | default $a.name }}</a> <span class="drivel-asset-size">
+  {{- if ge $size 1000000 }}{{ printf "%.1f MB" (div $size 1000000) }}
+  {{- else if ge $size 1000 }}{{ printf "%.1f kB" (div $size 1000) }}
+  {{- else }}{{ printf "%.0f bytes" $size }}{{ end -}}
+</span>
+{{- /* trailing newline trimmed */ -}}

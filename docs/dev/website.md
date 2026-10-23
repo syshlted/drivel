@@ -109,10 +109,42 @@ and Hextra both style that already, so one form is loud in the repository and on
 the website with no second copy. When it stops being true it comes out of all of
 them together.
 
+## The releases page reads GitHub, through the workflow
+
+`/releases/` lists every published release with its downloads, from
+`layouts/_shortcodes/releases.html`. Its data is GitHub's own release list,
+which the Pages workflow writes to `site/data/releases.json` in a step of its
+own just before Hugo runs — the file is gitignored, so there is no committed copy
+to go stale. Two things decide that shape:
+
+- **The workflow fetches it, not Hugo.** Hugo could, with `resources.GetRemote`,
+  but it would need the workflow's token to stay under the API's rate limit, and
+  any template — the theme's included — can read a `HUGO_*` variable. Kept in a
+  `gh api` step, the token never reaches a template, and the build makes no
+  request of its own.
+- **A production build without the file fails.** A deploy that lost the step
+  would otherwise publish a page saying nothing was ever released. `hugo server`
+  warns instead and says how to fetch it for a preview:
+
+  ```sh
+  site/ $ gh api 'repos/syshlted/drivel/releases?per_page=100' > data/releases.json
+  ```
+
+Platforms are recognised from the names `scripts/dist.sh` gives the files, and a
+file that matches no pattern is still listed, under "Other files" — so renaming
+an artefact costs tidiness on the page, never a missing download.
+
 ## Deploys
 
 On push to `master` touching `site/**` or `docs/user/**`. Only `site/public` is
 uploaded, so nothing else in the tree becomes a published URL.
+
+**Publishing, editing, unpublishing or deleting a release redeploys too**, since
+the releases page changes. That run is on the release's *tag*, and the
+`github-pages` environment accepts a deploy from `master` only, so it deploys
+nothing itself: its one job dispatches an ordinary run on `master`. A
+`workflow_dispatch` is the one event a workflow's own token can start a run
+with.
 
 Two repository settings the workflow cannot control: the repository must be
 public, and **Settings → Pages → Source must be "GitHub Actions"**.

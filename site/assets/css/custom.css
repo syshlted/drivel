@@ -26,6 +26,11 @@
   --drivel-warn-ink: #ffffff;
 
   --drivel-kicker-ink: #8a7d6c;
+
+  --drivel-badge: #166534;
+  --drivel-badge-pre: #92400e;
+  --drivel-badge-ink: #ffffff;
+  --drivel-muted-ink: #6b6257;
 }
 
 html.dark,
@@ -36,6 +41,11 @@ body.dark {
   --drivel-warn: #f43f5e;
 
   --drivel-kicker-ink: #a99a85;
+
+  --drivel-badge: #4ade80;
+  --drivel-badge-pre: #fbbf24;
+  --drivel-badge-ink: #111111;
+  --drivel-muted-ink: #a99a85;
 }
 
 /*
@@ -160,4 +170,56 @@ body::before {
   font-size: 0.82rem;
   letter-spacing: 0.12em;
   color: var(--drivel-kicker-ink);
+}
+
+/*
+ * The releases page (layouts/_shortcodes/releases.html).
+ *
+ * The download table is the one thing on the site wider than a phone, so it
+ * scrolls inside its own box rather than making the page scroll sideways. The
+ * badges are the only colour on the page and carry a word as well, so neither
+ * meaning depends on telling green from amber.
+ */
+.drivel-release {
+  margin-top: 2.5rem;
+}
+
+.drivel-release-meta,
+.drivel-asset-size {
+  color: var(--drivel-muted-ink);
+}
+
+.drivel-asset-size {
+  font-size: 0.8em;
+  white-space: nowrap;
+}
+
+.drivel-badge {
+  display: inline-block;
+  margin-left: 0.4rem;
+  padding: 0 0.45rem;
+  border-radius: 0.3rem;
+  background: var(--drivel-badge);
+  color: var(--drivel-badge-ink);
+  font-size: 0.75rem;
+  font-weight: 600;
+  line-height: 1.5;
+  vertical-align: 0.1em;
+}
+
+.drivel-badge-pre {
+  background: var(--drivel-badge-pre);
+}
+
+.drivel-downloads {
+  overflow-x: auto;
+}
+
+.drivel-release-notes {
+  margin-top: 1rem;
+}
+
+.drivel-release-notes > summary {
+  cursor: pointer;
+  font-weight: 600;
 }

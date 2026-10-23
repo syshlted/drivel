@@ -1,0 +1,119 @@
+{{- /*
+  The list on /releases/: every published release, newest first, with its
+  downloads grouped by platform, its checksums, and its notes folded away.
+
+  It reads data/releases.json, which is GitHub's own list
+  (GET /repos/syshlted/drivel/releases) written by the Pages workflow just
+  before the build. That step, not this template, is what talks to GitHub, so
+  the workflow's token never reaches Hugo -- where any template, the theme's
+  included, could read it -- and a build makes no network request of its own.
+  The file is gitignored: a committed copy would be a second, stale answer to
+  "what has been released?".
+
+  A production build without the file is an error, so a deploy that lost the
+  step fails rather than publishing a page that says nothing was ever released.
+  `hugo server` without it says how to fetch it, and carries on.
+
+  Platforms are recognised from the file names scripts/dist.sh gives them, and
+  anything that does not match is still listed, under "Other files", so a
+  change of naming there costs tidiness here and never a missing download.
+
+  Styling is plain HTML plus drivel- classes from assets/css/custom.css; see the
+  rule about hx: classes in docs/dev/website.md.
+
+  @example {{< releases >}}
+*/ -}}
+
+{{- $releases := index hugo.Data "releases" -}}
+{{- if not (reflect.IsSlice $releases) -}}
+  {{- if hugo.IsProduction -}}
+    {{- errorf "releases: data/releases.json is missing or not a list; the Pages workflow writes it before building" -}}
+  {{- end -}}
+  {{- warnf "releases: no data/releases.json; to preview the list, run from site/: gh api 'repos/syshlted/drivel/releases?per_page=100' > data/releases.json" -}}
+  {{- $releases = slice -}}
+{{- end -}}
+
+{{- $published := where $releases "draft" false -}}
+
+{{- /* GitHub lists newest first; "Latest" is its own meaning of the word, the
+       newest release that is not a pre-release. */ -}}
+{{- $latest := "" -}}
+{{- with where $published "prerelease" false -}}
+  {{- $latest = (index . 0).tag_name -}}
+{{- end -}}
+
+{{- $osNames := dict "linux" "Linux" "freebsd" "FreeBSD" "darwin" "macOS" -}}
+{{- $archNames := dict "amd64" "x86-64" "arm64" "ARM64" -}}
+{{- $rpmArches := dict "amd64" "x86_64" "arm64" "aarch64" -}}
+{{- $tarRE := `^drivel-.+-([a-z0-9]+)-([a-z0-9]+)\.tar\.gz$` -}}
+
+{{- if not $published }}
+<p>No release has been published yet. Until there is one, install from source:
+see <a href="{{ relref $.Page "/docs/install" }}">Installing</a>.</p>
+{{- end -}}
+
+{{- range $published -}}
+{{- $assets := sort .assets "name" -}}
+<section class="drivel-release" id="{{ .tag_name }}">
+<h2>{{ .tag_name }}</h2>
+<p class="drivel-release-meta">
+  {{- time.AsTime .published_at | time.Format "2 January 2006" -}}
+  {{- if eq .tag_name $latest }} <span class="drivel-badge">Latest</span>{{ end -}}
+  {{- if .prerelease }} <span class="drivel-badge drivel-badge-pre">Pre-release</span>{{ end }}
+  · <a href="{{ .html_url }}">on GitHub</a>
+</p>
+
+<div class="drivel-downloads">
+<table>
+<thead><tr><th>Platform</th><th>Archive</th><th>Debian, Ubuntu</th><th>Fedora, RPM</th></tr></thead>
+<tbody>
+{{- range $tar := $assets }}
+  {{- with findRESubmatch $tarRE $tar.name 1 }}
+    {{- $os := index (index . 0) 1 }}
+    {{- $arch := index (index . 0) 2 }}
+    {{- $deb := "" }}
+    {{- $rpm := "" }}
+    {{- if eq $os "linux" }}
+      {{- range $assets }}
+        {{- if strings.HasSuffix .name (printf "_%s.deb" $arch) }}{{ $deb = . }}{{ end }}
+        {{- if strings.HasSuffix .name (printf ".%s.rpm" (index $rpmArches $arch | default $arch)) }}{{ $rpm = . }}{{ end }}
+      {{- end }}
+    {{- end }}
+<tr>
+  <td>{{ index $osNames $os | default $os }} {{ index $archNames $arch | default $arch }}</td>
+  <td>{{ partial "drivel-asset-link.html" (dict "asset" $tar "label" ".tar.gz") }}</td>
+  <td>{{ with $deb }}{{ partial "drivel-asset-link.html" (dict "asset" . "label" ".deb") }}{{ else }}—{{ end }}</td>
+  <td>{{ with $rpm }}{{ partial "drivel-asset-link.html" (dict "asset" . "label" ".rpm") }}{{ else }}—{{ end }}</td>
+</tr>
+  {{- end }}
+{{- end }}
+</tbody>
+</table>
+</div>
+
+{{- $others := slice }}
+{{- range $assets }}
+  {{- if not (or (findRE $tarRE .name 1) (strings.HasSuffix .name ".deb") (strings.HasSuffix .name ".rpm") (eq .name "SHA256SUMS")) }}
+    {{- $others = $others | append (slice .) }}
+  {{- end }}
+{{- end }}
+<p class="drivel-release-files">
+{{- range where $assets "name" "SHA256SUMS" }}
+  Checksums: {{ partial "drivel-asset-link.html" (dict "asset" .) }}.
+{{- end }}
+{{- with $others }}
+  Other files:
+  {{- range $i, $a := . }}{{ if $i }},{{ end }} {{ partial "drivel-asset-link.html" (dict "asset" $a) }}{{ end }}.
+{{- end }}
+  Which file to choose, how to install it and how to check it:
+  <a href="{{ relref $.Page "/docs/install" }}">Installing</a>.
+</p>
+
+{{- with .body }}
+<details class="drivel-release-notes">
+<summary>Release notes</summary>
+{{ $.Page.RenderString (dict "display" "block") . }}
+</details>
+{{- end }}
+</section>
+{{- end -}}

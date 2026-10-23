@@ -25,6 +25,11 @@ on:
       - "docs/user/**"
       - ".github/workflows/pages.yml"
   workflow_dispatch:
+  # The releases page lists what has been published, so publishing, editing or
+  # withdrawing a release changes the site with nothing in the tree touched. A
+  # draft's events never arrive here: GitHub does not send them for drafts.
+  release:
+    types: [published, edited, unpublished, deleted]
 
 permissions:
   contents: read
@@ -42,7 +47,22 @@ defaults:
     shell: bash
 
 jobs:
+  # A release event runs on the release's TAG, and the github-pages environment
+  # accepts deployments from master only, so a deploy from here would be refused.
+  # This asks for an ordinary run on master instead: workflow_dispatch is the one
+  # event a run can start with this workflow's own token.
+  redeploy:
+    if: github.event_name == 'release'
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+    steps:
+      - env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run pages.yml --repo "$GITHUB_REPOSITORY" --ref master
+
   deploy:
+    if: github.event_name != 'release'
     runs-on: ubuntu-latest
     environment:
       name: github-pages
@@ -70,6 +90,17 @@ jobs:
           mkdir -p "${HOME}/.local/hugo"
           tar -C "${HOME}/.local/hugo" -xf "hugo_extended_${HUGO_VERSION}_linux-amd64.tar.gz"
           echo "${HOME}/.local/hugo" >> "${GITHUB_PATH}"
+
+      # The releases page's data, fetched here and not by Hugo, so the token
+      # stays in this step: a template -- the theme's included -- can read any
+      # HUGO_* variable, and this job's token can deploy the site. Drafts are
+      # not visible to it, and the page filters them out regardless.
+      - name: Read the published releases
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p site/data
+          gh api "repos/${GITHUB_REPOSITORY}/releases?per_page=100" > site/data/releases.json
 
       - name: Setup Pages
         id: pages
